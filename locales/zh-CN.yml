@@ -57,15 +57,13 @@ settings.appearance: 外观
 settings.providers: 服务商
 settings.usage: 用量
 settings.daemon: 守护进程
-settings.computer_use: 电脑操作
 settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本
 settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体
-settings.providers_keywords: 服务商 智能体 模型 命令行 版本 安装 检测 claude codex cursor opencode amp grok pi
+settings.providers_keywords: 服务商 智能体 模型 claude codex cursor opencode amp grok pi
 settings.skills: 技能
 settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
 settings.usage_keywords: 用量 令牌 费用 支出 缓存 每日 图表 模型 明细 历史 claude codex
 settings.daemon_keywords: 守护进程 服务 远程 网页 网络 暴露 来源 令牌 端口 websocket
-settings.computer_use_keywords: 电脑操作 屏幕录制 辅助功能 应用 控制 codex
 settings.back: 返回
 settings.search: 搜索设置
 daemon.expose_title: 暴露由 Waku 管理的守护进程
@@ -162,9 +160,18 @@ settings.automatic_updates_description: 在后台检查新版本，并在发现�
 settings.share_anonymous_usage_data: 分享匿名使用数据
 settings.share_anonymous_usage_data_description: 分享功能使用情况和可靠性数据，帮助改进 Waku。不会包含提示词、回复、项目名称、文件路径等个人信息
 providers.coding_agents: 编程智能体
-providers.description: Waku 调用安装在这台 Mac 上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新
-providers.web_description: Waku 调用安装在守护进程主机上的智能体命令行工具。请先安装相应工具或完成登录，然后刷新
+providers.description: 直接配置模型端点。Waku 不会显示或存储 API 密钥值
+providers.web_description: 直接在守护进程主机上配置模型端点。Waku 不会显示或存储 API 密钥值
 providers.check_failed: "无法检查 %{command}：%{error}"
+providers.catalog_models: 来自实时目录的模型
+providers.not_authenticated: 未连接
+providers.api_key_placeholder: 输入 API 密钥（提交后清除）
+providers.connect: 连接
+providers.sign_in: 登录
+providers.logout: 登出
+providers.browser_waiting: 请在系统浏览器中完成登录
+providers.open_browser: 打开浏览器
+providers.use_device_code: 改用设备码
 providers.show_settings: 显示 %{provider} 设置
 providers.hide_settings: 隐藏 %{provider} 设置
 providers.enable: 启用 %{provider}
@@ -172,31 +179,6 @@ providers.disable: 禁用 %{provider}
 providers.disabled_for_new_tasks: 新建任务时不可用
 providers.model_count_one: "%{count} 个模型"
 providers.model_count_many: "%{count} 个模型"
-providers.not_detected_as: 未在 PATH 中找到 %{command}
-providers.using_override: 正在使用 %{path}，不再从 PATH 自动检测
-providers.invalid_override: 此路径下没有可执行文件。清空后可恢复从 PATH 自动检测
-providers.detected_at: 已在 %{path} 检测到
-providers.detected_as: 已检测到 %{command}
-providers.searches_path: Waku 未在 PATH 中找到 %{command}
-providers.binary_path: 可执行文件路径
-providers.binary_path_description: Waku 用于启动 %{provider} 的可执行文件。按 Return 应用；留空则从 PATH 自动检测
-providers.checked_just_now: 刚刚检查过
-providers.checked_minutes_ago: "%{count} 分钟前检查过"
-providers.checked_hours_ago: "%{count} 小时前检查过"
-computer_use.allow_apps: 允许 Waku 操作其他应用
-computer_use.availability: Codex、OpenCode、Grok 和 Pi 支持电脑操作功能
-computer_use.macos_access: macOS 权限
-computer_use.helper_access: 请向 Waku 的独立控制助手 %{helper} 授予权限
-computer_use.screen_recording: 屏幕录制
-computer_use.screen_recording_description: 仅截取已允许应用的窗口
-computer_use.accessibility: 辅助功能
-computer_use.accessibility_description: 获得批准后发送鼠标与键盘操作
-computer_use.always_allowed_apps: 始终允许的应用
-computer_use.always_allowed_apps_description: Waku 会将授权绑定到应用的 Bundle ID 和签名团队
-computer_use.no_always_allowed_apps: 尚未始终允许任何应用。仅限当前任务的授权只会保存在内存中
-computer_use.access_granted: 已授权
-computer_use.grant_access: 授予权限
-computer_use.permission_check_failed: 无法检查电脑操作权限
 common.settings: 设置
 common.copy: 复制
 common.remove: 移除
@@ -373,37 +355,12 @@ mode.build: 构建
 mode.plan: 计划
 mode.supervised: 监督
 mode.auto_accept_edits: 自动接受修改
-mode.auto: 自动
 mode.full_access: 完全访问
 mode.plan_description: 仅检查并制定计划，不进行任何修改
 mode.supervised_description: 执行命令或修改文件前先征求许可
 mode.auto_accept_edits_description: 自动批准文件修改，执行其他操作前先询问
-mode.auto_description: 由 AI 审核并批准常规操作；高风险操作仍会询问
 mode.full_access_description: 无需确认即可执行命令和修改文件
 mode.switch_to: 切换为%{mode}
-agent_preset.standard: 标准模式
-agent_preset.code: 代码模式
-agent_preset.minimal: 极简模式
-agent_preset.creator: 创造模式
-agent_preset.standard_description: 功能完整的编码 Agent，支持文件编辑、Shell、文件与网页检索、Skills、计划、目标、子代理和工作流。
-agent_preset.code_description: 具备标准模式的全部能力，并通过 Code Mode SDK 提供工具，让模型在一个 TypeScript 程序中组合多步操作。
-agent_preset.minimal_description: 仅提供持久 bash 与 str_replace_editor 的双工具编码 Agent。
-agent_preset.creator_description: 用于创建自定义 Agent 预设：具备标准模式的全部能力，并提供运行时检查、插件实验和预设创作指导。
-agent_preset.custom: 自定义
-agent_preset.no_description: 暂无描述。
-agent_preset.minimal_no_plan: 极简模式不包含计划功能
-computer_use.allow_for_task: 本次任务允许
-computer_use.always_allow_app: 始终允许此应用
-computer_use.allow_control: 允许 Waku 控制“%{app}”吗？
-computer_use.screenshot_shared: 此窗口的截图将发送给当前使用的 Codex 模型
-computer_use.sensitive_action: 此操作可以输入文字或按下按键
-computer_use.bundle_id: "Bundle ID：%{id}"
-computer_use.no_bundle_id: 此应用没有 Bundle ID，因此无法设为始终允许
-computer_use.stopped: 已停止
-computer_use.controlling: 正在控制
-computer_use.captured: 已截取
-computer_use.take_control: 接管
-computer_use.preparing_preview: 正在准备预览…
 common.deny: 拒绝
 permission.allow_once: 仅允许一次
 permission.allow_for_session: 本次任务允许
@@ -431,8 +388,15 @@ models.remove_favorite: 从收藏中移除
 models.standard: 标准
 models.reasoning: 推理强度
 models.service_tier: 服务等级
+models.catalog_loading: 正在加载模型目录…
+models.catalog_error: 模型目录不可用
+models.catalog_live: 实时
+models.catalog_cache: 缓存
+models.catalog_seed: 内置
+models.unsupported: 不支持
 models.context_window: 上下文窗口
 model_option.none: 无
+model_option.none_description: 不发送服务等级覆盖值
 model_option.minimal: 最低
 model_option.low: 低
 model_option.medium: 中
@@ -443,10 +407,14 @@ model_option.ultra: 超高
 model_option.ultracode: Ultracode
 model_option.context_200k: 200K
 model_option.context_1m: 1M
-model_option.auto: 自动
-model_option.fast: 快速
-model_option.amp_fast_description: 使用 Amp 的快速服务等级，但会消耗更多用量
-model_option.fast_description: 更快获得回复，但会消耗更多用量
+model_option.auto: 自动路由
+model_option.auto_description: 让服务商选择服务等级
+model_option.default: 默认
+model_option.default_description: 使用服务商标准服务等级
+model_option.flex: Flex
+model_option.flex_description: 可用时以更低用量换取更高延迟
+model_option.priority: 优先
+model_option.priority_description: 以更高用量优先获得更快响应
 command_scope.project: 项目
 command_scope.user: 用户
 command_scope.skill: 技能
@@ -571,7 +539,7 @@ errors.provider_native_thread_unavailable: "%{provider} 的原生线程不可用
 errors.provider_native_cursor_unavailable: "%{provider} 的原生会话位置不可用"
 errors.provider_native_thread_cursor_unavailable: "%{provider} 的原生线程位置不可用"
 errors.provider_waku_task_unavailable: "%{provider} 对应的 Waku 任务不可用"
-errors.provider_not_installed: "尚未安装 %{provider}"
+errors.provider_not_installed: "%{provider} 尚未配置"
 errors.provider_not_found: "尚未安装 %{provider}，或无法找到该程序"
 errors.claude_fork_checkpoint_missing: Claude 未返回派生任务所需的检查点
 errors.claude_turn_checkpoint_unavailable: "Claude 中该轮任务的原生检查点不可用：%{error}"
@@ -622,7 +590,6 @@ errors.read_provider_event_stream: "无法读取 %{provider} 事件流：%{error
 errors.answer_provider_permission: "无法响应 %{provider} 的权限请求：%{error}"
 errors.answer_provider_question: "无法回答 %{provider} 的问题：%{error}"
 errors.initialize_codex_app_server: 无法初始化 Codex app-server
-errors.register_computer_use_skill: 无法向 Codex 注册 Waku 电脑操作技能
 errors.codex_thread_open_incomplete: Codex 未能完成线程打开操作
 errors.provider_receive_prompt: "%{provider} 未能接收消息"
 errors.provider_start_turn: "%{provider} 未能开始本轮"
@@ -857,12 +824,11 @@ duration.seconds_short: "%{count} 秒"
 duration.minutes_short: "%{count} 分"
 duration.hours_short: "%{count} 小时"
 duration.two_units: "%{first} %{second}"
-usage.scan_summary: 已扫描 %{scanned} 份对话记录（%{skipped} 份不在所选时段内）· %{records} 条用量记录 · %{seconds} 秒
 usage.daily: 每日
 usage.monthly: 每月
 usage.projects: 项目
-usage.scanning: 正在扫描服务商的对话记录…
-usage.rescan: 重新扫描服务商的对话记录
+usage.scanning: 正在加载用量…
+usage.rescan: 刷新用量
 usage.range: "%{start} 至 %{end}"
 usage.full_api_rate_note: "* 按完整 API 费率估算"
 usage.sessions_summary: 汇总 %{count} 个任务的输入、缓存读取和输出
@@ -931,7 +897,7 @@ usage.model_many: "%{count} 个模型"
 usage.active_day_one: "%{count} 个活跃日"
 usage.active_day_many: "%{count} 个活跃日"
 usage.filter_projects: 筛选项目…
-usage.chart_description: Claude Code 与 Codex 的每日%{metric}分布。
+usage.chart_description: 各提供方的每日%{metric}分布。
 usage.refresh_failed: "用量刷新失败：%{error}"
 usage.context_used: 上下文窗口已使用 %{percent}%（%{shortcut}）
 usage.shortcut: 用量（%{shortcut}）
@@ -955,33 +921,15 @@ usage.resets_in_minutes: "%{count} 分钟后重置"
 usage.resets_in_hours: "%{count} 小时后重置"
 usage.resets_in_hours_minutes: "%{hours} 小时 %{minutes} 分钟后重置"
 usage.resets_date: 将于 %{date} 重置
-usage_error.signin_cannot_read: "%{provider} 登录状态无法读取用量（HTTP %{status}）。运行一次 %{provider} 任务后即可刷新"
-usage_error.rate_limited: 用量接口当前受到速率限制，请稍后再试
-usage_error.http_status: 用量接口返回了 HTTP %{status}
-usage_error.invalid_json: 用量接口返回了无效的 JSON
-usage_error.no_home_directory: 找不到用户主目录
-usage_error.read_file: 无法读取 %{path}
-usage_error.codex_auth_invalid: Codex auth.json 不是有效的 JSON
-usage_error.codex_access_token_missing: Codex auth.json 中没有访问令牌；请运行 `codex login`
-usage_error.opencode_go_key_rejected: OpenCode Go API 密钥无法读取用量（HTTP %{status}）；请重新连接 OpenCode Go
-usage_error.no_rate_limit_windows: 用量接口未返回任何速率限制周期
-usage_error.start_grok_probe: 无法启动 `grok agent stdio`
-usage_error.grok_stdin_unavailable: Grok 的标准输入不可用
-usage_error.grok_stdout_unavailable: Grok 的标准输出不可用
-usage_error.start_grok_reader: 无法启动 Grok 探测读取器
-usage_error.grok_billing_timeout: Grok 未在规定时间内响应账单请求
-usage_error.grok_answered: "Grok 返回：%{error}"
-usage_error.grok_no_billing_data: Grok 未返回账单数据；请运行 `grok` 登录
-usage_error.claude_credentials_missing: 钥匙串和 ~/.claude 中均未找到 Claude Code 凭据
-usage_error.run_security: 无法运行 /usr/bin/security
-usage_error.keychain_item_missing: 钥匙串中没有 %{service} 项
-usage_error.claude_credentials_invalid: Claude Code 凭据不是有效的 JSON
-usage_error.claude_oauth_missing: Claude Code 凭据中没有 claudeAiOauth 项
-usage_error.claude_access_token_missing: Claude Code 凭据中没有访问令牌
-usage_error.run_curl: 无法运行 /usr/bin/curl
-usage_error.curl_stdin_unavailable: curl 的标准输入不可用
-usage_error.configure_curl: 无法向 curl 传递配置
-usage_error.curl_did_not_finish: curl 未能完成请求
-usage_error.curl_failed: "curl 失败：%{error}"
-usage_error.unknown_error: 未知错误
-usage_error.curl_no_status: curl 未返回 HTTP 状态行
+
+providers.default_model: 默认模型
+
+providers.duplicate_id: 服务商 ID 已在使用
+providers.in_use: 会话或收藏仍引用此服务商
+
+providers.duplicate_models: 不允许重复的模型 ID
+
+providers.invalid_context_window: 上下文窗口必须是正整数
+providers.invalid_max_output_tokens: 最大输出 token 必须是正整数
+providers.invalid_header_format: "每个请求头必须使用 Name: value 格式"
+providers.invalid_headers: 请求头不能为空或重复，也不能使用保留名称：Authorization、x-api-key、Host、Content-Length、Content-Type、Anthropic-Version

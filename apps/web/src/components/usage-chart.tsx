@@ -3,16 +3,17 @@ import { decorative } from '@tanstack/charts/mark/decorative'
 import { Chart } from '@tanstack/charts/react'
 import { scaleLinear } from '@tanstack/charts/scales/linear'
 import { tooltip } from '@tanstack/charts/tooltip'
-import type { UsageHistory } from '@waku/client'
+import type { ProviderId, UsageHistory } from '@waku/client'
 import { scaleUtc } from 'd3-scale'
 import { useI18n, type AppLocale } from '@/lib/i18n'
+import { providerMeta } from '@/components/waku-icon'
 
 export type UsageMetric = 'cost' | 'tokens'
 
 interface UsageChartRow {
   id: string
   date: Date
-  provider: 'Claude Code' | 'Codex'
+  provider: string
   value: number
 }
 
@@ -24,22 +25,18 @@ export function UsageTrendChart({
   metric: UsageMetric
 }) {
   const { locale, t } = useI18n()
+  const providers = history.providers.map((slice) => slice.provider)
   const rows: UsageChartRow[] = history.daily.flatMap((day) => {
     const date = parseUsageDay(day.day)
-    return [
-      {
-        id: `claude-${day.day}`,
+    return providers.map((provider) => {
+      const entry = day.byProvider.find((candidate) => candidate.provider === provider)
+      return {
+        id: `${provider}-${day.day}`,
         date,
-        provider: 'Claude Code',
-        value: metric === 'cost' ? day.byProvider[0].costUsd : day.byProvider[0].totalTokens,
-      },
-      {
-        id: `codex-${day.day}`,
-        date,
-        provider: 'Codex',
-        value: metric === 'cost' ? day.byProvider[1].costUsd : day.byProvider[1].totalTokens,
-      },
-    ]
+        provider: providerMeta(provider).name,
+        value: metric === 'cost' ? (entry?.costUsd ?? 0) : (entry?.totalTokens ?? 0),
+      }
+    })
   })
 
   const definition = defineChart({
@@ -98,8 +95,8 @@ export function UsageTrendChart({
       },
     },
     color: {
-      domain: ['Claude Code', 'Codex'],
-      range: ['#d97757', 'var(--provider-codex)'],
+      domain: providers.map((provider) => providerMeta(provider).name),
+      range: providers.map((provider) => providerSeriesColor(provider)),
     },
     focus: 'group-x',
     maxFocusDistance: Number.POSITIVE_INFINITY,
@@ -126,6 +123,42 @@ export function UsageTrendChart({
       initialWidth={640}
     />
   )
+}
+
+const KNOWN_PROVIDER_SERIES_COLORS: Record<string, string> = {
+  anthropic: '#d97757',
+  claude: '#d97757',
+  'openai-responses': '#10a37f',
+  openai: '#10a37f',
+  'openai-chat': '#0d8f6e',
+  'openai-codex': '#6366f1',
+  xai: '#0ea5e9',
+  'xai-oauth': '#38bdf8',
+  'opencode-zen': '#a855f7',
+  'opencode-go': '#f59e0b',
+}
+
+const PROVIDER_SERIES_PALETTE = [
+  '#d97757',
+  '#10a37f',
+  '#0ea5e9',
+  '#a855f7',
+  '#f59e0b',
+  '#ef4444',
+  '#14b8a6',
+  '#6366f1',
+] as const
+
+export function providerSeriesColor(provider: ProviderId) {
+  const id = provider.toLowerCase()
+  const known = KNOWN_PROVIDER_SERIES_COLORS[id]
+  if (known) return known
+  let hash = 2166136261
+  for (let index = 0; index < id.length; index += 1) {
+    hash ^= id.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return PROVIDER_SERIES_PALETTE[(hash >>> 0) % PROVIDER_SERIES_PALETTE.length]
 }
 
 function parseUsageDay(day: string) {

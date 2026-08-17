@@ -440,14 +440,14 @@ impl DaemonSupervisor {
             }
             Err(error) => {
                 let restore = replace_local_daemon(&self.inner, &executable, &previous);
-                if restore.is_ok() {
-                    queue_settings_refresh(&self.inner);
-                    Err(error)
-                } else {
-                    Err(error.context(format!(
-                        "the previous daemon configuration also failed to restart: {:#}",
-                        restore.unwrap_err()
-                    )))
+                match restore {
+                    Ok(()) => {
+                        queue_settings_refresh(&self.inner);
+                        Err(error)
+                    }
+                    Err(restore_error) => Err(error.context(format!(
+                        "the previous daemon configuration also failed to restart: {restore_error:#}"
+                    ))),
                 }
             }
         }

@@ -80,6 +80,9 @@ pub fn init(cx: &mut App) {
 use crate::theme::Theme;
 use crate::ui::icon;
 
+type MenuAction = Rc<dyn Fn(&mut Window, &mut App)>;
+type MenuItems = Rc<dyn Fn(&mut App) -> Vec<MenuItem>>;
+
 /// One row of a menu.
 pub enum MenuItem {
     Entry {
@@ -164,7 +167,7 @@ impl MenuItem {
         }
     }
 
-    fn click_handler(self) -> Option<Rc<dyn Fn(&mut Window, &mut App)>> {
+    fn click_handler(self) -> Option<MenuAction> {
         match self {
             Self::Entry {
                 disabled: false,
@@ -1017,7 +1020,7 @@ fn row(
     highlighted: bool,
     theme: &Theme,
     handle: ContextMenuHandle,
-    on_click: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_click: Option<MenuAction>,
 ) -> gpui::Stateful<gpui::Div> {
     let hover = theme.overlay;
     let highlight = theme.overlay_strong;
@@ -1080,7 +1083,7 @@ fn next_highlight(focusable: &[usize], current: Option<usize>, key: &str) -> Opt
 fn on_menu_key(
     handle: &ContextMenuHandle,
     focusable: &[usize],
-    items: &Rc<dyn Fn(&mut App) -> Vec<MenuItem>>,
+    items: &MenuItems,
     event: &KeyDownEvent,
     window: &mut Window,
     cx: &mut App,

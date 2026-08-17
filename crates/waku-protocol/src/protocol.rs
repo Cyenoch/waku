@@ -5,14 +5,14 @@ use serde_json::Value;
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::attachments::{AttachmentUpload, StoredAttachment};
-use crate::computer_use::ComputerPermissions;
-use crate::model::{AgentSession, Project, ProviderKind, ProviderProbe, UserInputAnswer};
+use crate::attachments::{AttachmentUpload, PromptInput, StoredAttachment};
+use crate::model::{
+    AgentSession, AuthPhase, BackgroundWorkKey, LoginMethod, ModelCatalog, Project,
+    ProviderAuthStatus, ProviderId, SecretString, ServiceTier, UserInputAnswer,
+};
 use crate::persistence::{ComposerDraftChange, ComposerDrafts, SessionMessageMatch};
-use crate::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
 use crate::settings::DaemonSettings;
 use crate::skills::SkillsCatalog;
-use crate::usage::PlanUsage;
 use crate::usage_history::{UsageHistory, UsageWindow};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
@@ -84,18 +84,12 @@ pub enum Command {
         options: WireDriverStartOptions,
     },
     Prompt {
-        prompt: String,
+        input: PromptInput,
     },
     Steer {
-        prompt: String,
+        input: PromptInput,
     },
     Cancel,
-    CancelComputerUse,
-    RefreshBackgroundWork,
-    StopBackgroundWork {
-        key: Value,
-        control_id: String,
-    },
     Respond {
         request_id: String,
         option_id: String,
@@ -104,12 +98,10 @@ pub enum Command {
         request_id: String,
         answers: Vec<UserInputAnswer>,
     },
-    RunComputerTool {
-        request: WireComputerToolRequest,
-    },
-    RejectComputerTool {
-        request: WireComputerToolRequest,
-        reason: String,
+    RefreshBackgroundWork,
+    StopBackgroundWork {
+        key: BackgroundWorkKey,
+        control_id: String,
     },
     ApplyOptions {
         options: WireSessionOptions,
@@ -124,23 +116,8 @@ pub enum Command {
     UpdateSettings {
         settings: DaemonSettings,
     },
-    ProbeProvider {
-        provider: ProviderKind,
-        binary_override: Option<String>,
-        discover_models: bool,
-        probe_version: bool,
-    },
-    FetchPlanUsage {
-        provider: ProviderKind,
-        binary_override: Option<String>,
-        cli_version: Option<String>,
-    },
-    ProbeComputerPermissions {
-        prompt: bool,
-    },
     LoadUsageHistory {
         window: UsageWindow,
-        project_roots: Vec<PathBuf>,
     },
     LoadSkills {
         projects: Vec<(String, PathBuf)>,
@@ -153,11 +130,7 @@ pub enum Command {
         dirs: Vec<PathBuf>,
     },
     LoadTaskState,
-    SaveTaskState {
-        projects: Vec<Project>,
-        live_session_ids: Vec<Uuid>,
-        sessions: Vec<AgentSession>,
-    },
+    SaveTaskState(Box<SaveTaskState>),
     /// Explicitly remove one daemon-owned task. Ordinary state saves are
     /// merge-only so a stale client snapshot cannot delete tasks another
     /// client just created.
@@ -213,9 +186,6 @@ pub enum Command {
     RewindSessionToMessage {
         turn_count: usize,
     },
-    ForkProviderSession {
-        request: ProviderSessionForkRequest,
-    },
     Workspace {
         operation: WorkspaceOperation,
     },
@@ -236,23 +206,45 @@ pub enum Command {
     },
     CloseTerminal,
     CloseSession,
+    GetAuthStatus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<ProviderId>,
+    },
+    StartLogin {
+        provider: ProviderId,
+        method: LoginMethod,
+    },
+    CompleteApiKeyLogin {
+        login_id: Uuid,
+        provider: ProviderId,
+        key: SecretString,
+    },
+    CancelLogin {
+        login_id: Uuid,
+    },
+    Logout {
+        provider: ProviderId,
+    },
+    ListModels {
+        provider: ProviderId,
+    },
+    RefreshModels {
+        provider: ProviderId,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct WireDriverStartOptions {
-    pub provider: String,
-    pub binary: PathBuf,
+    pub provider: ProviderId,
     pub cwd: PathBuf,
     pub mode: String,
     pub interaction_mode: String,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
-    pub service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ServiceTier>,
     pub context_window: Option<String>,
-    pub agent_preset: Option<String>,
-    pub computer_use_enabled: bool,
-    pub provider_cursor: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -262,16 +254,9 @@ pub struct WireSessionOptions {
     pub interaction_mode: String,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
-    pub service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ServiceTier>,
     pub context_window: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct WireComputerToolRequest {
-    pub call_id: String,
-    pub tool: String,
-    pub arguments: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -338,8 +323,23 @@ pub enum ServerMessage {
     rename_all_fields = "camelCase"
 )]
 pub enum ResponseOutcome {
-    Ok { payload: ResponsePayload },
+    Ok { payload: Box<ResponsePayload> },
     Error { error: RpcError },
+}
+
+impl ResponseOutcome {
+    pub fn ok(payload: ResponsePayload) -> Self {
+        Self::Ok {
+            payload: Box::new(payload),
+        }
+    }
+
+    pub fn payload(&self) -> Option<&ResponsePayload> {
+        match self {
+            Self::Ok { payload } => Some(payload.as_ref()),
+            Self::Error { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -360,21 +360,8 @@ pub enum ResponsePayload {
     OptionsApplied {
         applied: bool,
     },
-    Cursor {
-        cursor: Option<Value>,
-    },
     Settings {
         settings: DaemonSettings,
-    },
-    ProviderProbe {
-        probe: ProviderProbe,
-        version: Option<String>,
-    },
-    PlanUsage {
-        usage: Option<PlanUsage>,
-    },
-    ComputerPermissions {
-        permissions: ComputerPermissions,
     },
     UsageHistory {
         history: UsageHistory,
@@ -392,7 +379,7 @@ pub enum ResponsePayload {
         sessions: Vec<AgentSession>,
     },
     Session {
-        session: Option<AgentSession>,
+        session: Option<Box<AgentSession>>,
     },
     SessionMessageMatches {
         matches: Vec<SessionMessageMatch>,
@@ -412,22 +399,53 @@ pub enum ResponsePayload {
         #[ts(type = "string")]
         bytes: Vec<u8>,
     },
-    ProviderSessionForked {
-        result: ProviderSessionFork,
-    },
     SessionForked {
-        session: AgentSession,
+        session: Box<AgentSession>,
         checkpoint_warning: Option<String>,
     },
     SessionRewound {
-        session: AgentSession,
+        session: Box<AgentSession>,
         cleanup_warning: Option<String>,
     },
     Workspace {
         result: WorkspaceResult,
     },
+    AuthStatus {
+        statuses: Vec<ProviderAuthStatus>,
+        #[serde(default)]
+        phases: Vec<AuthPhase>,
+    },
+    Login {
+        phase: AuthPhase,
+    },
+    Models {
+        catalog: ModelCatalog,
+    },
 }
 
+/// Boxed `Command::SaveTaskState` payload. Serde still flattens these fields
+/// onto the command object, so the wire JSON is unchanged.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveTaskState {
+    pub projects: Vec<Project>,
+    pub live_session_ids: Vec<Uuid>,
+    pub sessions: Vec<AgentSession>,
+}
+
+impl SaveTaskState {
+    pub fn boxed(
+        projects: Vec<Project>,
+        live_session_ids: Vec<Uuid>,
+        sessions: Vec<AgentSession>,
+    ) -> Box<Self> {
+        Box::new(Self {
+            projects,
+            live_session_ids,
+            sessions,
+        })
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 pub struct RpcError {
     pub message: String,
@@ -560,5 +578,82 @@ mod tests {
             project_id.to_string()
         );
         assert_eq!(json["changes"][0]["draft"]["text"], "unfinished");
+    }
+
+    #[test]
+    fn complete_api_key_login_debug_redacts_the_secret() {
+        let command = Command::CompleteApiKeyLogin {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("xai"),
+            key: crate::SecretString::new("sk-never-log-this"),
+        };
+        let rendered = format!("{command:?}");
+        assert!(!rendered.contains("sk-never-log-this"));
+        assert!(rendered.contains("redacted"));
+        let json = serde_json::to_value(&command).unwrap();
+        assert_eq!(json["type"], "completeApiKeyLogin");
+        assert_eq!(json["provider"], "xai");
+    }
+
+    #[test]
+    fn save_task_state_keeps_flattened_camel_case_fields() {
+        let json = serde_json::to_value(Command::SaveTaskState(SaveTaskState::boxed(
+            Vec::new(),
+            vec![Uuid::nil()],
+            Vec::new(),
+        )))
+        .unwrap();
+        assert_eq!(json["type"], "saveTaskState");
+        assert_eq!(json["liveSessionIds"][0], Uuid::nil().to_string());
+        assert!(json["sessions"].is_array());
+        assert!(json.get("0").is_none());
+    }
+
+    #[test]
+    fn boxed_response_outcome_keeps_nested_payload_object() {
+        let json = serde_json::to_value(ResponseOutcome::ok(ResponsePayload::Ack)).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["payload"]["type"], "ack");
+        assert!(json["payload"].is_object());
+    }
+
+    #[test]
+    fn auth_and_model_commands_use_stable_camel_case() {
+        let json = serde_json::to_value(Command::StartLogin {
+            provider: ProviderId::new("openai-codex"),
+            method: crate::LoginMethod::OauthBrowser,
+        })
+        .unwrap();
+        assert_eq!(json["type"], "startLogin");
+        assert_eq!(json["method"], "oauthBrowser");
+        let json = serde_json::to_value(ResponsePayload::Models {
+            catalog: crate::ModelCatalog {
+                provider: ProviderId::new("opencode-go"),
+                models: Vec::new(),
+                source: crate::CatalogSource::Live,
+                fetched_at_ms: 1,
+            },
+        })
+        .unwrap();
+        assert_eq!(json["type"], "models");
+        assert_eq!(json["catalog"]["source"], "live");
+    }
+
+    #[test]
+    fn auth_status_phases_carry_login_id_and_provider() {
+        let phase = crate::AuthPhase::AwaitingApiKey {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("xai"),
+            instructions: "Paste the API key for xai".into(),
+        };
+        let json = serde_json::to_value(ResponsePayload::AuthStatus {
+            statuses: Vec::new(),
+            phases: vec![phase],
+        })
+        .unwrap();
+        assert_eq!(json["type"], "authStatus");
+        assert_eq!(json["phases"][0]["type"], "awaitingApiKey");
+        assert_eq!(json["phases"][0]["loginId"], Uuid::nil().to_string());
+        assert_eq!(json["phases"][0]["provider"], "xai");
     }
 }

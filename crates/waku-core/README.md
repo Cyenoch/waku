@@ -1,10 +1,14 @@
 # waku-core
 
-`waku-core` is Waku's daemon-only runtime. It contains the native session
-drivers, provider discovery and model metadata, task persistence, attachment
-storage, workspace filesystem and Git services, Computer Use process control,
-and daemon-owned settings. It depends on the serializable contract in
-[`waku-protocol`](../waku-protocol), but contains no desktop transport or UI.
+`waku-core` is Waku's daemon-only runtime. It integrates the built-in Rust HTTP
+harness, provider authentication and model catalog/cache handling, task
+persistence, attachment storage, workspace filesystem and Git services, the
+append-only usage ledger, and daemon-owned settings. The harness supports
+OpenAI Responses, OpenAI Chat Completions, and Anthropic wire formats; its
+generic `Tool` seam remains available for Waku's local tools. The removed legacy
+Computer Use integration is not part of the runtime. It depends on the
+serializable contract in [`waku-protocol`](../waku-protocol), but contains no
+desktop transport or UI.
 
 The transport is an authenticated WebSocket (loopback by default). Requests
 have stable UUIDs for idempotency; session events carry monotonically

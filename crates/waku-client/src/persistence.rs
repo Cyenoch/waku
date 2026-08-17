@@ -15,10 +15,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{Command, DaemonExposureSettings, DaemonSettings, DaemonSupervisor, ResponsePayload};
-use waku_protocol::computer_use::ComputerAppGrant;
 use waku_protocol::i18n::AppLanguage;
 use waku_protocol::identity::DATA_DIRECTORY_NAME;
-use waku_protocol::model::{AgentSession, FavoriteModel, Project, ProviderKind};
+use waku_protocol::model::{AgentSession, FavoriteModel, Project, ProviderId};
 use waku_protocol::theme::ThemePreference;
 
 pub use waku_protocol::persistence::{
@@ -40,16 +39,12 @@ fn default_right_panel_visibility() -> bool {
     false
 }
 
-fn default_computer_use_enabled() -> bool {
-    false
-}
-
 fn default_analytics_enabled() -> bool {
     true
 }
 
-fn default_provider() -> ProviderKind {
-    ProviderKind::Codex
+fn default_provider() -> ProviderId {
+    ProviderId::new(ProviderId::OPENAI_RESPONSES)
 }
 
 fn default_sidebar_width() -> f32 {
@@ -62,12 +57,10 @@ fn default_right_panel_width() -> f32 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RememberedModelTraits {
-    provider: ProviderKind,
+    provider: ProviderId,
     model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    service_tier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     context_window: Option<String>,
 }
@@ -240,13 +233,13 @@ struct AppState {
     #[serde(default)]
     selected_session: Option<Uuid>,
     #[serde(default = "default_provider")]
-    last_provider: ProviderKind,
+    last_provider: ProviderId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_service_tier: Option<String>,
+    last_service_tier: Option<waku_protocol::ServiceTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_context_window: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -274,13 +267,13 @@ pub struct PersistedState {
     pub sessions: Vec<AgentSession>,
     pub selected_project: Option<Uuid>,
     pub selected_session: Option<Uuid>,
-    pub last_provider: ProviderKind,
+    pub last_provider: ProviderId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_service_tier: Option<String>,
+    pub last_service_tier: Option<waku_protocol::ServiceTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_context_window: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -303,14 +296,8 @@ pub struct PersistedState {
     pub right_panel_width: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_state: Option<PersistedWindowState>,
-    #[serde(default = "default_computer_use_enabled")]
-    pub computer_use_enabled: bool,
     #[serde(default)]
-    pub computer_use_allowed_apps: Vec<ComputerAppGrant>,
-    #[serde(default)]
-    pub disabled_providers: Vec<ProviderKind>,
-    #[serde(default)]
-    pub provider_binary_overrides: HashMap<ProviderKind, String>,
+    pub external_providers: Vec<waku_protocol::ExternalProvider>,
     #[serde(skip)]
     daemon_settings_extra: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
@@ -342,7 +329,7 @@ impl PersistedState {
             sessions: Vec::new(),
             selected_project: None,
             selected_session: None,
-            last_provider: ProviderKind::Codex,
+            last_provider: ProviderId::new(ProviderId::OPENAI_RESPONSES),
             last_model: None,
             last_reasoning_effort: None,
             last_service_tier: None,
@@ -357,10 +344,7 @@ impl PersistedState {
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
             window_state: None,
-            computer_use_enabled: false,
-            computer_use_allowed_apps: Vec::new(),
-            disabled_providers: Vec::new(),
-            provider_binary_overrides: HashMap::new(),
+            external_providers: Vec::new(),
             daemon_settings_extra: BTreeMap::new(),
             dirty_sessions: HashSet::new(),
         }
@@ -368,7 +352,7 @@ impl PersistedState {
 
     pub fn fresh(cwd: PathBuf) -> Self {
         let project = Project::from_path(cwd);
-        let session = AgentSession::new(project.id, ProviderKind::Codex);
+        let session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
         Self {
             selected_project: Some(project.id),
             selected_session: Some(session.id),
@@ -378,34 +362,31 @@ impl PersistedState {
         }
     }
 
-    pub fn new_session(&self, project_id: Uuid, provider: ProviderKind) -> AgentSession {
-        let mut session = AgentSession::new(project_id, provider);
+    pub fn new_session(&self, project_id: Uuid, provider: ProviderId) -> AgentSession {
+        let mut session = AgentSession::new(project_id, provider.clone());
         if provider == self.last_provider {
             session.model.clone_from(&self.last_model);
             session
                 .reasoning_effort
                 .clone_from(&self.last_reasoning_effort);
-            session.service_tier.clone_from(&self.last_service_tier);
-            session
-                .context_window
-                .clone_from(&self.last_context_window);
+            session.service_tier = self.last_service_tier;
+            session.context_window.clone_from(&self.last_context_window);
         }
         session
     }
 
     pub fn remember_model_traits(
         &mut self,
-        provider: ProviderKind,
+        provider: ProviderId,
         model: &str,
         reasoning_effort: Option<String>,
-        service_tier: Option<String>,
         context_window: Option<String>,
     ) {
         let existing = self
             .remembered_model_traits
             .iter()
             .position(|traits| traits.provider == provider && traits.model == model);
-        if reasoning_effort.is_none() && service_tier.is_none() && context_window.is_none() {
+        if reasoning_effort.is_none() && context_window.is_none() {
             if let Some(index) = existing {
                 self.remembered_model_traits.remove(index);
             }
@@ -414,14 +395,12 @@ impl PersistedState {
         if let Some(index) = existing {
             let traits = &mut self.remembered_model_traits[index];
             traits.reasoning_effort = reasoning_effort;
-            traits.service_tier = service_tier;
             traits.context_window = context_window;
         } else {
             self.remembered_model_traits.push(RememberedModelTraits {
                 provider,
                 model: model.to_owned(),
                 reasoning_effort,
-                service_tier,
                 context_window,
             });
         }
@@ -429,16 +408,15 @@ impl PersistedState {
 
     pub fn model_traits_for(
         &self,
-        provider: ProviderKind,
+        provider: ProviderId,
         model: &str,
-    ) -> (Option<String>, Option<String>, Option<String>) {
+    ) -> (Option<String>, Option<String>) {
         self.remembered_model_traits
             .iter()
             .find(|traits| traits.provider == provider && traits.model == model)
             .map(|traits| {
                 (
                     traits.reasoning_effort.clone(),
-                    traits.service_tier.clone(),
                     traits.context_window.clone(),
                 )
             })
@@ -447,19 +425,13 @@ impl PersistedState {
 
     pub fn daemon_settings(&self) -> DaemonSettings {
         DaemonSettings {
-            computer_use_enabled: self.computer_use_enabled,
-            computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
-            disabled_providers: self.disabled_providers.clone(),
-            provider_binary_overrides: self.provider_binary_overrides.clone(),
+            external_providers: self.external_providers.clone(),
             extra: self.daemon_settings_extra.clone(),
         }
     }
 
     pub fn apply_daemon_settings(&mut self, settings: DaemonSettings) {
-        self.computer_use_enabled = settings.computer_use_enabled;
-        self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
-        self.disabled_providers = settings.disabled_providers;
-        self.provider_binary_overrides = settings.provider_binary_overrides;
+        self.external_providers = settings.external_providers;
         self.daemon_settings_extra = settings.extra;
     }
 
@@ -479,10 +451,10 @@ impl PersistedState {
             analytics_id: self.analytics_id,
             selected_project: self.selected_project,
             selected_session: self.persistable_selected_session(),
-            last_provider: self.last_provider,
+            last_provider: self.last_provider.clone(),
             last_model: self.last_model.clone(),
             last_reasoning_effort: self.last_reasoning_effort.clone(),
-            last_service_tier: self.last_service_tier.clone(),
+            last_service_tier: self.last_service_tier,
             last_context_window: self.last_context_window.clone(),
             remembered_model_traits: self.remembered_model_traits.clone(),
             sidebar_visible: self.sidebar_visible,
@@ -540,7 +512,7 @@ impl PersistedState {
         else {
             return;
         };
-        let session = self.new_session(project_id, self.last_provider);
+        let session = self.new_session(project_id, self.last_provider.clone());
         self.selected_session = Some(session.id);
         self.sessions.push(session);
     }
@@ -552,26 +524,15 @@ impl PersistedState {
                     .as_ref()
                     .is_none_or(waku_protocol::model::Checkpoint::totals_are_current)
             });
-            let before = (
-                session.turns.len(),
-                session.last_reply_at,
-                session.provider_cursor.is_some(),
-            );
+            let before = (session.turns.len(), session.last_reply_at);
             session.migrate_legacy_state();
             session.backfill_last_reply_at();
-            if !checkpoint_totals_current
-                || before
-                    != (
-                        session.turns.len(),
-                        session.last_reply_at,
-                        session.provider_cursor.is_some(),
-                    )
+            if !checkpoint_totals_current || before != (session.turns.len(), session.last_reply_at)
             {
                 self.dirty_sessions.insert(session.id);
             }
         }
         self.version = STATE_VERSION;
-        normalize_computer_app_grants(&mut self.computer_use_allowed_apps);
         self.backfill_remembered_selection();
     }
 
@@ -765,7 +726,7 @@ impl StateStore {
             && cwd.parent().is_some()
         {
             let project = Project::from_path(cwd);
-            let session = state.new_session(project.id, state.last_provider);
+            let session = state.new_session(project.id, state.last_provider.clone());
             state.selected_project = Some(project.id);
             state.selected_session = Some(session.id);
             state.projects.push(project);
@@ -867,11 +828,11 @@ impl StateStore {
             .notify(
                 Uuid::nil(),
                 Uuid::nil(),
-                Command::SaveTaskState {
+                Command::SaveTaskState(Box::new(waku_protocol::SaveTaskState {
                     projects: state.projects.clone(),
                     live_session_ids,
                     sessions,
-                },
+                })),
             )
             .map_err(to_io_error)?;
         state.dirty_sessions.clear();
@@ -931,7 +892,7 @@ pub fn hydrate_session(
         )
         .map_err(to_io_error)?
     {
-        ResponsePayload::Session { session } => Ok(session),
+        ResponsePayload::Session { session } => Ok(session.map(|session| *session)),
         _ => Err(io::Error::other(
             "Waku daemon returned an invalid session-hydration response",
         )),
@@ -961,6 +922,38 @@ fn restore_task_state_skeletons(sessions: &mut [AgentSession]) {
     for session in sessions {
         session.detail_loaded = false;
     }
+}
+
+/// Reads one daemon-owned binary payload. Clients decide how to present the
+/// bytes; this transport layer deliberately creates no client-side files.
+pub fn read_remote_reference(
+    reference: &str,
+    daemon_path: Option<&Path>,
+    daemon: &DaemonSupervisor,
+) -> Option<Vec<u8>> {
+    let command = if waku_protocol::blob::is_reference(reference) {
+        Command::ReadBlob {
+            reference: reference.to_owned(),
+        }
+    } else if reference.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME) {
+        let path = daemon_path?;
+        Command::ReadAttachment {
+            reference: reference.to_owned(),
+            path: path.to_owned(),
+        }
+    } else {
+        return None;
+    };
+    let Ok(ResponsePayload::BlobData { bytes }) =
+        daemon.client().request(Uuid::nil(), Uuid::nil(), command)
+    else {
+        return None;
+    };
+    Some(bytes)
+}
+
+fn to_io_error(error: impl std::fmt::Display) -> io::Error {
+    io::Error::other(error.to_string())
 }
 
 #[cfg(test)]
@@ -997,7 +990,10 @@ mod tests {
 
     #[test]
     fn daemon_task_state_becomes_list_only_after_crossing_the_client_boundary() {
-        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let mut session = AgentSession::new(
+            Uuid::new_v4(),
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
         session.detail_loaded = false;
         assert!(
             session.has_started(),
@@ -1025,43 +1021,4 @@ mod tests {
         assert!(!sessions[0].detail_loaded);
         assert!(sessions[0].has_started());
     }
-}
-
-/// Reads one daemon-owned binary payload. Clients decide how to present the
-/// bytes; this transport layer deliberately creates no client-side files.
-pub fn read_remote_reference(
-    reference: &str,
-    daemon_path: Option<&Path>,
-    daemon: &DaemonSupervisor,
-) -> Option<Vec<u8>> {
-    let command = if waku_protocol::blob::is_reference(reference) {
-        Command::ReadBlob {
-            reference: reference.to_owned(),
-        }
-    } else if reference.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME) {
-        let path = daemon_path?;
-        Command::ReadAttachment {
-            reference: reference.to_owned(),
-            path: path.to_owned(),
-        }
-    } else {
-        return None;
-    };
-    let Ok(ResponsePayload::BlobData { bytes }) =
-        daemon.client().request(Uuid::nil(), Uuid::nil(), command)
-    else {
-        return None;
-    };
-    Some(bytes)
-}
-
-fn normalize_computer_app_grants(grants: &mut Vec<ComputerAppGrant>) {
-    let mut seen_bundle_ids = HashSet::new();
-    grants.retain(|grant| {
-        !grant.bundle_id.trim().is_empty() && seen_bundle_ids.insert(grant.bundle_id.clone())
-    });
-}
-
-fn to_io_error(error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(error.to_string())
 }

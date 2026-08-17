@@ -516,6 +516,17 @@ pub enum FieldMode {
     Composer,
     Code,
     Search,
+    Secret,
+}
+
+impl FieldMode {
+    fn is_single_line(self) -> bool {
+        matches!(self, Self::Search | Self::Secret)
+    }
+}
+
+pub fn masked_secret_display(content: &str) -> String {
+    "*".repeat(content.len())
 }
 
 /// Tallest a composer-mode field grows before its text scrolls under an
@@ -746,6 +757,13 @@ impl ComposerInput {
     /// "find next" keeps the query, and pasted line breaks become spaces.
     pub fn search_field(mut self) -> Self {
         self.mode = FieldMode::Search;
+        self
+    }
+
+    /// One-line secret field: paints bullets, never copies plaintext, and
+    /// never emits the value through submit events.
+    pub fn secret_field(mut self) -> Self {
+        self.mode = FieldMode::Secret;
         self
     }
 
@@ -1231,6 +1249,7 @@ impl ComposerInput {
             FieldMode::Search => {
                 cx.emit(ComposerEvent::Submit(self.content.to_string()));
             }
+            FieldMode::Secret => {}
             FieldMode::Composer => {
                 let value = self.content.trim().to_owned();
                 if !value.is_empty() {
@@ -1242,7 +1261,7 @@ impl ComposerInput {
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode == FieldMode::Search {
+        if self.mode.is_single_line() {
             // Find bars and picker fields assign Shift+Enter their own meaning.
             cx.propagate();
             return;
@@ -1279,8 +1298,9 @@ impl ComposerInput {
         };
         let text = match self.mode {
             // A composer is one prompt — and a search box one query — so
-            // pasted line breaks become spaces.
-            FieldMode::Composer | FieldMode::Search => text.replace(['\n', '\r'], " "),
+            FieldMode::Composer | FieldMode::Search | FieldMode::Secret => {
+                text.replace(['\n', '\r'], " ")
+            }
             FieldMode::Code => text.replace('\r', ""),
         };
         // A paste is its own undo step, never part of the typing around it —
@@ -1291,6 +1311,9 @@ impl ComposerInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.mode == FieldMode::Secret {
+            return;
+        }
         if self.selected_range.is_empty() {
             // Nothing here to copy. The composer holds focus almost all the
             // time, so propagating lets an outer handler — the transcript's
@@ -1304,15 +1327,15 @@ impl ComposerInput {
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.content[self.selected_range.clone()].to_string(),
-            ));
-            // Like paste, a cut never coalesces with surrounding deletions.
-            self.history.seal();
-            self.replace_text_in_range(None, "", window, cx);
-            self.history.seal();
+        if self.mode == FieldMode::Secret || self.selected_range.is_empty() {
+            return;
         }
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.content[self.selected_range.clone()].to_string(),
+        ));
+        self.history.seal();
+        self.replace_text_in_range(None, "", window, cx);
+        self.history.seal();
     }
 
     /// Route a splice into the history before it is applied: composition
@@ -1603,7 +1626,11 @@ impl EntityInputHandler for ComposerInput {
     ) -> Option<String> {
         let range = self.range_from_utf16(&range_utf16);
         actual_range.replace(self.range_to_utf16(&range));
-        Some(self.content[range].to_string())
+        Some(if self.mode == FieldMode::Secret {
+            masked_secret_display(&self.content[range])
+        } else {
+            self.content[range].to_string()
+        })
     }
 
     fn selected_text_range(
@@ -1908,7 +1935,7 @@ impl InputElement {
     ) -> Option<Bounds<Pixels>> {
         let (focused, selection, whole_content_selected, previous_scroll) = {
             let input = self.input.read(cx);
-            if input.mode != FieldMode::Search {
+            if !input.mode.is_single_line() {
                 return None;
             }
             (
@@ -2109,10 +2136,14 @@ impl Element for InputElement {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let input = self.input.read(cx);
-        let content = input.content.clone();
+        let content = if input.mode == FieldMode::Secret {
+            SharedString::from(masked_secret_display(&input.content))
+        } else {
+            input.content.clone()
+        };
         let style = window.text_style();
         let theme = Theme::current(cx);
-        let content_is_empty = content.is_empty();
+        let content_is_empty = input.content.is_empty();
         let (display_text, text_color, selected_range, marked_range) = if content_is_empty {
             (input.placeholder.clone(), theme.text_ghost, None, None)
         } else {
@@ -2361,7 +2392,7 @@ impl Render for ComposerInput {
             // A search-mode field is visually one line: the text never wraps,
             // and the overlong remainder slides horizontally under this
             // clipped viewport to follow the caret — no scrollbar.
-            .when(self.mode == FieldMode::Search, |field| {
+            .when(self.mode.is_single_line(), |field| {
                 field.whitespace_nowrap().overflow_hidden()
             })
             .child(InputElement { input });
@@ -2462,6 +2493,12 @@ mod tests {
         previous_word_boundary, single_line_scroll, trimmed_splice, visual_row_count,
         word_range_at,
     };
+
+    #[test]
+    fn secret_display_masks_bytes_without_leaking_content() {
+        assert_eq!(super::masked_secret_display("sk-secret"), "*********");
+        assert!(!super::masked_secret_display("sk-secret").contains("sk"));
+    }
 
     struct InputHarness {
         input: Entity<ComposerInput>,

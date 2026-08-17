@@ -39,7 +39,13 @@ enum CommitPending {
     Generating(CommitAction),
     Git(CommitAction),
 }
-
+struct CommitActionContext {
+    id: Uuid,
+    action: CommitAction,
+    workspace: PathBuf,
+    include_unstaged: bool,
+    window_handle: gpui::AnyWindowHandle,
+}
 pub(super) struct CommitOperationState {
     id: Uuid,
     workspace: PathBuf,
@@ -115,7 +121,7 @@ impl Waku {
             self.selected_session().and_then(|session| {
                 Some((
                     self.workspace_path_for_session(session)?.to_path_buf(),
-                    session.provider,
+                    session.provider.clone(),
                     self.model_for_session(session).map(str::to_owned),
                     session.reasoning_effort.clone(),
                 ))
@@ -126,15 +132,13 @@ impl Waku {
             return;
         };
 
-        let invocation = self
-            .provider_probe(provider)
-            .and_then(|probe| probe.path.clone())
-            .map(|binary| crate::git_commit::AgentInvocation {
-                provider,
-                binary,
-                model,
-                reasoning_effort,
-            });
+        let invocation =
+            self.configured_provider(&provider)
+                .map(|_| crate::git_commit::AgentInvocation {
+                    provider: provider.clone(),
+                    model,
+                    reasoning_effort,
+                });
         let cached_branch = self
             .visible_branch_snapshot
             .as_ref()
@@ -278,12 +282,14 @@ impl Waku {
                 pending: CommitPending::Generating(action),
             });
             self.spawn_commit_message_generation(
-                id,
-                action,
-                workspace,
-                include_unstaged,
+                CommitActionContext {
+                    id,
+                    action,
+                    workspace,
+                    include_unstaged,
+                    window_handle,
+                },
                 invocation,
-                window_handle,
                 cx,
             );
             cx.notify();
@@ -302,12 +308,14 @@ impl Waku {
             pending: CommitPending::Git(action),
         });
         self.spawn_git_action(
-            id,
-            action,
-            workspace,
+            CommitActionContext {
+                id,
+                action,
+                workspace,
+                include_unstaged,
+                window_handle,
+            },
             message,
-            include_unstaged,
-            window_handle,
             cx,
         );
         cx.notify();
@@ -315,14 +323,17 @@ impl Waku {
 
     fn spawn_commit_message_generation(
         &mut self,
-        id: Uuid,
-        action: CommitAction,
-        workspace: PathBuf,
-        include_unstaged: bool,
+        context: CommitActionContext,
         invocation: crate::git_commit::AgentInvocation,
-        window_handle: gpui::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
+        let CommitActionContext {
+            id,
+            action,
+            workspace,
+            include_unstaged,
+            window_handle,
+        } = context;
         let workspace_client = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let generation_workspace = workspace.clone();
@@ -366,12 +377,14 @@ impl Waku {
                                 .update(cx, |input, cx| input.set_content(message.clone(), cx));
                         }
                         waku.spawn_git_action(
-                            id,
-                            action,
-                            workspace,
+                            CommitActionContext {
+                                id,
+                                action,
+                                workspace,
+                                include_unstaged,
+                                window_handle,
+                            },
                             message,
-                            include_unstaged,
-                            window_handle,
                             cx,
                         );
                     }
@@ -397,14 +410,17 @@ impl Waku {
 
     fn spawn_git_action(
         &mut self,
-        id: Uuid,
-        action: CommitAction,
-        workspace: PathBuf,
+        context: CommitActionContext,
         message: String,
-        include_unstaged: bool,
-        window_handle: gpui::AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
+        let CommitActionContext {
+            id,
+            action,
+            workspace,
+            include_unstaged,
+            window_handle,
+        } = context;
         let workspace_client = waku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let operation_workspace = workspace.clone();
@@ -866,7 +882,7 @@ fn grouped_number(value: u64) -> String {
     let digits = value.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(character);

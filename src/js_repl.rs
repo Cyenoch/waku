@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -24,7 +23,7 @@ const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 const SERVER_INSTRUCTIONS: &str = "Use `js` to run JavaScript in the persistent QuickJS kernel. When a skill or prompt says to use `waku_js_repl`, call this server's `js` execution tool. Calls default to a 30000 ms (30 seconds) timeout when `timeout_ms` is omitted. The runtime exposes `nodeRepl.cwd`, `nodeRepl.homeDir`, `nodeRepl.tmpDir`, `nodeRepl.requestMeta`, `nodeRepl.setResponseMeta(...)`, and `await nodeRepl.emitImage(...)`. Top-level bindings persist across `js` calls until `js_reset`; do not redeclare existing `const` or `let` names. Reuse existing bindings, use top-level `var` for reusable state that may be assigned again, or choose a fresh descriptive name.";
 
 const KERNEL_BOOTSTRAP: &str = include_str!("js_repl_bootstrap.js");
-const JS_TOOL_DESCRIPTION: &str = "Run JavaScript in a persistent QuickJS kernel with top-level await. This is the JavaScript execution tool for the `waku_js_repl` MCP server; use it whenever instructions say to use `waku_js_repl`, the Waku JavaScript REPL MCP, or run Waku JavaScript REPL code. If `timeout_ms` is omitted, execution times out after 30000 ms (30 seconds); pass a larger `timeout_ms` for slow Computer Use automation or other long-running operations. Use `nodeRepl.cwd`, `nodeRepl.homeDir`, and `nodeRepl.tmpDir` to inspect host paths. Use `nodeRepl.requestMeta` to inspect the current MCP request `_meta` object during a tool call. Use `nodeRepl.setResponseMeta(meta)` to attach top-level MCP result `_meta`; repeated calls shallow-merge object keys for the current tool call. Use `nodeRepl.write(value)` to add output without a newline. Strings are unchanged; other values use console-style formatting, including BigInt and circular objects. Prefer it over `console.log(...)` for final output; `console.log(...)` remains useful for debugging or multiple values. Use `await nodeRepl.emitImage(imageLike)` to return images; each call adds one image to the outer tool result, so call it multiple times to emit multiple images. Supported image inputs are a base64 data URL, a file URL, or an object with a `url` property. Saved references to `nodeRepl.write(...)` and `nodeRepl.emitImage(...)` stay reusable across calls. Scheduled callbacks only run while a JavaScript execution call is active; overdue timers resume at the start of the next call. Top-level bindings persist across calls until `js_reset`. If a call throws, prior bindings remain available and bindings that finished initializing before the throw often remain reusable. For reusable names that may be assigned again later, prefer top-level `var name = ...`; `var` can be redeclared across calls. If you hit `SyntaxError: Identifier 'x' has already been declared`, reuse the existing binding if possible, reassign it only if it was declared with `let` or `var`, or pick a new name instead of resetting immediately; a previous `const x` cannot be changed into `var x`. Use a short `{ ... }` block only for temporary scratch names, and do not wrap an entire call in block scope if you want those names reusable later. Module imports are not supported. Prefer `nodeRepl.write(...)` for text or formatted values and `nodeRepl.emitImage(...)` for images.";
+const JS_TOOL_DESCRIPTION: &str = "Run JavaScript in a persistent QuickJS kernel with top-level await. This is the JavaScript execution tool for the `waku_js_repl` MCP server; use it whenever instructions say to use `waku_js_repl`, the Waku JavaScript REPL MCP, or run Waku JavaScript REPL code. If `timeout_ms` is omitted, execution times out after 30000 ms (30 seconds); pass a larger `timeout_ms` for long-running operations. Use `nodeRepl.cwd`, `nodeRepl.homeDir`, and `nodeRepl.tmpDir` to inspect host paths. Use `nodeRepl.requestMeta` to inspect the current MCP request `_meta` object during a tool call. Use `nodeRepl.setResponseMeta(meta)` to attach top-level MCP result `_meta`; repeated calls shallow-merge object keys for the current tool call. Use `nodeRepl.write(value)` to add output without a newline. Strings are unchanged; other values use console-style formatting, including BigInt and circular objects. Prefer it over `console.log(...)` for final output; `console.log(...)` remains useful for debugging or multiple values. Use `await nodeRepl.emitImage(imageLike)` to return images; each call adds one image to the outer tool result, so call it multiple times to emit multiple images. Supported image inputs are a base64 data URL, a file URL, or an object with a `url` property. Saved references to `nodeRepl.write(...)` and `nodeRepl.emitImage(...)` stay reusable across calls. Scheduled callbacks only run while a JavaScript execution call is active; overdue timers resume at the start of the next call. Top-level bindings persist across calls until `js_reset`. If a call throws, prior bindings remain available and bindings that finished initializing before the throw often remain reusable. For reusable names that may be assigned again later, prefer top-level `var name = ...`; `var` can be redeclared across calls. If you hit `SyntaxError: Identifier 'x' has already been declared`, reuse the existing binding if possible, reassign it only if it was declared with `let` or `var`, or pick a new name instead of resetting immediately; a previous `const x` cannot be changed into `var x`. Use a short `{ ... }` block only for temporary scratch names, and do not wrap an entire call in block scope if you want those names reusable later. Module imports are not supported. Prefer `nodeRepl.write(...)` for text or formatted values and `nodeRepl.emitImage(...)` for images.";
 
 #[derive(Default)]
 struct CallOutput {
@@ -218,7 +217,7 @@ fn tool_definitions() -> Vec<JsonValue> {
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "JavaScript source to execute in the persistent QuickJS kernel. The code runs with top-level await and can use `sky` and the `nodeRepl` helpers."
+                        "description": "JavaScript source to execute in the persistent QuickJS kernel. The code runs with top-level await and can use the `nodeRepl` helpers."
                     },
                     "timeout_ms": {
                         "type": "integer",
@@ -237,7 +236,7 @@ fn tool_definitions() -> Vec<JsonValue> {
         }),
         json!({
             "name": "js_reset",
-            "description": "Reset the persistent JavaScript kernel and clear all bindings created by prior `js` calls. The `nodeRepl` helpers and lazy `setupComputerUseRuntime(...)` entrypoint are installed again automatically; `sky` remains unset until setup is called.",
+            "description": "Reset the persistent JavaScript kernel and clear all bindings created by prior `js` calls. The `nodeRepl` helpers are installed again automatically.",
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -315,7 +314,6 @@ fn call_tool(repl: &mut JavaScriptRepl, params: &JsonValue) -> anyhow::Result<Js
 
 struct JavaScriptRepl {
     kernel: Kernel,
-    bridge: Arc<Mutex<NativeComputerUseClient>>,
     call_output: Arc<Mutex<Option<CallOutput>>>,
     deadline: Arc<Mutex<Option<Instant>>>,
     timed_out: Arc<AtomicBool>,
@@ -323,19 +321,12 @@ struct JavaScriptRepl {
 
 impl JavaScriptRepl {
     fn new() -> anyhow::Result<Self> {
-        let bridge = Arc::new(Mutex::new(NativeComputerUseClient::new()));
         let call_output = Arc::new(Mutex::new(None));
         let deadline = Arc::new(Mutex::new(None));
         let timed_out = Arc::new(AtomicBool::new(false));
-        let kernel = create_kernel(
-            bridge.clone(),
-            call_output.clone(),
-            deadline.clone(),
-            timed_out.clone(),
-        )?;
+        let kernel = create_kernel(call_output.clone(), deadline.clone(), timed_out.clone())?;
         Ok(Self {
             kernel,
-            bridge,
             call_output,
             deadline,
             timed_out,
@@ -344,7 +335,6 @@ impl JavaScriptRepl {
 
     fn reset(&mut self) -> anyhow::Result<()> {
         self.kernel = create_kernel(
-            self.bridge.clone(),
             self.call_output.clone(),
             self.deadline.clone(),
             self.timed_out.clone(),
@@ -475,7 +465,6 @@ fn finish_promise_with_timers<'js>(
 }
 
 fn create_kernel(
-    bridge: Arc<Mutex<NativeComputerUseClient>>,
     call_output: Arc<Mutex<Option<CallOutput>>>,
     deadline: Arc<Mutex<Option<Instant>>>,
     timed_out: Arc<AtomicBool>,
@@ -499,24 +488,6 @@ fn create_kernel(
     let (timer_dispatch, request_meta_setter) = context.with(
         |ctx| -> anyhow::Result<(Persistent<Function<'static>>, Persistent<Function<'static>>)> {
             let globals = ctx.globals();
-
-            let sky_bridge = bridge.clone();
-            let sky_deadline = deadline.clone();
-            globals.set(
-                "__wakuSkyCall",
-                Function::new(ctx.clone(), move |name: String, arguments: String| {
-                    let deadline = *sky_deadline.lock();
-                    let result = serde_json::from_str::<JsonValue>(&arguments)
-                        .context("Computer Use arguments are invalid JSON")
-                        .and_then(|arguments| {
-                            sky_bridge.lock().call_sky(&name, arguments, deadline)
-                        });
-                    match result {
-                        Ok(value) => json!({"ok": true, "value": value}).to_string(),
-                        Err(error) => json!({"ok": false, "error": error.to_string()}).to_string(),
-                    }
-                })?,
-            )?;
 
             let write_output = call_output.clone();
             globals.set(
@@ -766,297 +737,6 @@ fn image_mime_type(path: &Path, bytes: &[u8]) -> anyhow::Result<&'static str> {
     }
 }
 
-struct NativeComputerUseClient {
-    connection: Option<HelperConnection>,
-}
-
-impl NativeComputerUseClient {
-    fn new() -> Self {
-        Self { connection: None }
-    }
-
-    fn call_sky(
-        &mut self,
-        name: &str,
-        arguments: JsonValue,
-        deadline: Option<Instant>,
-    ) -> anyhow::Result<JsonValue> {
-        if !matches!(
-            name,
-            "list_apps"
-                | "get_app_state"
-                | "click"
-                | "drag"
-                | "perform_secondary_action"
-                | "set_value"
-                | "select_text"
-                | "scroll"
-                | "press_key"
-                | "type_text"
-        ) {
-            bail!("unknown sky operation: {name}");
-        }
-        let requested_app = arguments.get("app").cloned().unwrap_or(JsonValue::Null);
-        let result = self.call_helper(name, arguments, deadline)?;
-        match name {
-            "list_apps" => {
-                if let Some(apps) = result.pointer("/structuredContent/apps") {
-                    return Ok(apps.clone());
-                }
-                let text = text_content(&result);
-                serde_json::from_str(&text).context("Computer Use returned an invalid app list")
-            }
-            "get_app_state" => {
-                let structured = result
-                    .get("structuredContent")
-                    .and_then(JsonValue::as_object);
-                let app = structured
-                    .and_then(|value| value.get("app"))
-                    .cloned()
-                    .unwrap_or(requested_app);
-                let text = structured
-                    .and_then(|value| value.get("text"))
-                    .and_then(JsonValue::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| text_content(&result));
-                let screenshot = structured
-                    .and_then(|value| value.get("screenshot"))
-                    .and_then(JsonValue::as_str)
-                    .map(|url| json!({"url": url}))
-                    .unwrap_or(JsonValue::Null);
-                Ok(json!({"app": app, "text": text, "screenshot": screenshot}))
-            }
-            _ => Ok(JsonValue::Null),
-        }
-    }
-
-    fn call_helper(
-        &mut self,
-        name: &str,
-        arguments: JsonValue,
-        deadline: Option<Instant>,
-    ) -> anyhow::Result<JsonValue> {
-        if self.connection.is_none() {
-            self.connection = Some(HelperConnection::start(deadline)?);
-        }
-        let result = self
-            .connection
-            .as_mut()
-            .expect("initialized above")
-            .call(name, arguments, deadline);
-        if result.is_err() {
-            self.connection = None;
-        }
-        result
-    }
-}
-
-struct HelperConnection {
-    child: Child,
-    input: BufWriter<ChildStdin>,
-    output: BufReader<ChildStdout>,
-    next_id: u64,
-}
-
-struct RequestWatchdog {
-    completed: Option<std::sync::mpsc::Sender<()>>,
-    thread: Option<std::thread::JoinHandle<bool>>,
-}
-
-impl RequestWatchdog {
-    fn start(pid: u32, deadline: Option<Instant>) -> anyhow::Result<Self> {
-        let Some(deadline) = deadline else {
-            return Ok(Self {
-                completed: None,
-                thread: None,
-            });
-        };
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| anyhow!("Computer Use request timed out"))?;
-        let (completed, completion) = std::sync::mpsc::channel();
-        let thread = std::thread::Builder::new()
-            .name("waku-js-repl-computer-use-timeout".into())
-            .spawn(move || {
-                if completion.recv_timeout(remaining).is_ok() {
-                    return false;
-                }
-                let _ = Command::new("/bin/kill")
-                    .args(["-TERM", &pid.to_string()])
-                    .status();
-                true
-            })?;
-        Ok(Self {
-            completed: Some(completed),
-            thread: Some(thread),
-        })
-    }
-
-    fn finish(mut self) -> bool {
-        self.complete()
-    }
-
-    fn complete(&mut self) -> bool {
-        if let Some(completed) = self.completed.take() {
-            let _ = completed.send(());
-        }
-        self.thread
-            .take()
-            .and_then(|thread| thread.join().ok())
-            .unwrap_or(false)
-    }
-}
-
-impl Drop for RequestWatchdog {
-    fn drop(&mut self) {
-        let _ = self.complete();
-    }
-}
-
-impl HelperConnection {
-    fn start(deadline: Option<Instant>) -> anyhow::Result<Self> {
-        let command = std::env::var_os("WAKU_COMPUTER_USE_SERVER")
-            .map(PathBuf::from)
-            .ok_or_else(|| {
-                anyhow!("WAKU_COMPUTER_USE_SERVER is required before the first sky operation")
-            })?;
-        let mut child = Command::new(&command)
-            .arg("mcp")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("failed to start {}", command.display()))?;
-        let input = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("Computer Use helper stdin is unavailable"))?;
-        let output = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("Computer Use helper stdout is unavailable"))?;
-        if let Some(stderr) = child.stderr.take() {
-            std::thread::Builder::new()
-                .name("waku-js-repl-computer-use-stderr".into())
-                .spawn(move || {
-                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                        eprintln!("Waku Computer Use: {line}");
-                    }
-                })?;
-        }
-        let mut connection = Self {
-            child,
-            input: BufWriter::new(input),
-            output: BufReader::new(output),
-            next_id: 1,
-        };
-        connection.request(
-            "initialize",
-            json!({
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "waku_js_repl", "version": env!("CARGO_PKG_VERSION")}
-            }),
-            deadline,
-        )?;
-        connection.notify("notifications/initialized", json!({}))?;
-        Ok(connection)
-    }
-
-    fn call(
-        &mut self,
-        name: &str,
-        arguments: JsonValue,
-        deadline: Option<Instant>,
-    ) -> anyhow::Result<JsonValue> {
-        let result = self.request(
-            "tools/call",
-            json!({"name": name, "arguments": arguments}),
-            deadline,
-        )?;
-        if result.get("isError").and_then(JsonValue::as_bool) == Some(true) {
-            bail!("{}", text_content(&result));
-        }
-        Ok(result)
-    }
-
-    fn request(
-        &mut self,
-        method: &str,
-        params: JsonValue,
-        deadline: Option<Instant>,
-    ) -> anyhow::Result<JsonValue> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let watchdog = RequestWatchdog::start(self.child.id(), deadline)?;
-        let result = (|| -> anyhow::Result<JsonValue> {
-            write_message(
-                &mut self.input,
-                &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
-            )?;
-            loop {
-                let mut line = String::new();
-                let bytes = self.output.read_line(&mut line)?;
-                if bytes == 0 {
-                    let status = self.child.try_wait()?;
-                    bail!(
-                        "Computer Use helper closed its session{}",
-                        status
-                            .map(|status| format!(" ({status})"))
-                            .unwrap_or_default()
-                    );
-                }
-                let message: JsonValue = serde_json::from_str(line.trim())
-                    .context("Computer Use helper returned invalid JSON")?;
-                if message.get("id").and_then(JsonValue::as_u64) != Some(id) {
-                    continue;
-                }
-                if let Some(error) = message.get("error") {
-                    let detail = error
-                        .get("message")
-                        .and_then(JsonValue::as_str)
-                        .unwrap_or("Computer Use request failed");
-                    bail!("{detail}");
-                }
-                return message
-                    .get("result")
-                    .cloned()
-                    .ok_or_else(|| anyhow!("Computer Use response has no result"));
-            }
-        })();
-        if watchdog.finish() {
-            bail!("Computer Use request timed out");
-        }
-        result
-    }
-
-    fn notify(&mut self, method: &str, params: JsonValue) -> anyhow::Result<()> {
-        write_message(
-            &mut self.input,
-            &json!({"jsonrpc": "2.0", "method": method, "params": params}),
-        )
-    }
-}
-
-impl Drop for HelperConnection {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn text_content(result: &JsonValue) -> String {
-    result
-        .get("content")
-        .and_then(JsonValue::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|item| item.get("type").and_then(JsonValue::as_str) == Some("text"))
-        .filter_map(|item| item.get("text").and_then(JsonValue::as_str))
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 fn write_message(output: &mut impl Write, message: &JsonValue) -> anyhow::Result<()> {
     serde_json::to_writer(&mut *output, message)?;
     output.write_all(b"\n")?;
@@ -1119,16 +799,14 @@ mod tests {
     }
 
     #[test]
-    fn repl_supports_top_level_await_and_lazy_native_sky() {
+    fn repl_supports_top_level_await() {
         let mut repl = JavaScriptRepl::new().unwrap();
-        let initial = call(&mut repl, "nodeRepl.write(typeof sky);");
-        assert_eq!(initial["content"][0]["text"], "undefined");
         let result = call(
             &mut repl,
-            "await setupComputerUseRuntime({ globals: globalThis }); var promisedValue = await Promise.resolve(7); nodeRepl.write(`${sky.target}:${promisedValue}`);",
+            "var promisedValue = await Promise.resolve(7); nodeRepl.write(String(promisedValue));",
         );
         assert_eq!(result["isError"], false);
-        assert_eq!(result["content"][0]["text"], "mac:7");
+        assert_eq!(result["content"][0]["text"], "7");
     }
 
     #[test]

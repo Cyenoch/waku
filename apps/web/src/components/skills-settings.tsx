@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query'
-import type { Project, ProviderKind, SkillEntry, SkillSource } from '@waku/client'
+import type { Project, ProviderId, SkillEntry, SkillSource } from '@waku/client'
 import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Virtuoso } from 'react-virtuoso'
@@ -16,7 +16,7 @@ import { useI18n, type AppLocale } from '@/lib/i18n'
 import type { Translator } from '@/lib/transcript-presentation'
 import { cn } from '@/lib/utils'
 
-type SkillSourceFilter = 'all' | 'shared' | ProviderKind
+type SkillSourceFilter = 'all' | 'shared' | ProviderId
 
 type SkillListRow =
   | { type: 'section'; key: string; label: string; count: number }
@@ -365,7 +365,7 @@ function availableSkillSources(skills: SkillEntry[], t: Translator) {
     for (const install of skill.installs) seen.add(skillSourceKey(install.source))
     for (const key of seen) counts.set(key, (counts.get(key) ?? 0) + 1)
   }
-  const ids: Array<Exclude<SkillSourceFilter, 'all'>> = ['shared', 'claude', 'codex', 'cursor', 'openCode', 'pi', 'amp', 'deepSeek', 'grok']
+  const ids = [...counts.keys()] as Array<Exclude<SkillSourceFilter, 'all'>>
   return [
     { id: 'all' as const, label: t('skills.filter_all'), count: skills.length },
     ...ids.filter((id) => counts.has(id)).map((id) => ({ id, label: skillSourceFilterLabel(id, t), count: counts.get(id)! })),

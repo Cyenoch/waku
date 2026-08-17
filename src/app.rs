@@ -21,10 +21,6 @@ use uuid::Uuid;
 
 use crate::checkpoint;
 use crate::composer_complete::{FileEntry, SlashCommand};
-use crate::computer_use::{
-    ComputerPermissions, ComputerTarget, ComputerUsePhase, ComputerUseState,
-    PendingComputerApproval,
-};
 use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
 use crate::git_branch::BranchSnapshot;
 use crate::input::{ComposerAttachmentPaste, ComposerEvent, ComposerInput};
@@ -32,11 +28,10 @@ use crate::md;
 use crate::model::{
     ActivityItem, ActivityKind, AgentSession, BackgroundWorkEvent, BackgroundWorkItem,
     BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus,
-    ContextUsage, DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment,
-    MessageRole, PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe,
-    ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus,
-    SessionWorkspace, TranscriptBlock, TurnStatus, UserInputAnswer, UserInputQuestion,
-    compact_path, unix_time, unix_time_millis,
+    ContextUsage, DriverEvent, ExternalProvider, FavoriteModel, InteractionMode, Message,
+    MessageAttachment, MessageRole, PendingPermission, Project, ProviderId, ProviderModel,
+    QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock,
+    TurnStatus, UserInputQuestion, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -46,7 +41,7 @@ use crate::md::render::{
 };
 use crate::ui::menu::{
     ConfirmEntry, ContextMenuHandle, DismissMenu, MenuAlign, MenuItem, SelectNextEntry,
-    SelectNextTab, SelectPreviousEntry, SelectPreviousTab, context_menu, dropdown_menu, popover,
+    SelectPreviousEntry, context_menu, dropdown_menu, popover,
 };
 use crate::ui::scrollbar::{self, ScrollbarState};
 use crate::ui::tooltip::Tooltip;
@@ -111,20 +106,17 @@ const NAVIGATION_RAIL_ANIMATION_DURATION: Duration = Duration::from_millis(300);
 const ESCAPE_STOP_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(3);
 /// Presentation pacing only. The app sleeps until a provider or background
 /// result wakes it, then uses this cadence while streamed chunks remain.
-/// 120 ms matches Zeron's `STREAM_COMMIT_MS`: chunks queue for a full
-/// interval and fold into one drain → one notify → one remeasure, so the
-/// per-commit parse/flatten/highlight work runs at ~8 Hz regardless of the
-/// provider's chunk rate, and the veil dissolve spans the gap so streamed
-/// text still reads as continuous.
+/// Chunks queue for a full interval and fold into one drain → one notify →
+/// one remeasure, so the per-commit parse/flatten/highlight work runs at
+/// ~8 Hz regardless of the provider's chunk rate, and the veil dissolve
+/// spans the gap so streamed text still reads as continuous.
 const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(120);
-/// How long a session may sit untouched before its provider process is released.
-/// Codex and Pi stay resident between turns, so without this an afternoon of
-/// abandoned tasks is an afternoon of idle agent processes.
+/// How long a session may sit untouched before its daemon-owned runtime
+/// is released. Embedded endpoints stay attached between turns, so without
+/// this an afternoon of abandoned tasks keeps idle runtimes around.
 const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const IDLE_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
-const BACKGROUND_WORK_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const BACKGROUND_WORK_TICK_INTERVAL: Duration = Duration::from_secs(1);
-const PLAN_USAGE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 const STREAM_SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Zed keeps status toasts on screen for ten seconds, pausing the countdown
 /// while the pointer is over the toast so a long message remains readable.
@@ -191,10 +183,10 @@ enum StreamDeltaKind {
     Reasoning,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ModelPickerTab {
     Favorites,
-    Provider(ProviderKind),
+    Provider(ProviderId),
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -217,16 +209,12 @@ enum SettingsPage {
     Skills,
     Usage,
     Daemon,
-    ComputerUse,
     Appearance,
 }
 
 impl SettingsPage {
-    /// Computer Use is still experimental, so only development builds expose
-    /// its navigation entry points. Keeping this decision on the page itself
-    /// makes the Settings sidebar and command palette use the same gate.
     fn is_visible_in_navigation(self) -> bool {
-        self != Self::ComputerUse || cfg!(all(debug_assertions, target_os = "macos"))
+        true
     }
 }
 
@@ -375,11 +363,11 @@ impl ComposerSubmission {
     }
 }
 
-/// Whether an untouched session's provider process may be released.
+/// Whether an untouched session's daemon-owned runtime may be released.
 ///
 /// A session mid-turn is not idle however long it has been quiet: a slow tool
-/// call, or an approval waiting on the user, must not have its agent pulled out
-/// from under it.
+/// call, or an approval waiting on the user, must not have its runtime pulled
+/// out from under it.
 fn session_is_reapable(
     session: Option<&AgentSession>,
     idle_for: Duration,
@@ -546,23 +534,22 @@ struct PreparedSubmission {
     workspace: SessionWorkspace,
     checkpoint_warning: Option<String>,
     /// `None` reuses an already-live runtime. `Some` contains the result of a
-    /// provider process start performed on the background executor.
+    /// daemon start performed on the background executor.
     driver: Option<anyhow::Result<PreparedDriver>>,
 }
 
-/// Everything needed to start a provider process, captured while the session
-/// is still on the UI thread. `cwd` is replaced with the materialized
-/// worktree path by the background preparation task.
+/// Everything needed to start a daemon-owned endpoint runtime, captured while
+/// the session is still on the UI thread. `cwd` is replaced with the
+/// materialized worktree path by the background preparation task.
 struct DriverStartRequest {
     session_id: Uuid,
-    provider: ProviderKind,
     options: DriverStartOptions,
     event_wake: smol::channel::Sender<()>,
     daemon_client: waku_client::DaemonClient,
 }
 
-/// A provider process that has started off-thread but is not installed into
-/// Waku's runtime map yet. Its event receiver safely buffers early events.
+/// A daemon-owned runtime that has started off-thread but is not installed
+/// into Waku's runtime map yet. Its event receiver safely buffers early events.
 struct PreparedDriver {
     handle: DriverHandle,
     events: Receiver<DriverEvent>,
@@ -669,7 +656,10 @@ impl WakuPane {
         content: fn(&mut Waku, &mut Window, &mut Context<Waku>) -> AnyElement,
         cx: &mut App,
     ) -> Entity<Self> {
-        cx.new(|_| Self { waku: None, content })
+        cx.new(|_| Self {
+            waku: None,
+            content,
+        })
     }
 
     fn bind(&mut self, waku: &Entity<Waku>, cx: &mut Context<Self>) {
@@ -748,46 +738,6 @@ impl RightPanelSessionState {
 
 /// One choice in the model-traits menu: a label plus a badge marking the
 /// provider's own default, so the current selection and the default read apart.
-fn traits_choice(theme: Theme, label: String, is_default: bool, selected: bool) -> MenuItem {
-    MenuItem::custom(move |_, _| {
-        div()
-            .w(px(190.0))
-            .py(px(2.0))
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .text_color(theme.text_secondary)
-                    .child(label.clone()),
-            )
-            .when(is_default, |element| {
-                element.child(
-                    div()
-                        .h(px(16.0))
-                        .px(px(5.0))
-                        .flex_none()
-                        .rounded(px(4.0))
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .bg(theme.overlay)
-                        .flex()
-                        .items_center()
-                        .text_size(px(9.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text_tertiary)
-                        .child(tr!("common.default")),
-                )
-            })
-            .when(selected, |element| {
-                element.child(icon("icons/check.svg", 11.0, theme.text_tertiary))
-            })
-            .into_any_element()
-    })
-}
 
 #[derive(Clone, Copy, Debug)]
 struct UserMessageAction {
@@ -836,16 +786,9 @@ struct SessionRuntime {
     stream_remeasure_pending: bool,
     pending_permission: Option<PendingPermission>,
     pending_user_input: Option<PendingUserInput>,
-    pending_computer_approval: Option<PendingComputerApproval>,
-    /// Back-to-front stack of window previews captured during the active turn.
-    computer_use_previews: Vec<ComputerUsePreview>,
-    computer_session_grants: HashSet<String>,
     last_driver_error: Option<String>,
     /// When this session last sent or received anything, for idle reaping.
     last_active_at: Instant,
-    /// Background-process snapshots are provider IPC. Keep the polling clock
-    /// on the runtime so switching tasks never creates duplicate probes.
-    last_background_refresh_at: Instant,
 }
 
 #[derive(Clone)]
@@ -871,38 +814,6 @@ impl PendingUserInput {
     fn current_question(&self) -> Option<&UserInputQuestion> {
         self.questions.get(self.question_index)
     }
-
-    fn answers(&self) -> Vec<UserInputAnswer> {
-        self.questions
-            .iter()
-            .map(|question| {
-                let custom = self
-                    .custom_answers
-                    .get(&question.id)
-                    .map(|answer| answer.trim())
-                    .filter(|answer| !answer.is_empty());
-                UserInputAnswer {
-                    question_id: question.id.clone(),
-                    answers: custom.map_or_else(
-                        || {
-                            self.selections
-                                .get(&question.id)
-                                .cloned()
-                                .unwrap_or_default()
-                        },
-                        |answer| vec![answer.to_owned()],
-                    ),
-                }
-            })
-            .collect()
-    }
-}
-
-struct ComputerUsePreview {
-    target: Option<ComputerTarget>,
-    phase: ComputerUsePhase,
-    visible: bool,
-    screenshot: Option<Arc<gpui::Image>>,
 }
 
 #[derive(Debug, Default)]
@@ -997,10 +908,12 @@ impl Default for ActivityScrollViewport {
     }
 }
 
+type AssistantFooter = (Option<SharedString>, Option<u64>);
+
 pub struct Waku {
-    /// Owns the headless provider process for exactly as long as the desktop
-    /// app entity. Debug builds can replace it independently after a rebuild;
-    /// all live driver handles below are lightweight RPC proxies.
+    /// Owns the local daemon for exactly as long as the desktop app entity.
+    /// Debug builds can replace it independently after a rebuild; all live
+    /// driver handles below are lightweight RPC proxies.
     daemon: waku_client::DaemonSupervisor,
     /// Cached once at construction for the Daemon settings connection URL;
     /// rendering must not query account or network configuration.
@@ -1016,7 +929,6 @@ pub struct Waku {
     store: StateStore,
     /// Cached before rendering so path labels can abbreviate the home prefix
     /// without consulting the environment or account database in a frame.
-    home_directory: Option<PathBuf>,
     composer: Entity<ComposerInput>,
     user_input_answer: Entity<ComposerInput>,
     /// Drafts are independent of transcript persistence: started tasks key by
@@ -1047,69 +959,36 @@ pub struct Waku {
     updater_button_animation_from_width: f32,
     updater_button_animation_from_reveal: f32,
     updater_button_animation_generation: u64,
-    probes: Vec<ProviderProbe>,
-    provider_probe_tx: Sender<ProviderProbe>,
-    provider_probe_events: Receiver<ProviderProbe>,
-    provider_model_discoveries: HashSet<ProviderKind>,
-    provider_model_discoveries_pending: HashSet<ProviderKind>,
-    /// CLI version per provider, probed off-thread. Missing key means the
-    /// probe has not answered yet; `None` means it ran and found nothing.
-    provider_versions: HashMap<ProviderKind, Option<String>>,
-    provider_version_tx: Sender<(ProviderKind, Option<String>)>,
-    provider_version_events: Receiver<(ProviderKind, Option<String>)>,
-    /// Providers with a version probe in flight, so a re-detect cannot stack
-    /// a second subprocess on one that has not answered.
-    provider_version_probes_pending: HashSet<ProviderKind>,
-    /// Fast provider detection results from the daemon, including its cached
-    /// model catalog. Live discovery revalidates these probes afterward.
-    provider_detection_tx: Sender<ProviderProbe>,
-    provider_detection_events: Receiver<ProviderProbe>,
-    /// Providers the running re-detection has not answered for yet; empty
-    /// means no re-detection is in flight.
-    provider_detection_remaining: usize,
-    /// When provider detection last completed, for the page's "Checked" label.
-    provider_detection_checked_at: Option<Instant>,
-    /// The provider row expanded on the Providers page, if any. The binary
-    /// override input below edits this provider's entry.
-    expanded_provider_settings: Option<ProviderKind>,
-    provider_path_input: Entity<ComposerInput>,
-    computer_permissions: ComputerPermissions,
-    computer_permission_tx: Sender<Result<ComputerPermissions, String>>,
-    computer_permission_events: Receiver<Result<ComputerPermissions, String>>,
-    computer_permission_request_pending: bool,
-    /// Account rate-limit meters per provider, fetched off-thread (Claude,
-    /// Codex, and OpenCode Go over HTTPS; Grok through a stdio probe) and
-    /// refreshed live by Codex's own stream. Frames read only this snapshot.
-    plan_usage: HashMap<ProviderKind, crate::usage::PlanUsage>,
-    /// Why a provider's last fetch failed, kept alongside stale data for the
-    /// meter's tooltip. Cleared by that provider's next success.
-    plan_usage_error: HashMap<ProviderKind, String>,
-    plan_usage_tx: Sender<(
-        ProviderKind,
-        Result<Option<crate::usage::PlanUsage>, String>,
-    )>,
-    plan_usage_events: Receiver<(
-        ProviderKind,
-        Result<Option<crate::usage::PlanUsage>, String>,
-    )>,
-    plan_usage_pending: HashSet<ProviderKind>,
-    /// Fetchable providers with no matching account credential. Unlike a
-    /// request failure, this hides the plan section until a later refresh
-    /// discovers a newly configured account.
-    plan_usage_unconfigured: HashSet<ProviderKind>,
-    /// When each provider's last fetch settled, successful or not — the
-    /// refresh backoff measures from here.
-    plan_usage_checked_at: HashMap<ProviderKind, Instant>,
-    /// Providers whose turn settled since the last fetch, so the meters have
-    /// moved.
-    plan_usage_stale: HashSet<ProviderKind>,
+    /// The provider row expanded on the Providers page, if any. The endpoint
+    /// fields below edit this provider's entry.
+    expanded_provider_settings: Option<ProviderId>,
+    provider_id_input: Entity<ComposerInput>,
+    provider_name_input: Entity<ComposerInput>,
+    provider_base_url_input: Entity<ComposerInput>,
+    provider_api_key_env_input: Entity<ComposerInput>,
+    provider_headers_input: Entity<ComposerInput>,
+    provider_model_input: Entity<ComposerInput>,
+    provider_context_window_input: Entity<ComposerInput>,
+    provider_max_output_tokens_input: Entity<ComposerInput>,
+    provider_default_model_input: Entity<ComposerInput>,
+    provider_api_format: waku_client::ApiFormat,
+    auth_api_key_input: Entity<ComposerInput>,
+    auth_statuses: HashMap<ProviderId, waku_client::ProviderAuthStatus>,
+    auth_phases: Vec<waku_client::AuthPhase>,
+    auth_generation: u64,
+    auth_pending: HashSet<ProviderId>,
+    auth_error: HashMap<ProviderId, String>,
+    model_catalogs: HashMap<ProviderId, waku_client::ModelCatalog>,
+    model_catalog_pending: HashSet<ProviderId>,
+    model_catalog_generation: u64,
+    model_catalog_error: HashMap<ProviderId, String>,
     /// The settings Usage page's snapshot: historical token/cost usage
-    /// scanned from provider transcripts off-thread. Frames read only this.
+    /// returned by the daemon. Frames read only this.
     usage_history: Option<crate::usage_history::UsageHistory>,
-    /// The window a scan is currently in flight for, so a repeat request for
-    /// the same window coalesces while a changed window supersedes it.
+    /// The window a ledger query is currently in flight for, so a repeat
+    /// request for the same window coalesces while a changed window supersedes it.
     usage_history_pending_for: Option<crate::usage_history::UsageWindow>,
-    /// Bumped per scan; a result from a superseded scan is discarded.
+    /// Bumped per query; a result from a superseded query is discarded.
     usage_history_generation: u64,
     /// When the current snapshot landed, for the reopen-staleness check.
     usage_history_scanned_at: Option<Instant>,
@@ -1140,14 +1019,11 @@ pub struct Waku {
     /// The chart plot's window bounds, written during paint so the mouse-move
     /// handler can map positions to day indices.
     usage_chart_bounds: Rc<Cell<Option<gpui::Bounds<Pixels>>>>,
-    computer_use_app_icons: RefCell<HashMap<String, Option<std::sync::Arc<gpui::Image>>>>,
-    computer_use_app_icon_loads: RefCell<HashSet<String>>,
     model_picker_tab: ModelPickerTab,
     /// Keyboard cursor over the model picker's filtered rows. `None` means the
     /// keyboard has not moved yet, so `enter` takes the first row.
     model_picker_highlight: Option<usize>,
     model_picker_scroll: ScrollHandle,
-    model_picker_scrollbar: Rc<ScrollbarState>,
     branch_search: Entity<ComposerInput>,
     branch_create_input: Entity<ComposerInput>,
     branch_picker_mode: BranchPickerMode,
@@ -1172,12 +1048,12 @@ pub struct Waku {
     commit_operation: Option<commit_dialog::CommitOperationState>,
     /// Slash commands discovered per (provider, project root). Filesystem
     /// walks live on the background executor; frames read the index below.
-    slash_commands: QueryCache<(ProviderKind, PathBuf), Vec<SlashCommand>>,
+    slash_commands: QueryCache<(ProviderId, PathBuf), Vec<SlashCommand>>,
     /// The merged command list the autocomplete popup draws, and the key it
     /// was built for — a stale key means "no commands", never another
     /// provider's list.
     slash_command_index: Rc<Vec<SlashCommand>>,
-    slash_command_index_key: Option<(ProviderKind, PathBuf)>,
+    slash_command_index_key: Option<(ProviderId, PathBuf)>,
     /// Workspace file index per project root, for `@` mentions.
     mention_files: QueryCache<PathBuf, Vec<FileEntry>>,
     mention_file_index: Rc<Vec<FileEntry>>,
@@ -1398,7 +1274,7 @@ pub struct Waku {
     /// every visible row on every frame, and the underlying turn walk and
     /// answer join are O(session). Footers exist only for settled turns,
     /// whose parts are immutable, and settling moves the fingerprint.
-    assistant_footer_cache: RefCell<HashMap<usize, (Option<SharedString>, Option<u64>)>>,
+    assistant_footer_cache: RefCell<HashMap<usize, AssistantFooter>>,
     /// The row-kinds fingerprint `assistant_footer_cache` was built under.
     assistant_footer_fingerprint: Cell<Option<u64>>,
     /// Checkpoint-ref existence per (session, retained turn count), filled by
@@ -1792,7 +1668,6 @@ impl Waku {
         let composer_draft_store = ComposerDraftStore::remote(daemon.clone());
         let composer_drafts = composer_draft_store.load().unwrap_or_default();
         let mut state = store.load_or_fresh(cwd);
-        let home_directory = crate::projectless::home_directory();
         state.apply_daemon_settings(daemon.settings());
         if let Err(error) = daemon.update_settings(state.daemon_settings()) {
             eprintln!("could not normalize daemon settings after migration: {error:#}");
@@ -1871,12 +1746,19 @@ impl Waku {
                 .placeholder(tr!("skills.search"))
         });
         let session_rename_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
-        let provider_path_input = cx.new(|cx| {
-            ComposerInput::new(window, cx)
-                .search_field()
-                .select_all_on_focus_click()
-                .placeholder(tr!("input.detected_automatically"))
-        });
+        let provider_id_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let provider_name_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let provider_base_url_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let provider_api_key_env_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let provider_headers_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let provider_model_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let provider_context_window_input =
+            cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let provider_max_output_tokens_input =
+            cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let provider_default_model_input =
+            cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let auth_api_key_input = cx.new(|cx| ComposerInput::new(window, cx).secret_field());
         let usage_project_filter = cx.new(|cx| {
             ComposerInput::new(window, cx)
                 .search_field()
@@ -2029,54 +1911,14 @@ impl Waku {
             .into_iter()
             .map(ComposerAttachment::from)
             .collect();
-        let probes = ProviderKind::ALL
-            .into_iter()
-            .map(|provider| ProviderProbe {
-                provider,
-                installed: false,
-                path: None,
-                models: crate::model_catalog::fallback_models(provider),
-                agent_presets: crate::model_catalog::fallback_agent_presets(provider),
-            })
-            .collect::<Vec<_>>();
-        let (provider_probe_tx, provider_probe_events) = unbounded();
-        let (provider_version_tx, provider_version_events) = unbounded();
-        let (provider_detection_tx, provider_detection_events) = unbounded();
-        let (computer_permission_tx, computer_permission_events) = unbounded();
-        let (plan_usage_tx, plan_usage_events) = unbounded();
         let (event_wake_tx, event_wake_events) = smol::channel::bounded(1);
         let (task_state_sync_tx, task_state_sync_events) = unbounded();
-        #[cfg(target_os = "macos")]
-        {
-            let computer_permission_tx = computer_permission_tx.clone();
-            let event_wake = event_wake_tx.clone();
-            let daemon = daemon.client();
-            std::thread::Builder::new()
-                .name("waku-computer-permission-probe".into())
-                .spawn(move || {
-                    let result = match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::ProbeComputerPermissions { prompt: false },
-                    ) {
-                        Ok(waku_client::ResponsePayload::ComputerPermissions { permissions }) => {
-                            Ok(permissions)
-                        }
-                        Ok(_) => Err("the daemon returned an invalid permission response".into()),
-                        Err(error) => Err(error.to_string()),
-                    };
-                    if computer_permission_tx.send(result).is_ok() {
-                        signal_event_pump(&event_wake);
-                    }
-                })
-                .ok();
-        }
         let model_picker_tab = ModelPickerTab::Provider(
             state
                 .selected_session
                 .and_then(|id| state.sessions.iter().find(|session| session.id == id))
-                .map(|session| session.provider)
-                .unwrap_or(state.last_provider),
+                .map(|session| session.provider.clone())
+                .unwrap_or_else(|| state.last_provider.clone()),
         );
         let mut session_navigation = SessionNavigation::default();
         if let Some(session_id) = state.selected_session.filter(|session_id| {
@@ -2176,9 +2018,6 @@ impl Waku {
                     // app had focus — a checkout in a terminal, an edit in an
                     // editor. Coming back is the moment to re-check.
                     this.invalidate_workspace_queries(cx);
-                    if this.settings_page == Some(SettingsPage::ComputerUse) {
-                        this.request_computer_permissions(false, cx);
-                    }
                     // Skill files are routinely edited in another app; coming
                     // back to the window is the moment to re-read them.
                     if this.settings_page == Some(SettingsPage::Skills) {
@@ -2415,16 +2254,6 @@ impl Waku {
                 },
             )
             .detach();
-            cx.subscribe(
-                &provider_path_input,
-                |this: &mut Self, _, event: &ComposerEvent, cx| {
-                    if matches!(event, ComposerEvent::Submit(_)) {
-                        this.apply_provider_path_override(cx);
-                    }
-                },
-            )
-            .detach();
-
             // Like T3 Code's adapter subscriptions feeding its ingestion
             // worker, provider threads push an edge into this bounded wake
             // channel. The UI does no standing scan: the short follow-up tick
@@ -2489,21 +2318,6 @@ impl Waku {
 
             cx.spawn(async move |this, cx| {
                 loop {
-                    if this
-                        .update(cx, |this, cx| this.maybe_refresh_plan_usage(cx))
-                        .is_err()
-                    {
-                        break;
-                    }
-                    cx.background_executor()
-                        .timer(PLAN_USAGE_MAINTENANCE_INTERVAL)
-                        .await;
-                }
-            })
-            .detach();
-
-            cx.spawn(async move |this, cx| {
-                loop {
                     cx.background_executor()
                         .timer(IDLE_SESSION_SWEEP_INTERVAL)
                         .await;
@@ -2537,7 +2351,6 @@ impl Waku {
                 analytics,
                 state,
                 store,
-                home_directory,
                 composer,
                 user_input_answer,
                 composer_drafts,
@@ -2568,33 +2381,27 @@ impl Waku {
                 updater_button_animation_from_width: UPDATER_BUTTON_COLLAPSED_WIDTH,
                 updater_button_animation_from_reveal: 0.0,
                 updater_button_animation_generation: 0,
-                probes,
-                provider_probe_tx,
-                provider_probe_events,
-                provider_model_discoveries: HashSet::new(),
-                provider_model_discoveries_pending: HashSet::new(),
-                provider_versions: HashMap::new(),
-                provider_version_tx,
-                provider_version_events,
-                provider_version_probes_pending: HashSet::new(),
-                provider_detection_tx,
-                provider_detection_events,
-                provider_detection_remaining: 0,
-                provider_detection_checked_at: None,
                 expanded_provider_settings: None,
-                provider_path_input,
-                computer_permissions: ComputerPermissions::default(),
-                computer_permission_tx,
-                computer_permission_events,
-                computer_permission_request_pending: false,
-                plan_usage: HashMap::new(),
-                plan_usage_error: HashMap::new(),
-                plan_usage_tx,
-                plan_usage_events,
-                plan_usage_pending: HashSet::new(),
-                plan_usage_unconfigured: HashSet::new(),
-                plan_usage_checked_at: HashMap::new(),
-                plan_usage_stale: HashSet::new(),
+                provider_id_input,
+                provider_name_input,
+                provider_base_url_input,
+                provider_api_key_env_input,
+                provider_headers_input,
+                provider_model_input,
+                provider_context_window_input,
+                provider_max_output_tokens_input,
+                provider_default_model_input,
+                provider_api_format: waku_client::ApiFormat::OpenAiResponses,
+                auth_api_key_input,
+                auth_statuses: HashMap::new(),
+                auth_phases: Vec::new(),
+                auth_generation: 0,
+                auth_pending: HashSet::new(),
+                auth_error: HashMap::new(),
+                model_catalogs: HashMap::new(),
+                model_catalog_pending: HashSet::new(),
+                model_catalog_generation: 0,
+                model_catalog_error: HashMap::new(),
                 usage_history: None,
                 usage_history_pending_for: None,
                 usage_history_generation: 0,
@@ -2612,12 +2419,9 @@ impl Waku {
                 usage_projects_scale: Cell::new((0.0, true)),
                 usage_chart_hover: None,
                 usage_chart_bounds: Rc::default(),
-                computer_use_app_icons: RefCell::new(HashMap::new()),
-                computer_use_app_icon_loads: RefCell::new(HashSet::new()),
                 model_picker_tab,
                 model_picker_highlight: None,
                 model_picker_scroll: ScrollHandle::new(),
-                model_picker_scrollbar: ScrollbarState::new(),
                 branch_picker_mode: BranchPickerMode::Browse,
                 branch_picker_highlight: None,
                 branch_picker_list_state,
@@ -2807,11 +2611,6 @@ impl Waku {
             // The autocomplete indexes prefetch alongside, so typing `/` or
             // `@` into the very first prompt already has data to draw.
             this.refresh_composer_sources(cx);
-            // Re-detect providers after resolving the user's login-shell
-            // environment off-thread. Detection then starts model and version
-            // discovery for every CLI it finds, including nvm/fnm-managed
-            // installs.
-            this.refresh_provider_detection(None);
             // The skill library too: the Skills settings page must open onto
             // data, not a scan.
             this.ensure_skills_catalog(false, cx);

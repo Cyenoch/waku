@@ -16,6 +16,10 @@ the original feature bullet instead of adding separate entries for them.
 
 ## [unreleased]
 
+- Replace CLI discovery with configurable provider endpoints and dynamic model pickers
+- Keep API key values out of desktop settings and persisted state
+- Default new sessions to Ask access and migrate legacy Auto/Plan modes safely
+
 ## [0.1.2]
 
 - Fix regression: user bubble should fit its content width

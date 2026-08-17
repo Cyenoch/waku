@@ -78,18 +78,15 @@ describe('reduceRuntimeEvent', () => {
     })
   })
 
-  test('records Claude resume position on the active turn', () => {
+  test('marks a connecting session as working when the runtime connects', () => {
     const result = reduceRuntimeEvent(
       runningSession(),
-      event('connected', {
-        provider: 'claude',
-        sessionId: 'provider-session',
-        resumeAt: 'provider-message',
-      }),
+      event('connected', null),
       clock,
     )
 
-    expect(result.session.turns[0]?.provider_resume_at).toBe('provider-message')
+    expect(result.session.status).toBe('working')
+    expect(result.session.turns[0]?.provider_turn_started).toBe(false)
   })
 
   test('ignores late turn output and permission events after a turn settles', () => {
@@ -210,7 +207,6 @@ function runningSession(): AgentSession {
     status: 'connecting',
     created_at: 100,
     updated_at: 100,
-    provider_cursor: null,
     messages: [
       {
         id: 'message',

@@ -1,9 +1,8 @@
-//! The settings Usage page: historical token and cost usage across provider
-//! transcripts, mirroring T3 Code's usage dashboard — a windowed headline with
-//! per-provider share bars, a layered daily chart, a metric strip, a
-//! model/day breakdown, and cost quality. Data comes from
-//! [`crate::usage_history`], scanned by the daemon; frames read only the
-//! snapshot stored on the entity.
+//! The settings Usage page: historical token and cost usage across Waku
+//! sessions — a windowed headline with per-provider share bars, a layered
+//! daily chart, a metric strip, a model/day breakdown, and cost quality.
+//! Data is an indexed ledger aggregate from the daemon; frames read only
+//! the snapshot stored on the entity.
 
 use std::path::Path;
 
@@ -13,7 +12,7 @@ use gpui::{PathBuilder, relative};
 use super::*;
 use crate::usage_history::{
     self, MONTHLY_WINDOW, MonthSlice, PricingStatus, ProjectSlice, ProviderDay, UsageHistory,
-    UsageProvider, UsageWindow, WINDOW_CHOICES,
+    UsageWindow, WINDOW_CHOICES,
 };
 
 /// Rendered chart height, matching T3's `h-56` plot.
@@ -26,18 +25,29 @@ const CHART_GUTTER: f32 = 56.0;
 /// Uniform height hint for the virtualized project rows, so the scrollbar
 /// knows the total extent before rows are measured.
 const USAGE_PROJECT_ROW_HEIGHT: f32 = 96.0;
-/// A snapshot older than this rescans when the page is next opened.
+/// A snapshot older than this is refreshed when the page is next opened.
 const USAGE_RESCAN_AFTER: Duration = Duration::from_secs(120);
-fn provider_kind(provider: UsageProvider) -> ProviderKind {
-    match provider {
-        UsageProvider::Claude => ProviderKind::Claude,
-        UsageProvider::Codex => ProviderKind::Codex,
-    }
+
+fn provider_label(provider: &ProviderId) -> String {
+    waku_client::ProviderPreset::parse_id(provider.as_str())
+        .map(|preset| preset.display_name().to_owned())
+        .unwrap_or_else(|| provider.as_str().to_owned())
 }
 
 impl Waku {
-    /// Switch the settings view to `page`, warming the Usage scan when that
-    /// is where the user is heading.
+    fn usage_provider_label(&self, provider: &ProviderId) -> String {
+        if let Some(preset) = waku_client::ProviderPreset::parse_id(provider.as_str()) {
+            return preset.display_name().to_owned();
+        }
+        self.configured_provider(provider)
+            .map(|endpoint| endpoint.name.as_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| provider.as_str())
+            .to_owned()
+    }
+
+    /// Switch the settings view to `page`, warming the Usage ledger query
+    /// when that is where the user is heading.
     pub(super) fn open_settings_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
         // Secrets are revealed only for the current visit to the page. This
         // also masks the token again when the Daemon row is reselected.
@@ -49,13 +59,17 @@ impl Waku {
         if page == SettingsPage::Usage {
             self.ensure_usage_history(false, cx);
         }
+        if page == SettingsPage::Providers {
+            self.refresh_provider_auth_statuses(cx);
+            self.refresh_provider_catalogs(false, cx);
+        }
         if page == SettingsPage::Skills {
             self.ensure_skills_catalog(false, cx);
         }
         cx.notify();
     }
 
-    /// The scan window the active view needs: the statement view always
+    /// The ledger window the active view needs: the statement view always
     /// covers a year of calendar months; the daily and project views share
     /// the trailing-days selector.
     fn effective_usage_window(&self) -> UsageWindow {
@@ -65,10 +79,10 @@ impl Waku {
         }
     }
 
-    /// Start a background transcript scan unless a current-enough snapshot
-    /// (or an in-flight scan for the same window) already covers it. `force`
-    /// is the refresh button. Results from superseded scans are discarded by
-    /// generation, so a window change mid-scan cannot land stale data.
+    /// Load a windowed ledger aggregate unless a current-enough snapshot
+    /// (or an in-flight query for the same window) already covers it. `force`
+    /// is the refresh button. Results from superseded queries are discarded
+    /// by generation, so a window change mid-request cannot land stale data.
     pub(super) fn ensure_usage_history(&mut self, force: bool, cx: &mut Context<Self>) {
         let window = self.effective_usage_window();
         let satisfied = self
@@ -78,9 +92,9 @@ impl Waku {
             && self
                 .usage_history_scanned_at
                 .is_some_and(|scanned| scanned.elapsed() < USAGE_RESCAN_AFTER);
-        // A scan for this window already inbound absorbs even a forced
-        // refresh — it only just started reading the same files, and a
-        // duplicate would burn a background pass to produce the same answer.
+        // A query for this window already inbound absorbs even a forced
+        // refresh — it only just started, and a duplicate would burn a
+        // background pass to produce the same answer.
         if self.usage_history_pending_for == Some(window) {
             return;
         }
@@ -91,12 +105,6 @@ impl Waku {
         self.usage_history_generation += 1;
         let generation = self.usage_history_generation;
         let daemon = self.daemon.client();
-        let project_roots: Vec<PathBuf> = self
-            .state
-            .projects
-            .iter()
-            .map(|project| project.path.clone())
-            .collect();
         cx.spawn(async move |this, cx| {
             let history = cx
                 .background_executor()
@@ -104,10 +112,7 @@ impl Waku {
                     match daemon.request(
                         Uuid::nil(),
                         Uuid::nil(),
-                        waku_client::Command::LoadUsageHistory {
-                            window,
-                            project_roots,
-                        },
+                        waku_client::Command::LoadUsageHistory { window },
                     )? {
                         waku_client::ResponsePayload::UsageHistory { history } => Ok(history),
                         _ => anyhow::bail!("the daemon returned an invalid usage response"),
@@ -150,7 +155,7 @@ impl Waku {
             return;
         }
         self.usage_view = view;
-        // The statement view scans a different window; the others share one.
+        // The statement view queries a different window; the others share one.
         self.ensure_usage_history(false, cx);
         cx.notify();
     }
@@ -160,10 +165,10 @@ impl Waku {
         let pending = self.usage_history_pending_for.is_some();
         let expected = self.effective_usage_window();
         // A snapshot of the other shape (statement months vs trailing days)
-        // must not masquerade as this view's data — a 30-day scan rendered as
-        // a monthly statement would label partial months as whole ones. But
-        // within a shape, the previous window keeps rendering while its
-        // replacement scans: the range caption names what is actually shown,
+        // must not masquerade as this view's data — a 30-day window rendered
+        // as a monthly statement would label partial months as whole ones.
+        // Within a shape, the previous window keeps rendering while its
+        // replacement loads: the range caption names what is actually shown,
         // and swapping to a spinner on every window click would blink away a
         // page that is still substantially right.
         let history = self.usage_history.as_ref().filter(|history| {
@@ -194,7 +199,7 @@ impl Waku {
             .child(self.render_usage_header(range, pending, &theme, cx));
 
         let Some(history) = history else {
-            // First scan (or a window-shape switch) still in flight: a
+            // First load (or a window-shape switch) still in flight: a
             // skeleton in the incoming view's silhouette, so the swap to
             // data doesn't jump.
             return page
@@ -202,7 +207,7 @@ impl Waku {
                 .into_any_element();
         };
 
-        if !history.errors.is_empty() || history.pricing == PricingStatus::Unavailable {
+        if history.pricing == PricingStatus::Unavailable {
             page = page.child(usage_notices(history, &theme));
         }
 
@@ -238,22 +243,7 @@ impl Waku {
             UsageViewMode::Projects => page.child(self.render_usage_projects(history, &theme, cx)),
         };
 
-        page.child(
-            // What the numbers above are built from, so the totals are
-            // auditable at a glance.
-            div()
-                .mt(px(18.0))
-                .text_size(px(9.5))
-                .text_color(theme.text_ghost)
-                .child(SharedString::from(tr!(
-                    "usage.scan_summary",
-                    scanned = format_count(history.scanned_files as u64),
-                    skipped = format_count(history.skipped_files as u64),
-                    records = format_count(history.records),
-                    seconds = format!("{:.1}", history.scan_duration.as_secs_f64())
-                ))),
-        )
-        .into_any_element()
+        page.into_any_element()
     }
 
     /// The range caption plus the view switcher, the window selector (when
@@ -305,6 +295,14 @@ impl Waku {
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_usage_view(view, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            this.set_usage_view(view, cx);
+                            cx.stop_propagation();
+                        }
                     })),
             );
         }
@@ -375,6 +373,14 @@ impl Waku {
             .child(refresh_glyph)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.ensure_usage_history(true, cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    this.ensure_usage_history(true, cx);
+                    cx.stop_propagation();
+                }
             }));
 
         let range_label = if monthly {
@@ -471,11 +477,10 @@ impl Waku {
         // descend.
         let mut providers = history.providers.clone();
         if metric == UsageMetric::Tokens {
-            providers.sort_by(|a, b| b.total_tokens.cmp(&a.total_tokens));
+            providers.sort_by_key(|provider| std::cmp::Reverse(provider.total_tokens));
         }
         for provider in &providers {
-            let kind = provider_kind(provider.provider);
-            let color = provider_color(theme, kind);
+            let color = provider_color(theme, &provider.provider);
             let share = match metric {
                 UsageMetric::Cost => provider.cost_share,
                 UsageMetric::Tokens => provider.token_share,
@@ -506,7 +511,7 @@ impl Waku {
                             .flex()
                             .items_center()
                             .gap(px(8.0))
-                            .child(icon(provider_icon(kind), 14.0, color))
+                            .child(icon(provider_icon(&provider.provider), 14.0, color))
                             .child(
                                 div()
                                     .flex_1()
@@ -514,7 +519,9 @@ impl Waku {
                                     .truncate()
                                     .text_size(px(12.5))
                                     .text_color(theme.text)
-                                    .child(provider.provider.label()),
+                                    .child(SharedString::from(
+                                        self.usage_provider_label(&provider.provider),
+                                    )),
                             )
                             .child(
                                 div()
@@ -602,24 +609,39 @@ impl Waku {
                             this.usage_metric = option;
                             cx.notify();
                         }
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                            && this.usage_metric != option
+                        {
+                            this.usage_metric = option;
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
                     })),
             );
         }
 
         let mut legend = div().flex().items_center().gap(px(14.0));
-        for provider in UsageProvider::ALL {
-            let kind = provider_kind(provider);
+        for provider in &history.providers {
             legend = legend.child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(5.0))
-                    .child(icon(provider_icon(kind), 12.0, provider_color(theme, kind)))
+                    .child(icon(
+                        provider_icon(&provider.provider),
+                        12.0,
+                        provider_color(theme, &provider.provider),
+                    ))
                     .child(
                         div()
                             .text_size(px(10.5))
                             .text_color(theme.text_secondary)
-                            .child(provider.label()),
+                            .child(SharedString::from(
+                                self.usage_provider_label(&provider.provider),
+                            )),
                     ),
             );
         }
@@ -695,25 +717,32 @@ impl Waku {
     ) -> Div {
         let metric = self.usage_metric;
         let day_count = days.len();
-        // One column per day, per provider in ALL order. The chart paths and
-        // the hover readout both consume this, so the number under the cursor
-        // is by construction the number that was plotted.
-        let series: Vec<[f64; 2]> = days
+        let providers: Vec<ProviderId> = history
+            .providers
+            .iter()
+            .map(|slice| slice.provider.clone())
+            .collect();
+        let series: Vec<Vec<f64>> = days
             .iter()
             .map(|day| {
                 let slice = history.day(*day);
-                let value = |provider: UsageProvider| {
-                    slice
-                        .map(|slice| {
-                            let entry = slice.by_provider[provider.index()];
-                            match metric {
+                providers
+                    .iter()
+                    .map(|provider| {
+                        slice
+                            .and_then(|slice| {
+                                slice
+                                    .by_provider
+                                    .iter()
+                                    .find(|entry| &entry.provider == provider)
+                            })
+                            .map(|entry| match metric {
                                 UsageMetric::Cost => entry.cost_usd,
                                 UsageMetric::Tokens => entry.total_tokens as f64,
-                            }
-                        })
-                        .unwrap_or(0.0)
-                };
-                [value(UsageProvider::Claude), value(UsageProvider::Codex)]
+                            })
+                            .unwrap_or(0.0)
+                    })
+                    .collect()
             })
             .collect();
         // The scale tops out at the largest single provider-day, not the
@@ -760,10 +789,10 @@ impl Waku {
         }
 
         let hover = self.usage_chart_hover.filter(|index| *index < day_count);
-        let colors = [
-            provider_color(theme, ProviderKind::Claude),
-            provider_color(theme, ProviderKind::Codex),
-        ];
+        let colors: Vec<Hsla> = providers
+            .iter()
+            .map(|provider| provider_color(theme, provider))
+            .collect();
         let bounds_cell = self.usage_chart_bounds.clone();
         let paint_series = series.clone();
         let paint_ticks = ticks.clone();
@@ -1002,6 +1031,16 @@ impl Waku {
                             this.usage_breakdown = option;
                             cx.notify();
                         }
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                            && this.usage_breakdown != option
+                        {
+                            this.usage_breakdown = option;
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
                     })),
             );
         }
@@ -1236,12 +1275,11 @@ impl Waku {
     }
 
     /// One project row, built only while visible. Reads the per-frame row
-    /// cache and scale; a stale index from a frame racing a rescan renders
+    /// cache and scale; a stale index from a frame racing a refresh renders
     /// as an empty row for that frame rather than panicking.
     fn usage_project_row(&self, row: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
         let (peak, by_cost) = self.usage_projects_scale.get();
-        let colors = usage_provider_colors(&theme);
         let rows = self.usage_projects_rows.borrow();
         let last = row + 1 == rows.len();
         let Some(index) = rows.get(row).copied() else {
@@ -1343,7 +1381,6 @@ impl Waku {
             )
             .child(div().mt(px(9.0)).child(usage_split_bar(
                 &theme,
-                colors,
                 if peak <= 0.0 {
                     0.0
                 } else {
@@ -1447,8 +1484,8 @@ impl Waku {
 /* Stateless sections                                                        */
 /* ------------------------------------------------------------------------- */
 
-/// Says plainly when the totals are incomplete: an unreadable transcript
-/// directory, or no rate table to price against.
+/// Says plainly when the totals are incomplete: no rate table to price
+/// against.
 fn usage_notices(history: &UsageHistory, theme: &Theme) -> Div {
     let mut notice = div()
         .mt(px(14.0))
@@ -1462,9 +1499,6 @@ fn usage_notices(history: &UsageHistory, theme: &Theme) -> Div {
         .gap(px(3.0))
         .text_size(px(10.5))
         .text_color(theme.text_tertiary);
-    for error in &history.errors {
-        notice = notice.child(SharedString::from(error.clone()));
-    }
     if history.pricing == PricingStatus::Unavailable {
         notice = notice.child(tr!("usage.rates_unavailable"));
     }
@@ -1481,17 +1515,6 @@ fn usage_chart_readout(
     theme: &Theme,
 ) -> Div {
     let slice = history.day(day);
-    let value = |provider: UsageProvider| {
-        slice
-            .map(|slice| {
-                let entry = slice.by_provider[provider.index()];
-                match metric {
-                    UsageMetric::Cost => entry.cost_usd,
-                    UsageMetric::Tokens => entry.total_tokens as f64,
-                }
-            })
-            .unwrap_or(0.0)
-    };
     let format_value = |value: f64| match metric {
         UsageMetric::Cost => format_usd(value),
         UsageMetric::Tokens => format_tokens_compact(value),
@@ -1522,21 +1545,35 @@ fn usage_chart_readout(
                 .child(SharedString::from(format_day_short(day))),
         );
     let mut total = 0.0;
-    for provider in UsageProvider::ALL {
-        let kind = provider_kind(provider);
-        let amount = value(provider);
+    for provider in &history.providers {
+        let amount = slice
+            .and_then(|slice| {
+                slice
+                    .by_provider
+                    .iter()
+                    .find(|entry| entry.provider == provider.provider)
+            })
+            .map(|entry| match metric {
+                UsageMetric::Cost => entry.cost_usd,
+                UsageMetric::Tokens => entry.total_tokens as f64,
+            })
+            .unwrap_or(0.0);
         total += amount;
         readout = readout.child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .child(icon(provider_icon(kind), 11.0, provider_color(theme, kind)))
+                .child(icon(
+                    provider_icon(&provider.provider),
+                    11.0,
+                    provider_color(theme, &provider.provider),
+                ))
                 .child(
                     div()
                         .flex_1()
                         .text_color(theme.text_secondary)
-                        .child(provider.label()),
+                        .child(SharedString::from(provider_label(&provider.provider))),
                 )
                 .child(
                     div()
@@ -1725,7 +1762,6 @@ fn usage_model_table(history: &UsageHistory, theme: &Theme) -> Div {
         return table.child(usage_table_empty_row(theme));
     }
     for model in &history.models {
-        let kind = provider_kind(model.provider);
         table = table.child(
             div()
                 .py(px(8.0))
@@ -1741,7 +1777,11 @@ fn usage_model_table(history: &UsageHistory, theme: &Theme) -> Div {
                         .flex()
                         .items_center()
                         .gap(px(7.0))
-                        .child(icon(provider_icon(kind), 12.0, provider_color(theme, kind)))
+                        .child(icon(
+                            provider_icon(&model.provider),
+                            12.0,
+                            provider_color(theme, &model.provider),
+                        ))
                         .child(
                             div()
                                 .min_w_0()
@@ -1778,10 +1818,10 @@ fn usage_day_table(history: &UsageHistory, theme: &Theme) -> Div {
         .text_size(px(10.5))
         .text_color(theme.text_tertiary)
         .child(div().flex_1().min_w_0().child(tr!("usage.day")));
-    for provider in UsageProvider::ALL {
+    for provider in &history.providers {
         header = header.child(usage_cell(
             84.0,
-            provider.label().to_owned(),
+            provider_label(&provider.provider),
             theme.text_tertiary,
         ));
     }
@@ -1808,12 +1848,14 @@ fn usage_day_table(history: &UsageHistory, theme: &Theme) -> Div {
                     .text_color(theme.text)
                     .child(SharedString::from(format_day_short(day.day))),
             );
-        for provider in UsageProvider::ALL {
-            row = row.child(usage_cell(
-                84.0,
-                format_usd(day.by_provider[provider.index()].cost_usd),
-                theme.text_tertiary,
-            ));
+        for provider in &history.providers {
+            let cost = day
+                .by_provider
+                .iter()
+                .find(|entry| entry.provider == provider.provider)
+                .map(|entry| entry.cost_usd)
+                .unwrap_or(0.0);
+            row = row.child(usage_cell(84.0, format_usd(cost), theme.text_tertiary));
         }
         table = table.child(
             row.child(usage_cell(84.0, format_usd(day.cost_usd), theme.text))
@@ -1886,7 +1928,7 @@ fn usage_quality_panel(history: &UsageHistory, theme: &Theme) -> Div {
 /* Loading skeleton                                                          */
 /* ------------------------------------------------------------------------- */
 
-/// Placeholder for the page while the first transcript scan is in flight,
+/// Placeholder for the page while the first ledger query is in flight,
 /// shaped like the view it will become and pulsing gently. `with_animation`
 /// honors the system's reduce-motion setting on its own.
 fn usage_skeleton(view: UsageViewMode, theme: &Theme) -> AnyElement {
@@ -2060,13 +2102,6 @@ fn rank_by_cost(history: &UsageHistory) -> bool {
     history.cost_usd > 0.0
 }
 
-fn usage_provider_colors(theme: &Theme) -> [Hsla; 2] {
-    [
-        provider_color(theme, ProviderKind::Claude),
-        provider_color(theme, ProviderKind::Codex),
-    ]
-}
-
 /// The period total in the ranking unit.
 fn usage_headline_value(history: &UsageHistory, by_cost: bool) -> String {
     if by_cost {
@@ -2139,18 +2174,11 @@ fn usage_list_empty_row(theme: &Theme, message: String) -> Div {
 /// A magnitude bar over a faint full-width track: `length` is the row's
 /// share of the list's peak, and the bar splits into provider segments so
 /// one glance carries both size and mix.
-fn usage_split_bar(
-    theme: &Theme,
-    colors: [Hsla; 2],
-    length: f32,
-    by_provider: &[ProviderDay; 2],
-    by_cost: bool,
-) -> Div {
-    let values = [
-        usage_provider_value(&by_provider[0], by_cost),
-        usage_provider_value(&by_provider[1], by_cost),
-    ];
-    let sum = values[0] + values[1];
+fn usage_split_bar(theme: &Theme, length: f32, by_provider: &[ProviderDay], by_cost: bool) -> Div {
+    let sum: f64 = by_provider
+        .iter()
+        .map(|entry| usage_provider_value(entry, by_cost))
+        .sum();
     let length = if length > 0.0 {
         length.clamp(0.02, 1.0)
     } else {
@@ -2163,13 +2191,14 @@ fn usage_split_bar(
         .overflow_hidden()
         .flex();
     if sum > 0.0 {
-        for (index, value) in values.into_iter().enumerate() {
+        for entry in by_provider {
+            let value = usage_provider_value(entry, by_cost);
             if value > 0.0 {
                 bar = bar.child(
                     div()
                         .h_full()
                         .w(relative((value / sum) as f32))
-                        .bg(colors[index]),
+                        .bg(provider_color(theme, &entry.provider)),
                 );
             }
         }
@@ -2192,20 +2221,22 @@ fn usage_provider_value(entry: &ProviderDay, by_cost: bool) -> f64 {
 
 /// Per-provider amounts with their marks, skipping providers absent from
 /// the row.
-fn usage_provider_values(theme: &Theme, by_provider: &[ProviderDay; 2], by_cost: bool) -> Div {
+fn usage_provider_values(theme: &Theme, by_provider: &[ProviderDay], by_cost: bool) -> Div {
     let mut row = div().flex().items_center().gap(px(14.0));
-    for provider in UsageProvider::ALL {
-        let entry = by_provider[provider.index()];
+    for entry in by_provider {
         if entry.total_tokens == 0 && entry.cost_usd <= 0.0 {
             continue;
         }
-        let kind = provider_kind(provider);
         row = row.child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(5.0))
-                .child(icon(provider_icon(kind), 11.0, provider_color(theme, kind)))
+                .child(icon(
+                    provider_icon(&entry.provider),
+                    11.0,
+                    provider_color(theme, &entry.provider),
+                ))
                 .child(
                     div()
                         .text_size(px(10.5))
@@ -2318,21 +2349,36 @@ fn usage_month_strip(
     first_day: NaiveDate,
     peak: f64,
     by_cost: bool,
-    colors: [Hsla; 2],
+    theme: &Theme,
 ) -> impl IntoElement {
     let day_count = usage_history::days_in_month(first_day);
-    let values: Vec<[f64; 2]> = (0..day_count)
+    let providers: Vec<ProviderId> = history
+        .providers
+        .iter()
+        .map(|slice| slice.provider.clone())
+        .collect();
+    let colors: Vec<Hsla> = providers
+        .iter()
+        .map(|provider| provider_color(theme, provider))
+        .collect();
+    let values: Vec<Vec<f64>> = (0..day_count)
         .map(|offset| {
             let day = first_day + chrono::Days::new(u64::from(offset));
-            history
-                .day(day)
-                .map(|slice| {
-                    [
-                        usage_provider_value(&slice.by_provider[0], by_cost),
-                        usage_provider_value(&slice.by_provider[1], by_cost),
-                    ]
+            let slice = history.day(day);
+            providers
+                .iter()
+                .map(|provider| {
+                    slice
+                        .and_then(|slice| {
+                            slice
+                                .by_provider
+                                .iter()
+                                .find(|entry| &entry.provider == provider)
+                        })
+                        .map(|entry| usage_provider_value(entry, by_cost))
+                        .unwrap_or(0.0)
                 })
-                .unwrap_or([0.0, 0.0])
+                .collect()
         })
         .collect();
     canvas(
@@ -2349,12 +2395,12 @@ fn usage_month_strip(
             for (index, bands) in values.iter().enumerate() {
                 let x = bounds.origin.x + px(index as f32 * (bar_width + gap));
                 let mut top = bounds.origin.y + bounds.size.height;
-                for (band, color) in bands.iter().zip(colors) {
+                for (band, color) in bands.iter().zip(colors.iter().copied()) {
                     if *band <= 0.0 {
                         continue;
                     }
                     let band_height = ((*band / peak) as f32 * height).max(1.5);
-                    top = top - px(band_height);
+                    top -= px(band_height);
                     if top < bounds.origin.y {
                         top = bounds.origin.y;
                     }
@@ -2372,11 +2418,6 @@ fn usage_month_strip(
     .w(px(168.0))
     .h(px(20.0))
 }
-
-/// The statement: one row per calendar month, newest first, from the current
-/// month back to the earliest with activity — gap months stay as dim rows so
-/// the timeline reads honestly. The card pins its header and scrolls the
-/// rows internally, matching the projects view.
 fn usage_month_list(
     waku: &Waku,
     history: &UsageHistory,
@@ -2386,7 +2427,6 @@ fn usage_month_list(
     cx: &mut Context<Waku>,
 ) -> Div {
     let by_cost = rank_by_cost(history);
-    let colors = usage_provider_colors(theme);
     let month_value = |month: &MonthSlice| {
         if by_cost {
             month.cost_usd
@@ -2431,7 +2471,6 @@ fn usage_month_list(
                         history,
                         month,
                         theme,
-                        colors,
                         by_cost,
                         peak,
                         day_peak,
@@ -2496,7 +2535,6 @@ fn usage_month_row(
     history: &UsageHistory,
     month: &MonthSlice,
     theme: &Theme,
-    colors: [Hsla; 2],
     by_cost: bool,
     peak: f64,
     day_peak: f64,
@@ -2575,12 +2613,11 @@ fn usage_month_row(
                     month.first_day,
                     day_peak,
                     by_cost,
-                    colors,
+                    theme,
                 )),
         )
         .child(div().mt(px(9.0)).child(usage_split_bar(
             theme,
-            colors,
             if peak <= 0.0 {
                 0.0
             } else {

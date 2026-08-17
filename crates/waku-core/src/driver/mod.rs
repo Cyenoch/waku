@@ -1,32 +1,32 @@
-//! Local provider runtime owned by `waku-daemon`.
+//! Daemon-owned in-process provider runtime.
 
-mod acp;
 mod activity;
-mod amp;
-mod claude;
-mod codex;
-mod computer_use;
-mod deepseek;
-mod opencode;
-mod pi;
-mod support;
-mod title_refresh;
+mod embedded;
+
+/// Exact system prompt installed on every fresh embedded session.
+///
+/// Existing snapshots keep whatever prompt they already stored. Mode changes
+/// must not rewrite this text.
+pub const WAKU_SYSTEM_PROMPT: &str = "You are Waku, a coding assistant working in the user's workspace.
+
+Use the available tools to inspect and change files. Prefer precise, minimal edits. Do not invent file contents or command results you have not observed.
+
+Interaction modes:
+- Build: implement the requested change. You may edit files and, when permitted, run shell commands.
+- Plan: analyze the request and propose an approach. Do not edit files or run mutating shell commands; use read-only inspection only.
+
+Follow the user's instructions. Ask when a required choice is ambiguous.";
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crossbeam_channel::{Receiver, SendError, Sender, unbounded};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 
-use crate::computer_use::ComputerToolRequest;
-use crate::model::{
-    BackgroundWorkKey, DriverEvent, InteractionMode, ProviderKind, ProviderResumeCursor,
-    RuntimeMode, UserInputAnswer,
-};
+use crate::model::{DriverEvent, InteractionMode, ProviderId, RuntimeMode};
+use waku_protocol::ExternalProvider;
 
 /// Provider events remain synchronous to send from reader threads, while the
 /// bounded wake channel lets the UI sleep until at least one event is ready.
-/// Multiple provider writes coalesce into one wake without ever blocking the
-/// provider or dropping the events themselves.
 #[derive(Clone)]
 pub struct DriverEventSender {
     events: Sender<DriverEvent>,
@@ -34,27 +34,12 @@ pub struct DriverEventSender {
 }
 
 impl DriverEventSender {
-    pub fn send(&self, event: DriverEvent) -> Result<(), SendError<DriverEvent>> {
-        self.events.send(event)?;
+    pub fn send(&self, event: DriverEvent) -> bool {
+        if self.events.send(event).is_err() {
+            return false;
+        }
         let _ = self.wake.try_send(());
-        Ok(())
-    }
-}
-
-pub(crate) trait DriverEventSink {
-    fn send(&self, event: DriverEvent) -> Result<(), SendError<DriverEvent>>;
-}
-
-impl DriverEventSink for DriverEventSender {
-    fn send(&self, event: DriverEvent) -> Result<(), SendError<DriverEvent>> {
-        DriverEventSender::send(self, event)
-    }
-}
-
-#[cfg(test)]
-impl DriverEventSink for Sender<DriverEvent> {
-    fn send(&self, event: DriverEvent) -> Result<(), SendError<DriverEvent>> {
-        Sender::send(self, event)
+        true
     }
 }
 
@@ -73,156 +58,107 @@ pub(crate) fn test_event_channel() -> (DriverEventSender, Receiver<DriverEvent>)
 
 #[derive(Clone)]
 pub struct DriverHandle {
-    inner: Arc<dyn DriverControl>,
+    inner: Arc<embedded::EmbeddedDriver>,
 }
 
 impl DriverHandle {
-    pub fn from_control(control: Arc<dyn DriverControl>) -> Self {
-        Self { inner: control }
+    pub fn prompt(&self, message: waku_harness::UserMessage) {
+        self.inner.prompt(message);
     }
 
-    pub fn prompt(&self, prompt: String) {
-        self.inner.prompt(prompt);
-    }
-
-    /// Whether this transport can inject a user message into the currently
-    /// running turn (steering) instead of starting a new one.
     pub fn supports_steer(&self) -> bool {
         self.inner.supports_steer()
     }
 
-    pub fn steer(&self, prompt: String) {
-        self.inner.steer(prompt);
+    pub fn steer(&self, message: waku_harness::UserMessage) {
+        self.inner.steer(message);
     }
 
     pub fn cancel(&self) {
         self.inner.cancel();
     }
 
-    pub fn cancel_computer_use(&self) {
-        self.inner.cancel_computer_use();
-    }
-
-    pub fn refresh_background_work(&self) {
-        self.inner.refresh_background_work();
-    }
-
-    pub fn stop_background_work(&self, key: BackgroundWorkKey, control_id: String) {
-        self.inner.stop_background_work(key, control_id);
-    }
-
     pub fn respond(&self, request_id: String, option_id: String) {
         self.inner.respond(request_id, option_id);
     }
 
-    pub fn respond_user_input(&self, request_id: String, answers: Vec<UserInputAnswer>) {
-        self.inner.respond_user_input(request_id, answers);
+    pub fn respond_user_input(
+        &self,
+        request_id: String,
+        answers: Vec<waku_protocol::model::UserInputAnswer>,
+    ) -> anyhow::Result<()> {
+        self.inner.respond_user_input(request_id, answers)
     }
 
-    pub fn run_computer_tool(&self, request: ComputerToolRequest) {
-        self.inner.run_computer_tool(request);
-    }
-
-    pub fn reject_computer_tool(&self, request: ComputerToolRequest, reason: String) {
-        self.inner.reject_computer_tool(request, reason);
+    pub fn reject_background_stop(&self, key: waku_protocol::model::BackgroundWorkKey) {
+        self.inner.reject_background_stop(key);
     }
 
     pub fn apply_options(&self, options: SessionOptions) -> bool {
         self.inner.apply_options(options)
     }
 
-    pub fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
-        self.inner.rollback(turns)
+    pub fn replace_auth(
+        &self,
+        auth: waku_harness::Auth,
+        extra_auth_headers: Vec<(String, String)>,
+    ) -> anyhow::Result<()> {
+        self.inner.replace_auth(auth, extra_auth_headers)
     }
 
-    pub fn fork(&self, turns_to_remove: usize) -> anyhow::Result<ProviderResumeCursor> {
-        self.inner.fork(turns_to_remove)
+    pub fn rollback(&self, turns: usize) -> anyhow::Result<()> {
+        self.inner.rewind(turns)
     }
-}
 
-pub trait DriverControl: Send + Sync {
-    fn prompt(&self, prompt: String);
-    fn supports_steer(&self) -> bool {
-        false
-    }
-    /// Deliver a steering message to the running turn. Implementations report
-    /// the outcome asynchronously through `DriverEvent::SteerAccepted` or
-    /// `DriverEvent::SteerRejected`.
-    fn steer(&self, _prompt: String) {}
-    fn cancel(&self);
-    fn cancel_computer_use(&self) {}
-    fn refresh_background_work(&self) {}
-    fn stop_background_work(&self, _key: BackgroundWorkKey, _control_id: String) {}
-    fn respond(&self, request_id: String, option_id: String);
-    fn respond_user_input(&self, _request_id: String, _answers: Vec<UserInputAnswer>) {}
-    fn run_computer_tool(&self, _request: ComputerToolRequest) {}
-    fn reject_computer_tool(&self, _request: ComputerToolRequest, _reason: String) {}
-    /// Applies changed turn options to the live session, returning whether the
-    /// transport could do it without being restarted. A `false` answer is the
-    /// driver asking to be torn down and recreated with the new options.
-    fn apply_options(&self, _options: SessionOptions) -> bool {
-        false
-    }
-    fn rollback(&self, turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>>;
-    fn fork(&self, _turns_to_remove: usize) -> anyhow::Result<ProviderResumeCursor> {
-        anyhow::bail!("conversation forking is not supported by this provider transport")
+    pub fn snapshot(&self) -> anyhow::Result<waku_harness::SessionSnapshot> {
+        self.inner.snapshot()
     }
 }
 
 pub struct DriverStartOptions {
-    pub binary: PathBuf,
+    pub provider: ExternalProvider,
     pub cwd: PathBuf,
     pub mode: RuntimeMode,
     pub interaction_mode: InteractionMode,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
-    pub service_tier: Option<String>,
+    pub service_tier: Option<waku_protocol::ServiceTier>,
     pub context_window: Option<String>,
-    pub agent_preset: Option<String>,
-    pub computer_use_enabled: bool,
-    pub provider_cursor: Option<ProviderResumeCursor>,
+    pub auth: waku_harness::Auth,
+    pub transport: waku_protocol::TransportProfile,
+    pub extra_auth_headers: Vec<(String, String)>,
+    pub capabilities: waku_protocol::ModelCapabilities,
+    pub(crate) snapshot: waku_harness::SessionSnapshot,
 }
 
-/// The subset of `DriverStartOptions` a user can change without starting a new
-/// task. Transports that carry these per turn can absorb a change in place;
-/// the rest have to be restarted.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
+pub struct SessionReconfigure {
+    pub provider: ExternalProvider,
+    pub auth: waku_harness::Auth,
+    pub transport: waku_protocol::TransportProfile,
+    pub extra_auth_headers: Vec<(String, String)>,
+    pub capabilities: waku_protocol::ModelCapabilities,
+}
+
+#[derive(Clone, Debug)]
 pub struct SessionOptions {
     pub mode: RuntimeMode,
     pub interaction_mode: InteractionMode,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
-    pub service_tier: Option<String>,
+    pub service_tier: Option<waku_protocol::ServiceTier>,
     pub context_window: Option<String>,
+    pub reconfigure: Option<SessionReconfigure>,
 }
 
 pub(crate) fn start_local(
-    provider: ProviderKind,
+    provider: ProviderId,
     options: DriverStartOptions,
     events: DriverEventSender,
 ) -> anyhow::Result<DriverHandle> {
-    let inner: Arc<dyn DriverControl> = match provider {
-        ProviderKind::Codex => Arc::new(codex::CodexDriver::start(options, events)?),
-        ProviderKind::Pi => Arc::new(pi::PiDriver::start(options, events)?),
-        // Cursor and Grok both serve a long-lived ACP session, which is the only
-        // way their Supervised mode can actually ask the user rather than
-        // silently forcing or denying.
-        ProviderKind::Cursor | ProviderKind::Grok => {
-            Arc::new(acp::AcpDriver::start(provider, options, events)?)
-        }
-        ProviderKind::DeepSeek => Arc::new(deepseek::DeepSeekDriver::start(options, events)?),
-        // OpenCode's own server is its real API, and it is what exposes
-        // interactive permission requests.
-        ProviderKind::OpenCode => Arc::new(opencode::OpenCodeDriver::start(options, events)?),
-        // Claude serves a realtime stream of user messages on stdin — the same
-        // transport the Agent SDK drives — which is what lets its Supervised
-        // mode ask rather than decide alone.
-        ProviderKind::Claude => Arc::new(claude::ClaudeDriver::start(options, events)?),
-        // Amp reads newline-delimited user messages on stdin and stays alive
-        // until stdin closes, so it too serves the whole conversation.
-        ProviderKind::Amp => Arc::new(amp::AmpDriver::start(options, events)?),
-    };
-    Ok(DriverHandle { inner })
+    Ok(DriverHandle {
+        inner: Arc::new(embedded::EmbeddedDriver::start(provider, options, events)?),
+    })
 }
 
 #[cfg(test)]
@@ -234,8 +170,8 @@ mod tests {
         let (wake, wakes) = smol::channel::bounded(1);
         let (events, received) = event_channel(wake);
 
-        events.send(DriverEvent::TextDelta("one".into())).unwrap();
-        events.send(DriverEvent::TextDelta("two".into())).unwrap();
+        assert!(events.send(DriverEvent::TextDelta("one".into())));
+        assert!(events.send(DriverEvent::TextDelta("two".into())));
 
         assert_eq!(wakes.try_recv(), Ok(()));
         assert!(matches!(

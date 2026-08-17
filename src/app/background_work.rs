@@ -46,11 +46,22 @@ struct EnvironmentSummary {
     commit_focus: FocusHandle,
     compare_focus: FocusHandle,
 }
+struct EnvironmentActionRowArgs<'a> {
+    id: &'static str,
+    focus: &'a FocusHandle,
+    icon_path: &'static str,
+    label: String,
+    enabled: bool,
+    active: bool,
+    trailing: Option<AnyElement>,
+}
+
+type EnvironmentAction = Rc<dyn Fn(&mut Window, &mut App)>;
 
 impl BackgroundWorkRegistry {
     fn apply(&mut self, event: BackgroundWorkEvent) {
         match event {
-            BackgroundWorkEvent::Upsert(item) => self.upsert(item),
+            BackgroundWorkEvent::Upsert(item) => self.upsert(*item),
             BackgroundWorkEvent::OutputDelta { key, delta } => self.append_output(&key, &delta),
             BackgroundWorkEvent::ReconcileProcesses { items } => self.reconcile_processes(items),
             BackgroundWorkEvent::ReconcileLive { items } => self.reconcile_live(items),
@@ -485,16 +496,7 @@ impl Waku {
         session_id: Uuid,
         activity: &ActivityItem,
     ) {
-        if activity.kind != crate::model::ActivityKind::Command
-            || self
-                .state
-                .sessions
-                .iter()
-                .find(|session| session.id == session_id)
-                .is_some_and(|session| {
-                    matches!(session.provider, ProviderKind::Codex | ProviderKind::Claude)
-                })
-        {
+        if activity.kind != crate::model::ActivityKind::Command {
             return;
         }
         let provider_id = activity
@@ -518,7 +520,7 @@ impl Waku {
         item.detail = activity.detail.clone();
         item.output = activity.output.clone();
         item.origin_activity_id = Some(provider_id);
-        self.handle_background_work_event(session_id, BackgroundWorkEvent::Upsert(item));
+        self.handle_background_work_event(session_id, BackgroundWorkEvent::upsert(item));
     }
 
     pub(super) fn handle_background_work_event(
@@ -588,19 +590,6 @@ impl Waku {
             cx.notify();
         }
         let selected = self.state.selected_session;
-        for (session_id, runtime) in &mut self.runtimes {
-            let should_refresh = selected == Some(*session_id)
-                || self
-                    .background_work
-                    .get(session_id)
-                    .is_some_and(BackgroundWorkRegistry::has_live);
-            if should_refresh
-                && runtime.last_background_refresh_at.elapsed() >= BACKGROUND_WORK_REFRESH_INTERVAL
-            {
-                runtime.last_background_refresh_at = Instant::now();
-                runtime.driver.refresh_background_work();
-            }
-        }
 
         if self.last_background_work_tick.elapsed() >= BACKGROUND_WORK_TICK_INTERVAL
             && selected.is_some_and(|session_id| self.session_has_live_background_work(session_id))
@@ -616,13 +605,13 @@ impl Waku {
         key: BackgroundWorkKey,
         cx: &mut Context<Self>,
     ) {
-        let control_id = self
+        let Some(control_id) = self
             .background_work
             .get(&session_id)
             .and_then(|registry| registry.items.get(&key))
             .filter(|item| item.status.is_stoppable() && item.can_stop)
-            .and_then(|item| item.control_id.clone());
-        let Some(control_id) = control_id else {
+            .and_then(|item| item.control_id.clone())
+        else {
             return;
         };
         let Some(driver) = self
@@ -974,7 +963,11 @@ impl Waku {
                                     .gap(px(5.0))
                                     .text_size(px(10.0))
                                     .text_color(theme.text_tertiary)
-                                    .child(rendered_work_status_icon(item.status, 9.0, status_color))
+                                    .child(rendered_work_status_icon(
+                                        item.status,
+                                        9.0,
+                                        status_color,
+                                    ))
                                     .child(work_status_label(item.status))
                                     .child("·")
                                     .child(work_elapsed(item)),
@@ -1247,15 +1240,17 @@ fn render_environment_summary_section(
     let commit_weak = weak.clone();
     let commit_pending = environment.commit_status.is_some();
     let commit = render_environment_action_row(
-        "environment-summary-commit",
-        &environment.commit_focus,
-        "icons/git-commit-horizontal.svg",
-        environment
-            .commit_status
-            .unwrap_or_else(|| tr!("environment.commit_or_push")),
-        !commit_pending,
-        commit_pending,
-        None,
+        EnvironmentActionRowArgs {
+            id: "environment-summary-commit",
+            focus: &environment.commit_focus,
+            icon_path: "icons/git-commit-horizontal.svg",
+            label: environment
+                .commit_status
+                .unwrap_or_else(|| tr!("environment.commit_or_push")),
+            enabled: !commit_pending,
+            active: commit_pending,
+            trailing: None,
+        },
         theme,
         move |window, cx| {
             commit_handle.close(window, cx);
@@ -1269,13 +1264,17 @@ fn render_environment_summary_section(
     let compare_handle = handle;
     let compare_weak = weak;
     let compare = render_environment_action_row(
-        "environment-summary-compare",
-        &environment.compare_focus,
-        "icons/github.svg",
-        tr!("environment.compare_branch"),
-        true,
-        false,
-        Some(icon("icons/arrow-up-right.svg", 13.0, theme.text_tertiary).into_any_element()),
+        EnvironmentActionRowArgs {
+            id: "environment-summary-compare",
+            focus: &environment.compare_focus,
+            icon_path: "icons/github.svg",
+            label: tr!("environment.compare_branch"),
+            enabled: true,
+            active: false,
+            trailing: Some(
+                icon("icons/arrow-up-right.svg", 13.0, theme.text_tertiary).into_any_element(),
+            ),
+        },
         theme,
         move |window, cx| {
             compare_handle.close(window, cx);
@@ -1306,16 +1305,19 @@ fn render_environment_summary_section(
 }
 
 fn render_environment_action_row(
-    id: &'static str,
-    focus: &FocusHandle,
-    icon_path: &'static str,
-    label: String,
-    enabled: bool,
-    active: bool,
-    trailing: Option<AnyElement>,
+    args: EnvironmentActionRowArgs<'_>,
     theme: &Theme,
     action: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
+    let EnvironmentActionRowArgs {
+        id,
+        focus,
+        icon_path,
+        label,
+        enabled,
+        active,
+        trailing,
+    } = args;
     let foreground = if enabled {
         theme.text
     } else if active {
@@ -1333,7 +1335,7 @@ fn render_environment_action_row(
     } else {
         icon(icon_path, 14.0, icon_foreground).into_any_element()
     };
-    let action: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(action);
+    let action: EnvironmentAction = Rc::new(action);
     let key_action = action.clone();
     div()
         .id(id)

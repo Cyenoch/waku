@@ -9,4 +9,4 @@ import type { ProviderSlice } from "./ProviderSlice";
 import type { TokenTotals } from "./TokenTotals";
 import type { UsageWindow } from "./UsageWindow";
 
-export type UsageHistory = { window: UsageWindow, sinceDay: string, untilDay: string, totals: TokenTotals, totalTokens: number, costUsd: number, records: number, sessions: number, providers: Array<ProviderSlice>, models: Array<ModelSlice>, daily: Array<DaySlice>, months: Array<MonthSlice>, projects: Array<ProjectSlice>, quality: CostQuality, pricing: PricingStatus, scannedFiles: number, skippedFiles: number, errors: Array<string>, scanDuration: { secs: number; nanos: number }, };
+export type UsageHistory = { window: UsageWindow, sinceDay: string, untilDay: string, totals: TokenTotals, totalTokens: number, costUsd: number, records: number, sessions: number, providers: Array<ProviderSlice>, models: Array<ModelSlice>, daily: Array<DaySlice>, months: Array<MonthSlice>, projects: Array<ProjectSlice>, quality: CostQuality, pricing: PricingStatus, };

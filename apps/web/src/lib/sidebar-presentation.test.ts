@@ -55,8 +55,8 @@ describe('desktop sidebar presentation', () => {
     expect(nextSidebarUpdateDelay([live], 165)).toBe(1)
   })
 
-  test('does not invent a reply time and keeps cursor-only resumed tasks', () => {
-    const resumed = session({ provider_cursor: { provider: 'codex', value: {} } as never })
+  test('does not invent a reply time for an idle task', () => {
+    const resumed = session({ messages: [{ id: 'message' } as never] })
     expect(sessionHasStarted(resumed)).toBe(true)
     expect(sessionTimeLabel(resumed, 1_000)).toBeNull()
   })
@@ -95,7 +95,6 @@ function session(patch: Partial<AgentSession>): AgentSession {
     status: 'idle',
     created_at: 10,
     updated_at: 10,
-    provider_cursor: null,
     messages: [],
     transcript_blocks: [],
     turns: [],

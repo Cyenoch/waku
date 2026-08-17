@@ -868,9 +868,6 @@ impl Waku {
         }
         let turn_id = message.turn_id?;
         let turn = session.turns.iter().find(|turn| turn.id == turn_id)?;
-        if !session.provider.supports_conversation_rollback() {
-            return None;
-        }
         let retained_turn_count = turn.turn_count.saturating_sub(1);
         // Cache only — the ref lives in git, and this runs for every visible
         // user message on every frame. `prefetch_checkpoint_refs` fills the
@@ -882,10 +879,6 @@ impl Waku {
             .copied()
             .unwrap_or(false)
         {
-            return None;
-        }
-        let rollback_turns = session.provider_turns_after(retained_turn_count);
-        if rollback_turns > 0 && session.provider_cursor.is_none() {
             return None;
         }
         Some(UserMessageAction {
@@ -968,11 +961,6 @@ impl Waku {
         if message.role != MessageRole::Assistant
             || assistant_response_footer_index(session, message_index) != Some(message_index)
             || !matches!(session.status, SessionStatus::Idle | SessionStatus::Failed)
-            || !session.provider.supports_conversation_fork()
-            || session
-                .provider_cursor
-                .as_ref()
-                .is_none_or(|cursor| cursor.provider() != session.provider)
         {
             return None;
         }
@@ -1120,9 +1108,7 @@ impl Waku {
                             if !attachment.is_image {
                                 return None;
                             }
-                            let Some(reference) = attachment.blob_reference.as_deref() else {
-                                return None;
-                            };
+                            let reference = attachment.blob_reference.as_deref()?;
                             self.image_for_reference(
                                 reference,
                                 Some(&attachment.path),
@@ -1253,15 +1239,12 @@ impl Waku {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let Some(checkpoint) = self
+        let checkpoint = self
             .selected_session()
             .and_then(|session| session.turns.iter().find(|turn| turn.id == turn_id))
             .and_then(|turn| turn.checkpoint.as_ref())
             .filter(|checkpoint| checkpoint.status == CheckpointStatus::Ready)
-            .filter(|checkpoint| !checkpoint.files.is_empty())
-        else {
-            return None;
-        };
+            .filter(|checkpoint| !checkpoint.files.is_empty())?;
 
         let files = checkpoint.files.as_slice();
         let additions = checkpoint.additions;
@@ -2228,7 +2211,11 @@ fn live_reasoning_window_anchor(cached: usize, content: &str) -> usize {
     // A restarted block can leave the cached start past the end of the new
     // content or inside a multibyte character; either way the window is
     // stale (`is_char_boundary` is false past the end too), so restart it.
-    let cached = if content.is_char_boundary(cached) { cached } else { 0 };
+    let cached = if content.is_char_boundary(cached) {
+        cached
+    } else {
+        0
+    };
     if content.len() - cached <= LIVE_REASONING_WINDOW_MAX {
         return cached;
     }

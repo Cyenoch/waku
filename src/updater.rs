@@ -42,6 +42,7 @@ pub enum UpdaterEvent {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    #![allow(clippy::missing_safety_doc)]
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
@@ -63,11 +64,23 @@ mod macos {
 
     extern_protocol!(
         /// Dynamically loaded from the embedded Sparkle framework.
+        ///
+        /// # Safety
+        ///
+        /// Implementors must match Sparkle's Objective-C protocol contract,
+        /// including the selectors and argument types declared by the
+        /// protocol at runtime.
         unsafe trait SPUUserDriver: NSObjectProtocol {}
     );
 
     extern_protocol!(
         /// Only the update-cycle completion callback is implemented below.
+        ///
+        /// # Safety
+        ///
+        /// Implementors must match Sparkle's Objective-C protocol contract,
+        /// including the selectors and argument types declared by the
+        /// protocol at runtime.
         unsafe trait SPUUpdaterDelegate: NSObjectProtocol {}
     );
 

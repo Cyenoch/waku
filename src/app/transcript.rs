@@ -473,19 +473,18 @@ pub(super) fn transcript_navigation_turns(
                 .iter()
                 .any(|turn| turn.id == turn_id && turn.status == TurnStatus::Running)
         });
-        let response = (!turn_running)
-            .then(|| {
-                session.messages[message_index + 1..next_user_index]
-                    .iter()
-                    .rev()
-                    .find(|candidate| {
-                        candidate.role == MessageRole::Assistant
-                            && !candidate.content.trim().is_empty()
-                    })
-                    .map(|candidate| navigation_preview_snippet(&candidate.content, 240))
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+        let response = if turn_running {
+            String::new()
+        } else {
+            session.messages[message_index + 1..next_user_index]
+                .iter()
+                .rev()
+                .find(|candidate| {
+                    candidate.role == MessageRole::Assistant && !candidate.content.trim().is_empty()
+                })
+                .map(|candidate| navigation_preview_snippet(&candidate.content, 240))
+                .unwrap_or_default()
+        };
         turns.push(TranscriptNavigationTurn {
             message_id: message.id,
             message_index,

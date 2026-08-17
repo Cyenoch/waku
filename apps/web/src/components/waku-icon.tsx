@@ -1,4 +1,4 @@
-import type { ProviderKind } from '@waku/client'
+import type { ProviderId } from '@waku/client'
 
 export const WAKU_ICONS = {
   alert: 'i-waku-alert',
@@ -322,35 +322,28 @@ function fileTypeIconName(path: string): FileTypeIconName {
   return 'file'
 }
 
-const PROVIDER_ICONS: Record<ProviderKind, string> = {
+const PROVIDER_ICONS: Record<string, string> = {
   amp: 'i-waku-provider-amp',
   claude: 'i-waku-provider-claude',
   codex: 'i-waku-provider-openai',
   cursor: 'i-waku-provider-cursor',
-  deepSeek: 'i-waku-provider-deepseek',
-  openCode: 'i-waku-provider-opencode',
+  deepseek: 'i-waku-provider-deepseek',
+  opencode: 'i-waku-provider-opencode',
   grok: 'i-waku-provider-grok',
   pi: 'i-waku-provider-pi',
 }
 
-export const PROVIDERS: Array<{
-  id: ProviderKind
-  name: string
-  shortName: string
-  command: string
-}> = [
-  { id: 'amp', name: 'Amp', shortName: 'Amp', command: 'amp' },
-  { id: 'claude', name: 'Claude Code', shortName: 'Claude', command: 'claude' },
-  { id: 'codex', name: 'Codex CLI', shortName: 'Codex', command: 'codex' },
-  { id: 'cursor', name: 'Cursor CLI', shortName: 'Cursor', command: 'cursor-agent' },
-  { id: 'deepSeek', name: 'DeepSeek Harness', shortName: 'DeepSeek', command: 'dsh' },
-  { id: 'openCode', name: 'OpenCode', shortName: 'OpenCode', command: 'opencode' },
-  { id: 'grok', name: 'Grok Build', shortName: 'Grok', command: 'grok' },
-  { id: 'pi', name: 'Pi', shortName: 'Pi', command: 'pi' },
-]
+function displayProviderName(provider: ProviderId) {
+  return provider
+    .split(/[-_:.]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ') || provider
+}
 
-export function providerMeta(provider: ProviderKind) {
-  return PROVIDERS.find((candidate) => candidate.id === provider) ?? PROVIDERS[2]!
+export function providerMeta(provider: ProviderId) {
+  const name = displayProviderName(provider)
+  return { id: provider, name, shortName: name, command: provider }
 }
 
 export function ProviderIcon({
@@ -358,7 +351,7 @@ export function ProviderIcon({
   className,
   label,
 }: {
-  provider: ProviderKind
+  provider: ProviderId
   className?: string
   label?: string
 }) {
@@ -371,16 +364,16 @@ export function ProviderIcon({
     >
       <span
         aria-hidden="true"
-        className={PROVIDER_ICONS[provider]}
+        className={PROVIDER_ICONS[provider.toLowerCase()] ?? 'i-waku-bot'}
         style={{ width: '100%', height: '100%' }}
       />
     </span>
   )
 }
 
-function providerColor(provider: ProviderKind) {
-  if (provider === 'amp') return 'text-[#f34e3f]'
-  if (provider === 'claude') return 'text-[#d97757]'
-  if (provider === 'deepSeek') return 'text-[#4d6bfe]'
+function providerColor(provider: ProviderId) {
+  if (provider.toLowerCase() === 'amp') return 'text-[#f34e3f]'
+  if (provider.toLowerCase() === 'claude') return 'text-[#d97757]'
+  if (provider.toLowerCase() === 'deepseek') return 'text-[#4d6bfe]'
   return 'text-[#34363b] dark:text-[#f3f3f3]'
 }

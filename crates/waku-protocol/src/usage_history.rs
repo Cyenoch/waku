@@ -1,8 +1,8 @@
-use std::time::Duration;
-
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+
+use crate::provider::ProviderId;
 
 pub const WINDOW_CHOICES: [UsageWindow; 5] = [
     UsageWindow::TrailingDays(7),
@@ -88,31 +88,6 @@ pub fn days_in_month(first_day: NaiveDate) -> u32 {
 
 use chrono::Datelike as _;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub enum UsageProvider {
-    Claude,
-    Codex,
-}
-
-impl UsageProvider {
-    pub const ALL: [UsageProvider; 2] = [UsageProvider::Claude, UsageProvider::Codex];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            UsageProvider::Claude => "Claude Code",
-            UsageProvider::Codex => "Codex",
-        }
-    }
-
-    pub fn index(self) -> usize {
-        match self {
-            UsageProvider::Claude => 0,
-            UsageProvider::Codex => 1,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenTotals {
@@ -125,15 +100,18 @@ pub struct TokenTotals {
 
 impl TokenTotals {
     pub fn total(&self) -> u64 {
-        self.uncached_input + self.cached_input + self.cache_creation + self.output
+        self.uncached_input
+            .saturating_add(self.cached_input)
+            .saturating_add(self.cache_creation)
+            .saturating_add(self.output)
     }
 
     pub fn add(&mut self, other: &TokenTotals) {
-        self.uncached_input += other.uncached_input;
-        self.cached_input += other.cached_input;
-        self.cache_creation += other.cache_creation;
-        self.output += other.output;
-        self.reasoning += other.reasoning;
+        self.uncached_input = self.uncached_input.saturating_add(other.uncached_input);
+        self.cached_input = self.cached_input.saturating_add(other.cached_input);
+        self.cache_creation = self.cache_creation.saturating_add(other.cache_creation);
+        self.output = self.output.saturating_add(other.output);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
     }
 }
 
@@ -148,7 +126,7 @@ pub enum PricingStatus {
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSlice {
-    pub provider: UsageProvider,
+    pub provider: ProviderId,
     pub cost_usd: f64,
     pub total_tokens: u64,
     pub cost_share: f64,
@@ -158,16 +136,17 @@ pub struct ProviderSlice {
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSlice {
-    pub provider: UsageProvider,
+    pub provider: ProviderId,
     pub model: String,
     pub cost_usd: f64,
     pub total_tokens: u64,
     pub cost_share: f64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS)]
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderDay {
+    pub provider: ProviderId,
     pub cost_usd: f64,
     pub total_tokens: u64,
 }
@@ -178,7 +157,7 @@ pub struct DaySlice {
     pub day: NaiveDate,
     pub cost_usd: f64,
     pub total_tokens: u64,
-    pub by_provider: [ProviderDay; 2],
+    pub by_provider: Vec<ProviderDay>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, TS)]
@@ -196,7 +175,7 @@ pub struct MonthSlice {
     pub first_day: NaiveDate,
     pub cost_usd: f64,
     pub total_tokens: u64,
-    pub by_provider: [ProviderDay; 2],
+    pub by_provider: Vec<ProviderDay>,
     pub sessions: u64,
     pub active_days: u32,
     pub top_models: Vec<(String, f64)>,
@@ -208,7 +187,7 @@ pub struct ProjectSlice {
     pub path: String,
     pub cost_usd: f64,
     pub total_tokens: u64,
-    pub by_provider: [ProviderDay; 2],
+    pub by_provider: Vec<ProviderDay>,
     pub sessions: u64,
     pub cost_share: f64,
     pub last_day: Option<NaiveDate>,
@@ -233,11 +212,6 @@ pub struct UsageHistory {
     pub projects: Vec<ProjectSlice>,
     pub quality: CostQuality,
     pub pricing: PricingStatus,
-    pub scanned_files: usize,
-    pub skipped_files: usize,
-    pub errors: Vec<String>,
-    #[ts(type = "{ secs: number; nanos: number }")]
-    pub scan_duration: Duration,
 }
 
 impl UsageHistory {
@@ -253,5 +227,34 @@ impl UsageHistory {
             .binary_search_by_key(&first_day, |slice| slice.first_day)
             .ok()
             .map(|index| &self.months[index])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TokenTotals;
+
+    #[test]
+    fn totals_saturate_on_untrusted_fields() {
+        let totals = TokenTotals {
+            uncached_input: u64::MAX,
+            cached_input: u64::MAX,
+            cache_creation: u64::MAX,
+            output: u64::MAX,
+            reasoning: u64::MAX,
+        };
+        assert_eq!(totals.total(), u64::MAX);
+        let mut acc = TokenTotals {
+            uncached_input: u64::MAX,
+            cached_input: 1,
+            cache_creation: 0,
+            output: 0,
+            reasoning: u64::MAX,
+        };
+        acc.add(&totals);
+        assert_eq!(acc.uncached_input, u64::MAX);
+        assert_eq!(acc.cached_input, u64::MAX);
+        assert_eq!(acc.reasoning, u64::MAX);
+        assert_eq!(acc.total(), u64::MAX);
     }
 }

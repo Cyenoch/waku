@@ -69,7 +69,6 @@ import {
 } from '@/lib/navigation-memory'
 import { transcriptLinkRoute } from '@/lib/transcript-links'
 import { shouldShowInitialDestination } from '@/lib/workspace-presentation'
-import { agentPresetIdLabel } from '@/lib/agent-preset-presentation'
 import { isProjectlessProject, projectDisplayName } from '@/lib/project-presentation'
 import {
   useRuntime,
@@ -1226,9 +1225,6 @@ function TaskHeader({
   const { t } = useI18n()
   const cwd = session && project ? sessionCwd(session, project) : undefined
   const branches = useWorkspaceBranches(cwd)
-  const preset = session?.provider === 'deepSeek' && session.messages.length
-    ? agentPresetIdLabel(session.agent_preset || 'standard', t)
-    : null
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 px-3 lg:px-3.5">
       <Button
@@ -1241,11 +1237,6 @@ function TaskHeader({
         <WakuIcon name="panelLeft" />
       </Button>
       <h1 className="min-w-0 truncate text-[13px] font-medium">{title}</h1>
-      {preset && (
-        <span className="max-w-44 truncate rounded-md bg-accent px-1.5 py-1 text-[11px] font-medium text-[var(--text-secondary)]">
-          {preset}
-        </span>
-      )}
       <div className="flex-1" />
       {branches.data && (branches.data.additions > 0 || branches.data.deletions > 0) && (
         <button

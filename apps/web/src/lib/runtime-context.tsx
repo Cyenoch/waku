@@ -1,11 +1,10 @@
 import { useQueryClient } from '@tanstack/react-query'
 import type {
   AgentSession,
-  DaemonSettings,
   MessageAttachment,
-  PlanUsage,
+  ModelCatalog,
   Project,
-  ProviderProbe,
+  PromptInput,
   SequencedEvent,
   UserInputAnswer,
 } from '@waku/client'
@@ -27,19 +26,13 @@ import {
   captureTurnCheckpoint,
   captureTurnStart,
   daemonKeys,
-  loadDaemonSettings,
   loadTaskState,
   materializeWorktree,
   persistSession,
-  probeProvider,
   sessionCwd,
   type TaskState,
 } from './daemon-api'
-import {
-  browserProviderProbeStorage,
-  PROVIDER_PROBE_CACHE_STALE_TIME,
-  writeProviderProbeCache,
-} from './provider-probe-cache'
+import { serviceTierForModel } from './service-tier'
 import {
   reduceRuntimeEvent,
   type PendingPermission,
@@ -288,7 +281,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             && previous
             && (
               previous.provider !== session.provider
-                || previous.agent_preset !== session.agent_preset
             ),
         )
         if (runtime && requiresRuntimeReset) {
@@ -303,7 +295,16 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
                 interactionMode: session.interaction_mode,
                 model: session.model ?? null,
                 reasoningEffort: session.reasoning_effort ?? null,
-                serviceTier: session.service_tier ?? null,
+                serviceTier: serviceTierForModel(
+                  config
+                    ? queryClient
+                      .getQueryData<ModelCatalog>(
+                        daemonKeys.models(config.address, session.provider),
+                      )
+                      ?.models.find((model) => model.id === session.model)
+                    : undefined,
+                  session.service_tier,
+                ),
                 contextWindow: session.context_window ?? null,
               },
             },
@@ -454,11 +455,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           entry.lastDriverError = null
         } else if (event.event.kind === 'error' && typeof event.event.payload === 'string') {
           entry.lastDriverError = event.event.payload
-        } else if (event.event.kind === 'planUsageUpdated') {
-          queryClient.setQueryData<PlanUsage>(
-            daemonKeys.planUsage(config.address, current.provider),
-            event.event.payload as PlanUsage,
-          )
         }
         if (event.event.kind === 'backgroundWork') {
           const backgroundEvent = decodeBackgroundWorkEvent(event.event.payload)
@@ -619,21 +615,16 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       const prompt = rawPrompt.trim()
       if (!prompt && attachments.length === 0) return
       const providerPrompt = providerPromptOverride === undefined
-        ? [
-            prompt,
-            attachments.map((attachment) => `@${attachment.mention}`).join(' '),
-          ]
-            .filter(Boolean)
-            .join(' ')
+        ? [prompt, attachments.map((attachment) => `@${attachment.mention}`).join(' ')].filter(Boolean).join(' ')
         : providerPromptOverride.trim()
       const currentSession = queryClient.getQueryData<AgentSession>(
         daemonKeys.session(config.address, inputSession.id),
       ) ?? inputSession
       if (
-        currentSession.status === 'connecting' ||
-        currentSession.status === 'working' ||
-        currentSession.status === 'waiting' ||
-        checkpointCaptures.current.has(currentSession.id)
+        currentSession.status === 'connecting'
+        || currentSession.status === 'working'
+        || currentSession.status === 'waiting'
+        || checkpointCaptures.current.has(currentSession.id)
       ) {
         const queued = queueSubmission(currentSession, prompt, providerPrompt, attachments)
         cacheSession(queued)
@@ -641,71 +632,24 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         return
       }
 
-      if (!entries.current.has(currentSession.id)) {
-        await attachSession(currentSession)
-      }
+      if (!entries.current.has(currentSession.id)) await attachSession(currentSession)
 
       let session = beginTurn(currentSession, prompt, attachments)
       cacheSession(session)
-
       let project: Project
       let runtime = entries.current.get(currentSession.id)
-      let startup: { probe: ProviderProbe; settings: DaemonSettings } | null = null
       try {
         const state = await loadTaskState(client)
         const foundProject = state.projects.find((item) => item.id === currentSession.project_id)
         if (!foundProject) throw new Error(translate(localeRef.current, 'errors.task_project_not_found'))
         project = foundProject
-
-        if (!runtime) {
-          const settings = await queryClient.fetchQuery({
-            queryKey: daemonKeys.settings(config.address),
-            queryFn: () => loadDaemonSettings(client),
-            staleTime: 60_000,
-          })
-          const binaryOverride = settings.provider_binary_overrides?.[currentSession.provider] ?? null
-          const providerProbe = await queryClient.fetchQuery({
-            queryKey: daemonKeys.provider(config.address, currentSession.provider, binaryOverride),
-            queryFn: async () => {
-              const data = await probeProvider(client, currentSession.provider, settings)
-              writeProviderProbeCache(
-                browserProviderProbeStorage(),
-                config.address,
-                currentSession.provider,
-                binaryOverride,
-                data,
-              )
-              return data
-            },
-            staleTime: PROVIDER_PROBE_CACHE_STALE_TIME,
-          })
-          if (!providerProbe.installed || !providerProbe.path) {
-            throw new Error(translate(localeRef.current, 'errors.provider_not_installed', {
-              provider: providerName(currentSession.provider),
-            }))
-          }
-          startup = { probe: providerProbe, settings }
-        }
-
-        session = await materializeWorktree(
-          client,
-          session,
-          project,
-          prompt || attachments[0]?.name || 'task',
-        )
+        session = await materializeWorktree(client, session, project, prompt || attachments[0]?.name || 'task')
         const turnCount = session.turns.at(-1)?.turn_count
         if (turnCount !== undefined) {
           try {
-            await captureTurnStart(
-              client,
-              sessionCwd(session, project),
-              session.id,
-              turnCount,
-            )
+            await captureTurnStart(client, sessionCwd(session, project), session.id, turnCount)
           } catch (error) {
-            toast.error(translate(localeRef.current, 'errors.capture_pre_turn_checkpoint', {
-              error: errorMessage(error),
-            }))
+            toast.error(translate(localeRef.current, 'errors.capture_pre_turn_checkpoint', { error: errorMessage(error) }))
           }
         }
         session = await persistOrdered(session)
@@ -719,27 +663,23 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         if (!runtime) {
           const runtimeId = crypto.randomUUID()
           runtime = subscribe(session, runtimeId)
-          const response = await client.request(
-            {
-              type: 'start',
-              options: {
-                provider: session.provider,
-                binary: startup!.probe.path!,
-                cwd: sessionCwd(session, project),
-                mode: session.runtime_mode,
-                interactionMode: session.interaction_mode,
-                model: session.model ?? null,
-                reasoningEffort: session.reasoning_effort ?? null,
-                serviceTier: session.service_tier ?? null,
-                contextWindow: session.context_window ?? null,
-                agentPreset: session.agent_preset ?? null,
-                computerUseEnabled: false,
-                providerCursor: session.provider_cursor as never,
-              },
+          const catalog = queryClient.getQueryData<ModelCatalog>(daemonKeys.models(config.address, session.provider))
+          const response = await client.request({
+            type: 'start',
+            options: {
+              provider: session.provider,
+              cwd: sessionCwd(session, project),
+              mode: session.runtime_mode,
+              interactionMode: session.interaction_mode,
+              model: session.model ?? null,
+              reasoningEffort: session.reasoning_effort ?? null,
+              serviceTier: serviceTierForModel(
+                catalog?.models.find((model) => model.id === session.model),
+                session.service_tier,
+              ),
+              contextWindow: session.context_window ?? null,
             },
-            session.id,
-            runtimeId,
-          )
+          }, session.id, runtimeId)
           if (response.type !== 'started') {
             throw new Error(translate(localeRef.current, 'errors.unexpected_daemon_response', {
               expected: 'started',
@@ -748,13 +688,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           }
           runtime.supportsSteer = response.supportsSteer
           runtime.starting = false
-          setRuntimes((current) => ({
-            ...current,
-            [session.id]: publicRuntime(runtime!),
-          }))
+          setRuntimes((current) => ({ ...current, [session.id]: publicRuntime(runtime!) }))
         }
         await client.request(
-          { type: 'prompt', prompt: providerPrompt },
+          { type: 'prompt', input: promptInput(providerPrompt, attachments) },
           session.id,
           runtime.runtimeId,
         )
@@ -772,18 +709,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         throw error
       }
     },
-    [
-      client,
-      config,
-      phase,
-      queryClient,
-      cacheSession,
-      attachSession,
-      subscribe,
-      removeRuntime,
-      persistOrdered,
-      finishSettledTurn,
-    ],
+    [client, config, phase, queryClient, cacheSession, attachSession, subscribe, removeRuntime, persistOrdered, finishSettledTurn],
   )
 
   sendPromptRef.current = sendPrompt
@@ -796,26 +722,21 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       const prompt = rawPrompt.trim()
       if (!prompt && attachments.length === 0) return
       const providerPrompt = providerPromptOverride === undefined
-        ? [
-            prompt,
-            attachments.map((attachment) => `@${attachment.mention}`).join(' '),
-          ].filter(Boolean).join(' ')
+        ? [prompt, attachments.map((attachment) => `@${attachment.mention}`).join(' ')].filter(Boolean).join(' ')
         : providerPromptOverride.trim()
       const runtime = entries.current.get(session.id)
-      if (
-        !runtime ||
-        !runtime.supportsSteer ||
-        session.status === 'connecting' ||
-        session.status === 'idle' ||
-        session.status === 'failed'
-      ) {
+      if (!runtime || !runtime.supportsSteer || session.status === 'connecting' || session.status === 'idle' || session.status === 'failed') {
         await sendPrompt(session, prompt, attachments, providerPrompt)
         return
       }
       const pending = pendingSteers.current.get(session.id) ?? []
       pending.push({ providerPrompt, displayContent: prompt, attachments })
       pendingSteers.current.set(session.id, pending)
-      await client.request({ type: 'steer', prompt: providerPrompt }, session.id, runtime.runtimeId)
+      await client.request(
+        { type: 'steer', input: promptInput(providerPrompt, attachments) },
+        session.id,
+        runtime.runtimeId,
+      )
     },
     [client, phase, sendPrompt],
   )
@@ -1170,12 +1091,9 @@ function mergeSessionSummary(previous: AgentSession, next: AgentSession): AgentS
     runtime_mode: next.runtime_mode,
     interaction_mode: next.interaction_mode,
     reasoning_effort: next.reasoning_effort,
-    service_tier: next.service_tier,
-    agent_preset: next.agent_preset,
     status: next.status,
     updated_at: next.updated_at,
     last_reply_at: next.last_reply_at,
-    provider_cursor: next.provider_cursor,
     context_usage: next.context_usage,
     runtime_event_cursor: next.runtime_event_cursor,
   }
@@ -1435,6 +1353,19 @@ function backgroundKeyId(key: BackgroundWorkKey) {
   return `${key.kind}:${key.providerId}`
 }
 
+function promptInput(text: string, attachments: MessageAttachment[]): PromptInput {
+  return {
+    text,
+    attachments: attachments.flatMap((attachment) => {
+      const reference = attachment.blob_reference
+      if (!reference) return []
+      return [{
+        kind: reference.startsWith('waku-blob:') ? 'blob' as const : 'attachment' as const,
+        reference,
+      }]
+    }),
+  }
+}
 function sameBackgroundKey(left: BackgroundWorkKey, right: BackgroundWorkKey) {
   return left.kind === right.kind && left.providerId === right.providerId
 }

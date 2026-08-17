@@ -1,13 +1,13 @@
-import type { ProviderKind, ProviderModel } from '@waku/client'
+import type { ProviderId } from '@waku/client'
 
 export interface ModelPickerRow {
-  provider: ProviderKind
-  model: ProviderModel
+  provider: ProviderId
+  model: { id: string }
 }
 
 export function selectedModelPickerIndex(
   rows: readonly ModelPickerRow[],
-  provider: ProviderKind,
+  provider: ProviderId,
   modelId: string | undefined,
 ) {
   if (!modelId) return -1

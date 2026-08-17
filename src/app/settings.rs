@@ -23,7 +23,7 @@ const SETTINGS_SEARCH_CONTEXT: &str = "SettingsSidebar > ComposerInput";
 
 /// The sidebar's rows in display order, each with the keyword haystack the
 /// search field filters against.
-const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 7] = [
+const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 6] = [
     (
         SettingsPage::General,
         "settings.general",
@@ -59,12 +59,6 @@ const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 7] = [
         "settings.daemon",
         "icons/server.svg",
         "settings.daemon_keywords",
-    ),
-    (
-        SettingsPage::ComputerUse,
-        "settings.computer_use",
-        "icons/cursor-spark.svg",
-        "settings.computer_use_keywords",
     ),
 ];
 
@@ -140,6 +134,8 @@ impl Waku {
                         "settings-tab-{}",
                         label.to_lowercase()
                     )))
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .h(px(36.0))
                     .px(px(11.0))
                     .rounded(px(8.0))
@@ -170,6 +166,14 @@ impl Waku {
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_settings_page(page, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            this.open_settings_page(page, cx);
+                            cx.stop_propagation();
+                        }
                     })),
             );
         }
@@ -202,6 +206,8 @@ impl Waku {
                 div().px(px(12.0)).child(
                     div()
                         .id("settings-back")
+                        .tab_index(0)
+                        .focus_visible(|style| style.border_1().border_color(theme.accent))
                         .h(px(34.0))
                         .px(px(9.0))
                         .rounded(px(8.0))
@@ -220,6 +226,17 @@ impl Waku {
                             let focus_handle = this.composer_focus(cx);
                             window.focus(&focus_handle, cx);
                             cx.notify();
+                        }))
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            if !event.keystroke.modifiers.modified()
+                                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                            {
+                                this.settings_page = None;
+                                let focus_handle = this.composer_focus(cx);
+                                window.focus(&focus_handle, cx);
+                                cx.notify();
+                                cx.stop_propagation();
+                            }
                         })),
                 ),
             )
@@ -371,7 +388,6 @@ impl Waku {
                         SettingsPage::Skills => tr!("settings.skills"),
                         SettingsPage::Usage => tr!("settings.usage"),
                         SettingsPage::Daemon => tr!("settings.daemon"),
-                        SettingsPage::ComputerUse => tr!("settings.computer_use"),
                         SettingsPage::Appearance => tr!("settings.appearance"),
                     }),
             )
@@ -381,7 +397,6 @@ impl Waku {
                 SettingsPage::Skills => self.render_skills_settings(cx),
                 SettingsPage::Usage => self.render_usage_settings(cx),
                 SettingsPage::Daemon => self.render_daemon_settings(cx),
-                SettingsPage::ComputerUse => self.render_computer_use_settings(cx),
                 SettingsPage::Appearance => self.render_appearance_settings(cx),
             });
 
@@ -574,6 +589,14 @@ impl Waku {
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_automatic_updates_enabled(!enabled, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            this.set_automatic_updates_enabled(!enabled, cx);
+                            cx.stop_propagation();
+                        }
                     }));
                 column.child(
                     div()
@@ -1478,821 +1501,953 @@ impl Waku {
 
     fn render_providers_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
-        let checking = self.provider_detection_remaining > 0;
-        let checked_label = self
-            .provider_detection_checked_at
-            .filter(|_| !checking)
-            .map(|checked_at| detection_checked_label(checked_at.elapsed()));
-
-        let refresh = div()
-            .id("refresh-providers")
-            .tab_index(0)
-            .focus_visible(|style| style.border_color(theme.accent))
-            .h(px(28.0))
-            .px(px(11.0))
-            .rounded(px(7.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .cursor_default()
-            .text_size(px(10.5))
-            .text_color(theme.text_secondary)
-            .opacity(if checking { 0.6 } else { 1.0 })
-            .hover(|element| element.bg(theme.overlay))
-            .child(icon("icons/rotate-cw.svg", 11.0, theme.text_tertiary))
-            .child(if checking {
-                tr!("common.checking")
-            } else {
-                tr!("common.refresh")
-            })
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.refresh_provider_detection(None);
-                cx.notify();
-            }));
-
-        let mut rows = div().mt(px(4.0)).flex().flex_col();
-        let provider_count = ProviderKind::ALL.len();
-        for (index, kind) in ProviderKind::ALL.into_iter().enumerate() {
-            let probe = self.provider_probe(kind);
-            let installed = probe.is_some_and(|probe| probe.installed);
-            let binary_path = probe
-                .filter(|probe| probe.installed)
-                .and_then(|probe| probe.path.as_deref())
-                .map(|path| abbreviate_home_path(path, self.home_directory.as_deref()));
-            let model_count = probe.map(|probe| probe.models.len()).unwrap_or(0);
-            let version = self
-                .provider_versions
-                .get(&kind)
-                .and_then(|version| version.clone());
-            let disabled = self.state.disabled_providers.contains(&kind);
-
-            let dot_color = if !installed {
-                theme.text_ghost
-            } else if disabled {
-                theme.warning
-            } else {
-                theme.success
-            };
-
-            let detail: AnyElement = if installed {
-                let mut parts = Vec::new();
-                if let Some(path) = binary_path {
-                    parts.push(path);
-                }
-                if disabled {
-                    parts.push(tr!("providers.disabled_for_new_tasks"));
-                } else if model_count > 0 {
-                    parts.push(if model_count == 1 {
-                        tr!("providers.model_count_one", count = model_count)
-                    } else {
-                        tr!("providers.model_count_many", count = model_count)
-                    });
-                }
-                div()
-                    .truncate()
-                    .child(SharedString::from(parts.join("  ·  ")))
-                    .into_any_element()
-            } else {
-                div()
-                    .flex()
-                    .items_baseline()
-                    .child(SharedString::from(tr!(
-                        "providers.not_detected_as",
-                        command = kind.command()
-                    )))
-                    .into_any_element()
-            };
-
-            let toggle_on = !disabled;
-            let toggle = div()
-                .id(SharedString::from(format!(
-                    "provider-enabled-{}",
-                    kind.id()
-                )))
-                .tab_index(0)
-                .focus_visible(|style| style.border_color(theme.accent))
-                .w(px(36.0))
-                .h(px(20.0))
-                .p(px(2.0))
-                .flex_none()
-                .rounded_full()
-                .cursor_default()
-                .bg(if toggle_on {
-                    theme.inverse
-                } else {
-                    theme.inset
-                })
-                .border_1()
-                .border_color(if toggle_on {
-                    theme.inverse
-                } else {
-                    theme.border_strong
-                })
-                .flex()
-                .items_center()
-                .when(toggle_on, |element| element.justify_end())
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .h(px(14.0))
-                        .rounded_full()
-                        .bg(if toggle_on {
-                            theme.on_inverse
-                        } else {
-                            theme.text_tertiary
-                        }),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_provider_enabled(kind, disabled, cx);
-                }));
-
-            let expanded = self.expanded_provider_settings == Some(kind);
-            let expand_button = icon_button(
-                SharedString::from(format!("provider-expand-{}", kind.id())),
-                if expanded {
-                    "icons/chevron-down.svg"
-                } else {
-                    "icons/chevron-right.svg"
-                },
-                theme,
-            )
-            .tab_index(0)
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.toggle_provider_expanded(kind, window, cx);
-            }));
-
-            let header = div()
-                .flex()
-                .items_center()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .relative()
-                        .w(px(30.0))
-                        .h(px(30.0))
-                        .flex_none()
-                        .rounded(px(7.0))
-                        .bg(theme.overlay)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icon(
-                            provider_icon(kind),
-                            16.0,
-                            provider_color(&theme, kind).opacity(if installed { 1.0 } else { 0.5 }),
-                        ))
-                        .child(
-                            div()
-                                .absolute()
-                                .bottom(px(-2.0))
-                                .right(px(-2.0))
-                                .w(px(10.0))
-                                .h(px(10.0))
-                                .rounded_full()
-                                .border_2()
-                                .border_color(theme.raised)
-                                .bg(dot_color),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .flex()
-                                .items_baseline()
-                                .gap(px(7.0))
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(if installed {
-                                            theme.text
-                                        } else {
-                                            theme.text_secondary
-                                        })
-                                        .child(kind.display_name()),
-                                )
-                                .when_some(version, |element, version| {
-                                    element.child(
-                                        div()
-                                            .font_family(crate::md::render::MONO_FAMILY)
-                                            .text_size(px(10.0))
-                                            .text_color(theme.text_tertiary)
-                                            .child(SharedString::from(format!("v{version}"))),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .mt(px(3.0))
-                                .text_size(px(10.5))
-                                .text_color(theme.text_tertiary)
-                                .child(detail),
-                        ),
-                )
-                .child(expand_button)
-                .when(installed, |element| element.child(toggle));
-
+        let providers = &self.state.external_providers;
+        let editing = self.expanded_provider_settings.clone();
+        let builtin_cards = self.render_builtin_provider_cards(cx);
+        let mut rows = div().mt(px(12.0)).flex().flex_col().gap(px(8.0));
+        if providers.is_empty() {
             rows = rows.child(
                 div()
-                    .py(px(11.0))
-                    .flex()
-                    .flex_col()
-                    .when(index + 1 != provider_count, |element| {
-                        element.border_b_1().border_color(theme.border)
-                    })
-                    .child(header)
-                    .when(expanded, |element| {
-                        element.child(self.render_provider_expanded_settings(kind, theme, cx))
-                    }),
+                    .p(px(18.0))
+                    .rounded(px(10.0))
+                    .bg(theme.raised)
+                    .text_color(theme.text_secondary)
+                    .child(tr!("providers.configure_first")),
             );
         }
-
+        for provider in providers {
+            let id = provider.id.clone();
+            let id_for_edit = id.clone();
+            let id_for_edit_keyboard = id.clone();
+            let id_for_delete = id.clone();
+            let is_editing = editing.as_ref() == Some(&id);
+            let label = format!("{} · {}", provider.name, provider.default_model);
+            rows = rows.child(
+                div()
+                    .p(px(14.0))
+                    .rounded(px(10.0))
+                    .bg(theme.raised)
+                    .border_1()
+                    .border_color(if is_editing {
+                        theme.accent
+                    } else {
+                        theme.border
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(icon("icons/bot.svg", 16.0, theme.text_secondary))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().text_color(theme.text).child(label)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(theme.text_tertiary)
+                                    .child(SharedString::from(format!(
+                                        "{} · {}",
+                                        provider.id, provider.api_format
+                                    ))),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("edit-provider-{}", id)))
+                                    .tab_index(0)
+                                    .focus_visible(|style| {
+                                        style.border_1().border_color(theme.accent)
+                                    })
+                                    .px(px(8.0))
+                                    .py(px(5.0))
+                                    .rounded(px(6.0))
+                                    .text_color(theme.text_secondary)
+                                    .hover(|element| element.bg(theme.overlay))
+                                    .child(tr!("common.edit"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.begin_provider_edit(Some(id_for_edit.clone()), cx);
+                                    }))
+                                    .on_key_down(cx.listener(
+                                        move |this, event: &KeyDownEvent, _, cx| {
+                                            if matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            ) {
+                                                this.begin_provider_edit(
+                                                    Some(id_for_edit_keyboard.clone()),
+                                                    cx,
+                                                );
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "delete-provider-{}",
+                                        id_for_delete
+                                    )))
+                                    .tab_index(0)
+                                    .focus_visible(|style| {
+                                        style.border_1().border_color(theme.accent)
+                                    })
+                                    .px(px(8.0))
+                                    .py(px(5.0))
+                                    .rounded(px(6.0))
+                                    .text_color(theme.danger)
+                                    .hover(|element| element.bg(theme.overlay))
+                                    .child(tr!("common.delete"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.delete_provider(&id_for_delete, cx);
+                                    }))
+                                    .on_key_down(cx.listener(
+                                        move |this, event: &KeyDownEvent, _, cx| {
+                                            if matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            ) {
+                                                this.delete_provider(&id, cx);
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt(px(5.0))
+                            .text_size(px(10.5))
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(provider.base_url.clone())),
+                    ),
+            );
+        }
+        let add = div()
+            .id("add-provider")
+            .tab_index(0)
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .px(px(11.0))
+            .py(px(7.0))
+            .rounded(px(7.0))
+            .bg(theme.accent)
+            .text_color(theme.text)
+            .hover(|element| element.opacity(0.9))
+            .child(tr!("providers.add"))
+            .on_click(cx.listener(|this, _, _, cx| this.begin_provider_edit(None, cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.begin_provider_edit(None, cx);
+                    cx.stop_propagation();
+                }
+            }));
+        let form = editing.map(|provider_id| self.render_provider_form(provider_id, theme, cx));
         div()
-            .mt(px(15.0))
             .w_full()
             .px(px(20.0))
-            .py(px(14.0))
-            .rounded(px(13.0))
-            .bg(theme.raised)
+            .py(px(16.0))
             .child(
                 div()
                     .flex()
                     .items_start()
                     .gap(px(20.0))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(tr!("providers.coding_agents")),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(5.0))
-                                    .text_size(px(12.0))
-                                    .line_height(px(18.0))
-                                    .text_color(theme.text_secondary)
-                                    .child(tr!("providers.description")),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .flex_col()
-                            .items_end()
-                            .gap(px(6.0))
-                            .child(refresh)
-                            .when_some(checked_label, |element, label| {
-                                element.child(
+                        div().flex_1().min_w_0().child(
+                            div()
+                                .text_size(px(15.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(tr!("providers.title"))
+                                .child(
                                     div()
-                                        .text_size(px(9.5))
-                                        .text_color(theme.text_ghost)
-                                        .child(SharedString::from(label)),
-                                )
-                            }),
-                    ),
+                                        .mt(px(5.0))
+                                        .text_size(px(12.0))
+                                        .line_height(px(18.0))
+                                        .text_color(theme.text_secondary)
+                                        .child(tr!("providers.config_description")),
+                                ),
+                        ),
+                    )
+                    .child(add),
             )
+            .child(builtin_cards)
             .child(rows)
+            .children(form)
             .into_any_element()
     }
 
-    /// The expanded row's settings body: the binary override for this
-    /// provider, with the detection result as its caption.
-    fn render_provider_expanded_settings(
+    fn render_builtin_provider_cards(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let mut cards = div().mt(px(12.0)).flex().flex_col().gap(px(8.0));
+        for preset in waku_client::ProviderPreset::ALL {
+            let provider = preset.provider_id();
+            let auth = self.auth_statuses.get(&provider);
+            let status = auth
+                .map(|value| format!("{:?}", value.method))
+                .unwrap_or_else(|| tr!("providers.not_authenticated").to_string());
+            let methods = preset_login_methods(preset.id());
+            let mut logins = div().flex().items_center().gap(px(6.0));
+            for method in methods {
+                let login_provider = provider.clone();
+                let key_provider = provider.clone();
+                let method = *method;
+                logins = logins.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "login-provider-{}-{}",
+                            preset.id(),
+                            method as u8
+                        )))
+                        .tab_index(0)
+                        .focus_visible(|style| style.border_1().border_color(theme.accent))
+                        .px(px(8.0))
+                        .py(px(5.0))
+                        .rounded(px(6.0))
+                        .text_color(theme.text_secondary)
+                        .hover(|element| element.bg(theme.overlay))
+                        .child(login_method_label(method))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.start_provider_login(login_provider.clone(), method, cx)
+                        }))
+                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                            if !event.keystroke.modifiers.modified()
+                                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                            {
+                                this.start_provider_login(key_provider.clone(), method, cx);
+                                cx.stop_propagation();
+                            }
+                        })),
+                );
+            }
+            let logout_provider = provider.clone();
+            let logout_key_provider = provider.clone();
+            let logout = div()
+                .id(SharedString::from(format!(
+                    "logout-provider-{}",
+                    preset.id()
+                )))
+                .tab_index(0)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .px(px(8.0))
+                .py(px(5.0))
+                .rounded(px(6.0))
+                .text_color(theme.danger)
+                .hover(|element| element.bg(theme.overlay))
+                .child(tr!("providers.logout"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.logout_provider(logout_provider.clone(), cx)
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if !event.keystroke.modifiers.modified()
+                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                    {
+                        this.logout_provider(logout_key_provider.clone(), cx);
+                        cx.stop_propagation();
+                    }
+                }));
+            let mut card = div()
+                .p(px(14.0))
+                .rounded(px(10.0))
+                .bg(theme.raised)
+                .border_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .child(icon("icons/bot.svg", 16.0, theme.text_secondary))
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(div().text_color(theme.text).child(preset.display_name())),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.text_secondary)
+                                .child(status),
+                        )
+                        .child(logins)
+                        .child(logout),
+                );
+            if let Some(phase) = self
+                .auth_phases
+                .iter()
+                .find(|phase| phase.provider() == Some(&provider))
+            {
+                if let waku_client::AuthPhase::AwaitingApiKey { .. } = phase {
+                    let api_provider = provider.clone();
+                    let api_key_provider = provider.clone();
+                    card = card
+                        .child(
+                            TextField::new("provider-api-key", self.auth_api_key_input.clone())
+                                .w_full(),
+                        )
+                        .child(
+                            div()
+                                .id("complete-provider-api-key")
+                                .tab_index(0)
+                                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                                .px(px(8.0))
+                                .py(px(5.0))
+                                .child(tr!("common.continue"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.complete_api_key_login(api_provider.clone(), cx)
+                                }))
+                                .on_key_down(cx.listener(
+                                    move |this, event: &KeyDownEvent, _, cx| {
+                                        if !event.keystroke.modifiers.modified()
+                                            && matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            )
+                                        {
+                                            this.complete_api_key_login(
+                                                api_key_provider.clone(),
+                                                cx,
+                                            );
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                )),
+                        );
+                }
+                if let Some(login_id) = phase.login_id().filter(|_| {
+                    matches!(
+                        phase,
+                        waku_client::AuthPhase::AwaitingBrowser { .. }
+                            | waku_client::AuthPhase::AwaitingDevice { .. }
+                            | waku_client::AuthPhase::AwaitingApiKey { .. }
+                    )
+                }) {
+                    card = card.child(
+                        div()
+                            .id("cancel-provider-login")
+                            .tab_index(0)
+                            .focus_visible(|style| style.border_1().border_color(theme.accent))
+                            .px(px(8.0))
+                            .py(px(5.0))
+                            .child(tr!("common.cancel"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.cancel_provider_login(login_id, cx)
+                            }))
+                            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                                if !event.keystroke.modifiers.modified()
+                                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                {
+                                    this.cancel_provider_login(login_id, cx);
+                                    cx.stop_propagation();
+                                }
+                            })),
+                    );
+                }
+                card = card.child(
+                    div()
+                        .mt(px(5.0))
+                        .text_size(px(11.0))
+                        .text_color(theme.text_secondary)
+                        .child(auth_phase_summary(phase)),
+                );
+            }
+            cards = cards.child(card);
+        }
+        cards
+    }
+
+    fn provider_field(
         &self,
-        kind: ProviderKind,
+        id: &str,
+        input: Entity<ComposerInput>,
+        label: String,
+        theme: Theme,
+    ) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_secondary)
+                    .child(label),
+            )
+            .child(TextField::new(SharedString::from(id.to_owned()), input).w_full())
+    }
+
+    fn render_provider_form(
+        &self,
+        provider_id: ProviderId,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> Div {
-        let override_value = self.state.provider_binary_overrides.get(&kind).cloned();
-        let full_path = self
-            .provider_probe(kind)
-            .filter(|probe| probe.installed)
-            .and_then(|probe| probe.path.as_ref())
-            .map(|path| path.display().to_string());
-
-        let caption = match (&override_value, full_path) {
-            (Some(_), Some(path)) => tr!("providers.using_override", path = path),
-            (Some(_), None) => tr!("providers.invalid_override"),
-            (None, Some(path)) => tr!("providers.detected_at", path = path),
-            (None, None) => tr!("providers.searches_path", command = kind.command()),
-        };
-
-        let reset = div()
-            .id(SharedString::from(format!(
-                "provider-path-reset-{}",
-                kind.id()
-            )))
-            .tab_index(0)
-            .focus_visible(|style| style.border_color(theme.accent))
-            .h(px(29.0))
-            .px(px(10.0))
-            .rounded(px(7.0))
-            .border_1()
-            .border_color(theme.border_strong)
+        let existing = self
+            .state
+            .external_providers
+            .iter()
+            .find(|provider| provider.id == provider_id);
+        let api_formats = waku_client::ApiFormat::ALL;
+        let format = self.provider_api_format;
+        let format_button = div()
             .flex()
-            .flex_none()
             .items_center()
-            .cursor_default()
-            .text_size(px(10.5))
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.text_secondary)
+                    .child(tr!("providers.api_format")),
+            )
+            .child(
+                div()
+                    .id("provider-api-format")
+                    .tab_index(0)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .px(px(9.0))
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .bg(theme.overlay)
+                    .text_color(theme.text)
+                    .child(format.to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let index = api_formats
+                            .iter()
+                            .position(|candidate| *candidate == this.provider_api_format)
+                            .unwrap_or(0);
+                        this.provider_api_format = api_formats[(index + 1) % api_formats.len()];
+                        cx.notify();
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if !event.keystroke.modifiers.modified()
+                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        {
+                            let index = api_formats
+                                .iter()
+                                .position(|candidate| *candidate == this.provider_api_format)
+                                .unwrap_or(0);
+                            this.provider_api_format = api_formats[(index + 1) % api_formats.len()];
+                            cx.notify();
+                            cx.stop_propagation();
+                        }
+                    })),
+            );
+        let save_id = provider_id.clone();
+        let save_key_id = provider_id.clone();
+        let save = div()
+            .id("save-provider")
+            .tab_index(0)
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .bg(theme.accent)
+            .text_color(theme.text)
+            .child(tr!("common.save"))
+            .on_click(cx.listener(move |this, _, _, cx| this.save_provider(&save_id, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    this.save_provider(&save_key_id, cx);
+                    cx.stop_propagation();
+                }
+            }));
+        let cancel = div()
+            .id("cancel-provider")
+            .tab_index(0)
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
             .text_color(theme.text_secondary)
             .hover(|element| element.bg(theme.overlay))
-            .child(tr!("common.reset"))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.provider_path_input
-                    .update(cx, |input, cx| input.clear(cx));
-                this.apply_provider_path_override(cx);
+            .child(tr!("common.cancel"))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.expanded_provider_settings = None;
+                this.clear_provider_form(cx);
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    this.expanded_provider_settings = None;
+                    this.clear_provider_form(cx);
+                    cx.notify();
+                    cx.stop_propagation();
+                }
             }));
-
+        let models_hint = existing.map(|provider| provider.models.len()).unwrap_or(0);
         div()
             .mt(px(10.0))
-            .pl(px(42.0))
-            .flex()
-            .flex_col()
-            .gap(px(5.0))
+            .p(px(14.0))
+            .rounded(px(10.0))
+            .bg(theme.surface)
             .child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(px(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(tr!("providers.binary_path")),
+                    .child(tr!("providers.edit_title")),
             )
             .child(
                 div()
-                    .text_size(px(10.5))
-                    .line_height(px(15.0))
-                    .text_color(theme.text_tertiary)
-                    .child(SharedString::from(tr!(
-                        "providers.binary_path_description",
-                        provider = kind.short_name()
-                    ))),
+                    .mt(px(10.0))
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(10.0))
+                    .child(if existing.is_some() {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.0))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("providers.id")),
+                            )
+                            .child(
+                                div()
+                                    .px(px(9.0))
+                                    .py(px(7.0))
+                                    .rounded(px(6.0))
+                                    .bg(theme.inset)
+                                    .text_color(theme.text_secondary)
+                                    .child(SharedString::from(provider_id.to_string())),
+                            )
+                    } else {
+                        self.provider_field(
+                            "provider-id",
+                            self.provider_id_input.clone(),
+                            tr!("providers.id"),
+                            theme,
+                        )
+                    })
+                    .child(self.provider_field(
+                        "provider-name",
+                        self.provider_name_input.clone(),
+                        tr!("providers.name"),
+                        theme,
+                    ))
+                    .child(self.provider_field(
+                        "provider-base-url",
+                        self.provider_base_url_input.clone(),
+                        tr!("providers.base_url"),
+                        theme,
+                    ))
+                    .child(self.provider_field(
+                        "provider-api-key-env",
+                        self.provider_api_key_env_input.clone(),
+                        tr!("providers.api_key_env"),
+                        theme,
+                    ))
+                    .child(self.provider_field(
+                        "provider-models",
+                        self.provider_model_input.clone(),
+                        format!("{} ({models_hint})", tr!("providers.models")),
+                        theme,
+                    ))
+                    .child(self.provider_field(
+                        "provider-default-model",
+                        self.provider_default_model_input.clone(),
+                        tr!("providers.default_model"),
+                        theme,
+                    ))
+                    .child(self.provider_field(
+                        "provider-limits-context",
+                        self.provider_context_window_input.clone(),
+                        tr!("providers.context_window"),
+                        theme,
+                    ))
+                    .child(self.provider_field(
+                        "provider-limits-output",
+                        self.provider_max_output_tokens_input.clone(),
+                        tr!("providers.max_output_tokens"),
+                        theme,
+                    ))
+                    .child(self.provider_field(
+                        "provider-headers",
+                        self.provider_headers_input.clone(),
+                        tr!("providers.headers"),
+                        theme,
+                    )),
             )
+            .child(div().mt(px(10.0)).child(format_button))
             .child(
                 div()
-                    .mt(px(3.0))
+                    .mt(px(10.0))
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(
-                        TextField::new(
-                            SharedString::from(format!("provider-path-field-{}", kind.id())),
-                            self.provider_path_input.clone(),
-                        )
-                        .flex_1()
-                        .max_w(px(430.0)),
-                    )
-                    .when(override_value.is_some(), |element| element.child(reset)),
-            )
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(theme.text_ghost)
-                    .child(SharedString::from(caption)),
+                    .child(save)
+                    .child(cancel),
             )
     }
 
-    fn toggle_provider_expanded(
-        &mut self,
-        provider: ProviderKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Commit any pending edit for the previously expanded provider before
-        // the input is handed to another row.
-        self.apply_provider_path_override(cx);
-        if self.expanded_provider_settings == Some(provider) {
-            self.expanded_provider_settings = None;
-        } else {
-            self.expanded_provider_settings = Some(provider);
-            let override_value = self
-                .state
-                .provider_binary_overrides
-                .get(&provider)
-                .cloned()
-                .unwrap_or_default();
-            self.provider_path_input
-                .update(cx, |input, cx| input.set_content(override_value, cx));
-            let focus = self.provider_path_input.read(cx).focus();
-            window.focus(&focus, cx);
-        }
+    fn begin_provider_edit(&mut self, provider: Option<ProviderId>, cx: &mut Context<Self>) {
+        let provider = provider
+            .unwrap_or_else(|| ProviderId::new(format!("provider-{}", Uuid::new_v4().simple())));
+        let existing = self
+            .state
+            .external_providers
+            .iter()
+            .find(|candidate| candidate.id == provider)
+            .cloned();
+        self.expanded_provider_settings = Some(provider.clone());
+        self.provider_api_format = existing
+            .as_ref()
+            .map(|provider| provider.api_format)
+            .unwrap_or_default();
+        self.provider_id_input.update(cx, |input, cx| {
+            input.set_content(
+                existing
+                    .as_ref()
+                    .map(|provider| provider.id.to_string())
+                    .unwrap_or_else(|| provider.to_string()),
+                cx,
+            )
+        });
+        self.provider_name_input.update(cx, |input, cx| {
+            input.set_content(
+                existing
+                    .as_ref()
+                    .map(|provider| provider.name.clone())
+                    .unwrap_or_default(),
+                cx,
+            )
+        });
+        self.provider_base_url_input.update(cx, |input, cx| {
+            input.set_content(
+                existing
+                    .as_ref()
+                    .map(|provider| provider.base_url.clone())
+                    .unwrap_or_default(),
+                cx,
+            )
+        });
+        self.provider_api_key_env_input.update(cx, |input, cx| {
+            input.set_content(
+                existing
+                    .as_ref()
+                    .and_then(|provider| provider.api_key_env.clone())
+                    .unwrap_or_default(),
+                cx,
+            )
+        });
+        self.provider_headers_input.update(cx, |input, cx| {
+            input.set_content(
+                existing
+                    .as_ref()
+                    .map(|provider| {
+                        provider
+                            .headers
+                            .iter()
+                            .map(|(name, value)| format!("{name}: {value}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default(),
+                cx,
+            );
+        });
+        self.provider_model_input.update(cx, |input, cx| {
+            input.set_content(
+                existing
+                    .as_ref()
+                    .map(|provider| {
+                        (if provider.models.is_empty() {
+                            vec![provider.default_model.clone()]
+                        } else {
+                            provider.models.clone()
+                        })
+                        .join(", ")
+                    })
+                    .unwrap_or_default(),
+                cx,
+            )
+        });
+        self.provider_default_model_input.update(cx, |input, cx| {
+            input.set_content(
+                existing
+                    .as_ref()
+                    .map(|provider| provider.default_model.clone())
+                    .unwrap_or_default(),
+                cx,
+            )
+        });
+        self.provider_context_window_input.update(cx, |input, cx| {
+            input.set_content(
+                existing
+                    .as_ref()
+                    .map(|provider| provider.context_window.to_string())
+                    .unwrap_or_else(|| "128000".to_owned()),
+                cx,
+            )
+        });
+        self.provider_max_output_tokens_input
+            .update(cx, |input, cx| {
+                input.set_content(
+                    existing
+                        .as_ref()
+                        .map(|provider| provider.max_output_tokens.to_string())
+                        .unwrap_or_else(|| "16384".to_owned()),
+                    cx,
+                )
+            });
         cx.notify();
     }
 
-    /// Commit the binary override edit for the expanded provider: empty means
-    /// detect from PATH. Re-detects that provider, which in turn refreshes its
-    /// version and model catalog.
-    pub(super) fn apply_provider_path_override(&mut self, cx: &mut Context<Self>) {
-        let Some(provider) = self.expanded_provider_settings else {
+    fn clear_provider_form(&mut self, cx: &mut Context<Self>) {
+        for input in [
+            &self.provider_id_input,
+            &self.provider_name_input,
+            &self.provider_base_url_input,
+            &self.provider_api_key_env_input,
+            &self.provider_headers_input,
+            &self.provider_model_input,
+            &self.provider_default_model_input,
+            &self.provider_context_window_input,
+            &self.provider_max_output_tokens_input,
+        ] {
+            input.update(cx, |input, cx| input.clear(cx));
+        }
+    }
+
+    fn delete_provider(&mut self, id: &ProviderId, cx: &mut Context<Self>) {
+        if self.state.last_provider == *id
+            || self
+                .state
+                .sessions
+                .iter()
+                .any(|session| &session.provider == id)
+            || self
+                .state
+                .favorite_models
+                .iter()
+                .any(|favorite| &favorite.provider == id)
+        {
+            self.show_toast(tr!("providers.in_use"));
+            cx.notify();
             return;
-        };
-        let text = self
-            .provider_path_input
+        }
+        self.state
+            .external_providers
+            .retain(|provider| &provider.id != id);
+        if self.expanded_provider_settings.as_ref() == Some(id) {
+            self.expanded_provider_settings = None;
+        }
+        self.save();
+        cx.notify();
+    }
+
+    fn save_provider(&mut self, editing_id: &ProviderId, cx: &mut Context<Self>) {
+        let id = ProviderId::new(self.provider_id_input.read(cx).content().trim());
+        let name = self
+            .provider_name_input
             .read(cx)
             .content()
             .trim()
             .to_owned();
-        let current = self
-            .state
-            .provider_binary_overrides
-            .get(&provider)
-            .cloned()
-            .unwrap_or_default();
-        if text == current {
+        let base_url = self
+            .provider_base_url_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let api_key_env_input = self
+            .provider_api_key_env_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let model_input = self.provider_model_input.read(cx).content().to_owned();
+        let default_input = self
+            .provider_default_model_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let context_input = self
+            .provider_context_window_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let output_input = self
+            .provider_max_output_tokens_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let header_input = self.provider_headers_input.read(cx).content().to_owned();
+        if let Err(error) = parse_provider_draft_policy(ProviderDraftPolicy {
+            id: id.as_str(),
+            name: &name,
+            base_url: &base_url,
+            api_key_env: Some(&api_key_env_input),
+            models_text: &model_input,
+            default_model: &default_input,
+            context_window: &context_input,
+            max_output_tokens: &output_input,
+            headers_text: &header_input,
+        }) {
+            self.show_toast(error);
+            cx.notify();
             return;
         }
-        if text.is_empty() {
-            self.state.provider_binary_overrides.remove(&provider);
-        } else {
-            self.state.provider_binary_overrides.insert(provider, text);
-        }
-        self.save();
-        self.refresh_provider_detection(Some(provider));
-        cx.notify();
-    }
-
-    /// Providers switched off here stop offering models to new sessions;
-    /// sessions already locked to them keep working.
-    fn set_provider_enabled(
-        &mut self,
-        provider: ProviderKind,
-        enabled: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if enabled {
-            self.state
-                .disabled_providers
-                .retain(|kind| *kind != provider);
-        } else if !self.state.disabled_providers.contains(&provider) {
-            self.state.disabled_providers.push(provider);
-        }
-        if !enabled
-            && let Some(fallback) = ProviderKind::ALL
-                .into_iter()
-                .find(|kind| self.provider_enabled(*kind))
+        let models = self
+            .provider_model_input
+            .read(cx)
+            .content()
+            .split(',')
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut seen_models = std::collections::HashSet::new();
+        if models
+            .iter()
+            .any(|model| !seen_models.insert(model.to_ascii_lowercase()))
         {
-            // New work must land somewhere usable: move the new-session
-            // default and any unstarted drafts off the switched-off provider.
-            // The remembered model belongs to the old provider, so it resets
-            // with it.
-            if self.state.last_provider == provider {
-                self.state.last_provider = fallback;
-                self.state.last_model = None;
-                self.state.last_reasoning_effort = None;
-                self.state.last_service_tier = None;
-                self.state.last_context_window = None;
-            }
-            let draft_ids = self
-                .state
-                .sessions
-                .iter()
-                .filter(|session| session.provider == provider && !session.has_started())
-                .map(|session| session.id)
-                .collect::<Vec<_>>();
-            for id in draft_ids {
-                if let Some(session) = self.state.session_mut(id) {
-                    session.provider = fallback;
-                    session.model = None;
-                    session.reasoning_effort = None;
-                    session.service_tier = None;
-                    session.context_window = None;
-                }
-            }
-        }
-        self.save();
-        cx.notify();
-    }
-
-    fn render_computer_use_settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::current(cx);
-        let enabled = self.state.computer_use_enabled;
-        let permissions = self.computer_permissions.clone();
-        let pending = self.computer_permission_request_pending;
-        let helper_name = crate::computer_use::helper_display_name();
-        let mut allowed_apps = div().flex().flex_col().gap(px(1.0));
-        if self.state.computer_use_allowed_apps.is_empty() {
-            allowed_apps = allowed_apps.child(
-                div()
-                    .py(px(12.0))
-                    .text_size(px(11.5))
-                    .text_color(theme.text_tertiary)
-                    .child(tr!("computer_use.no_always_allowed_apps")),
-            );
-        } else {
-            for (index, grant) in self.state.computer_use_allowed_apps.iter().enumerate() {
-                let key = grant.key();
-                let is_last = index + 1 == self.state.computer_use_allowed_apps.len();
-                let app_icon = self.computer_use_app_icon(&grant.bundle_id, cx);
-                allowed_apps = allowed_apps.child(
-                    div()
-                        .py(px(9.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .when(!is_last, |element| {
-                            element.border_b_1().border_color(theme.border)
-                        })
-                        .child(
-                            div()
-                                .w(px(32.0))
-                                .h(px(32.0))
-                                .flex_none()
-                                .rounded(px(7.0))
-                                .when_some(app_icon, |element, app_icon| {
-                                    element.child(img(app_icon).size_full().rounded(px(7.0)))
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(theme.text)
-                                        .child(SharedString::from(grant.app_name.clone())),
-                                )
-                                .child(
-                                    div()
-                                        .mt(px(2.0))
-                                        .text_size(px(9.5))
-                                        .text_color(theme.text_tertiary)
-                                        .truncate()
-                                        .child(SharedString::from(grant.bundle_id.clone())),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("revoke-computer-app-{key}")))
-                                .h(px(25.0))
-                                .px(px(9.0))
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(theme.border_strong)
-                                .flex()
-                                .items_center()
-                                .cursor_default()
-                                .text_size(px(10.5))
-                                .text_color(theme.text_secondary)
-                                .hover(|element| element.bg(theme.overlay).text_color(theme.danger))
-                                .child(tr!("common.revoke"))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.revoke_computer_app(&key, cx);
-                                })),
-                        ),
-                );
-            }
-        }
-
-        div()
-            .mt(px(15.0))
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(12.0))
-            .child(
-                div()
-                    .px(px(20.0))
-                    .py(px(14.0))
-                    .rounded(px(13.0))
-                    .bg(theme.raised)
-                    .flex()
-                    .items_center()
-                    .gap(px(20.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(tr!("computer_use.allow_apps")),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(5.0))
-                                    .text_size(px(12.0))
-                                    .line_height(px(18.0))
-                                    .text_color(theme.text_secondary)
-                                    .child(tr!("computer_use.availability")),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("computer-use-enabled")
-                            .w(px(36.0))
-                            .h(px(20.0))
-                            .p(px(2.0))
-                            .rounded_full()
-                            .cursor_default()
-                            .bg(if enabled { theme.inverse } else { theme.inset })
-                            .border_1()
-                            .border_color(if enabled {
-                                theme.inverse
-                            } else {
-                                theme.border_strong
-                            })
-                            .flex()
-                            .items_center()
-                            .when(enabled, |element| element.justify_end())
-                            .child(div().w(px(14.0)).h(px(14.0)).rounded_full().bg(if enabled {
-                                theme.on_inverse
-                            } else {
-                                theme.text_tertiary
-                            }))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_computer_use_enabled(!enabled, cx);
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .px(px(20.0))
-                    .py(px(14.0))
-                    .rounded(px(13.0))
-                    .bg(theme.raised)
-                    .child(
-                        div()
-                            .text_size(px(13.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(tr!("computer_use.macos_access")),
-                    )
-                    .child(
-                        div()
-                            .mt(px(4.0))
-                            .text_size(px(11.5))
-                            .text_color(theme.text_secondary)
-                            .child(SharedString::from(tr!(
-                                "computer_use.helper_access",
-                                helper = helper_name
-                            ))),
-                    )
-                    .child(permission_status_row(
-                        tr!("computer_use.screen_recording"),
-                        tr!("computer_use.screen_recording_description"),
-                        permissions.screen_recording,
-                        "screen-recording-settings",
-                        theme,
-                        cx,
-                    ))
-                    .child(permission_status_row(
-                        tr!("computer_use.accessibility"),
-                        tr!("computer_use.accessibility_description"),
-                        permissions.accessibility,
-                        "accessibility-settings",
-                        theme,
-                        cx,
-                    ))
-                    .child(
-                        div().mt(px(11.0)).flex().items_center().gap(px(8.0)).child(
-                            div()
-                                .id("recheck-computer-permissions")
-                                .h(px(28.0))
-                                .px(px(11.0))
-                                .rounded(px(7.0))
-                                .border_1()
-                                .border_color(theme.border_strong)
-                                .text_color(theme.text_secondary)
-                                .flex()
-                                .items_center()
-                                .cursor_default()
-                                .text_size(px(10.5))
-                                .opacity(if pending { 0.6 } else { 1.0 })
-                                .child(if pending {
-                                    tr!("common.checking")
-                                } else {
-                                    tr!("common.recheck")
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.request_computer_permissions(false, cx);
-                                })),
-                        ),
-                    ),
-            )
-            .child(
-                div()
-                    .px(px(20.0))
-                    .py(px(14.0))
-                    .rounded(px(13.0))
-                    .bg(theme.raised)
-                    .child(
-                        div()
-                            .text_size(px(13.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(tr!("computer_use.always_allowed_apps")),
-                    )
-                    .child(
-                        div()
-                            .mt(px(4.0))
-                            .text_size(px(11.5))
-                            .text_color(theme.text_secondary)
-                            .child(tr!("computer_use.always_allowed_apps_description")),
-                    )
-                    .child(allowed_apps),
-            )
-            .into_any_element()
-    }
-
-    fn set_computer_use_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.state.computer_use_enabled = enabled;
-        self.save();
-        if enabled {
-            self.request_computer_permissions(true, cx);
-        }
-        cx.notify();
-    }
-
-    pub(super) fn request_computer_permissions(&mut self, prompt: bool, cx: &mut Context<Self>) {
-        if self.computer_permission_request_pending {
+            self.show_toast(tr!("providers.duplicate_models"));
+            cx.notify();
             return;
         }
-        self.computer_permission_request_pending = true;
-        let tx = self.computer_permission_tx.clone();
-        let event_wake = self.event_wake_tx.clone();
-        let daemon = self.daemon.client();
-        std::thread::Builder::new()
-            .name("waku-computer-permission-request".into())
-            .spawn(move || {
-                let result = match daemon.request(
-                    Uuid::nil(),
-                    Uuid::nil(),
-                    waku_client::Command::ProbeComputerPermissions { prompt },
-                ) {
-                    Ok(waku_client::ResponsePayload::ComputerPermissions { permissions }) => {
-                        Ok(permissions)
-                    }
-                    Ok(_) => Err("the daemon returned an invalid permission response".into()),
-                    Err(error) => Err(error.to_string()),
-                };
-                if tx.send(result).is_ok() {
-                    signal_event_pump(&event_wake);
-                }
-            })
-            .ok();
-        cx.notify();
-    }
-
-    fn revoke_computer_app(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.state
-            .computer_use_allowed_apps
-            .retain(|grant| grant.key() != key);
-        self.save();
-        cx.notify();
-    }
-
-    fn computer_use_app_icon(
-        &self,
-        bundle_id: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<std::sync::Arc<gpui::Image>> {
-        if let Some(icon) = self.computer_use_app_icons.borrow().get(bundle_id) {
-            return icon.clone();
+        let default_model = self
+            .provider_default_model_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let context_window = match self
+            .provider_context_window_input
+            .read(cx)
+            .content()
+            .trim()
+            .parse::<u64>()
+        {
+            Ok(value) => value,
+            Err(_) => {
+                self.show_toast(tr!("providers.invalid_context_window").to_owned());
+                cx.notify();
+                return;
+            }
+        };
+        let max_output_tokens = match self
+            .provider_max_output_tokens_input
+            .read(cx)
+            .content()
+            .trim()
+            .parse::<u64>()
+        {
+            Ok(value) => value,
+            Err(_) => {
+                self.show_toast(tr!("providers.invalid_max_output_tokens").to_owned());
+                cx.notify();
+                return;
+            }
+        };
+        if id.validate().is_err()
+            || (editing_id.is_valid() && id != *editing_id)
+            || name.is_empty()
+            || base_url.is_empty()
+            || models.is_empty()
+            || !models.iter().any(|model| model == &default_model)
+        {
+            self.show_toast(tr!("providers.invalid_configuration"));
+            cx.notify();
+            return;
         }
-
-        let bundle_id = bundle_id.to_owned();
+        let api_key_env = self
+            .provider_api_key_env_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        let mut headers = Vec::new();
+        let mut header_names = std::collections::HashSet::new();
+        for line in self
+            .provider_headers_input
+            .read(cx)
+            .content()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            let Some((header_name, header_value)) = line.split_once(':') else {
+                self.show_toast(tr!("providers.invalid_header_format").to_owned());
+                cx.notify();
+                return;
+            };
+            let header_name = header_name.trim().to_owned();
+            let header_value = header_value.trim().to_owned();
+            if header_name.is_empty()
+                || header_value.is_empty()
+                || !header_names.insert(header_name.to_ascii_lowercase())
+                || matches!(
+                    header_name.to_ascii_lowercase().as_str(),
+                    "authorization"
+                        | "x-api-key"
+                        | "host"
+                        | "content-length"
+                        | "content-type"
+                        | "anthropic-version"
+                )
+            {
+                self.show_toast(tr!("providers.invalid_headers").to_owned());
+                cx.notify();
+                return;
+            }
+            headers.push((header_name, header_value));
+        }
+        let provider = ExternalProvider {
+            id: id.clone(),
+            name,
+            base_url,
+            api_format: self.provider_api_format,
+            api_key_env: (!api_key_env.is_empty()).then_some(api_key_env),
+            headers,
+            models,
+            default_model,
+            context_window,
+            max_output_tokens,
+        };
+        if let Err(error) = provider.validate() {
+            self.show_toast(error);
+            cx.notify();
+            return;
+        }
         if self
-            .computer_use_app_icon_loads
-            .borrow_mut()
-            .insert(bundle_id.clone())
+            .state
+            .external_providers
+            .iter()
+            .any(|candidate| candidate.id == id && &candidate.id != editing_id)
         {
-            cx.spawn(async move |this, cx| {
-                let load_bundle_id = bundle_id.clone();
-                let icon =
-                    cx.background_executor()
-                        .spawn(async move {
-                            crate::platform::load_app_icon_for_bundle_id(&load_bundle_id)
-                        })
-                        .await;
-                let _ = this.update(cx, |this, cx| {
-                    this.computer_use_app_icon_loads
-                        .borrow_mut()
-                        .remove(&bundle_id);
-                    this.computer_use_app_icons
-                        .borrow_mut()
-                        .insert(bundle_id, icon);
-                    cx.notify();
-                });
-            })
-            .detach();
+            self.show_toast(tr!("providers.duplicate_id"));
+            cx.notify();
+            return;
         }
-        None
+        if let Some(existing) = self
+            .state
+            .external_providers
+            .iter_mut()
+            .find(|candidate| &candidate.id == editing_id)
+        {
+            *existing = provider;
+        } else {
+            self.state.external_providers.push(provider);
+        }
+        self.expanded_provider_settings = Some(id.clone());
+        if self.state.last_provider == ProviderId::new("")
+            || self.state.last_provider == *editing_id
+        {
+            self.state.last_provider = id;
+        }
+        self.save();
+        cx.notify();
     }
-
     fn render_settings_drag_region(
         &self,
         id: &'static str,
@@ -2329,7 +2484,6 @@ impl Waku {
                 }
             }))
     }
-
     fn set_theme_preference(
         &mut self,
         preference: ThemePreference,
@@ -2344,7 +2498,6 @@ impl Waku {
         self.save();
         cx.notify();
     }
-
     fn set_language(
         &mut self,
         language: crate::i18n::AppLanguage,
@@ -2376,9 +2529,6 @@ impl Waku {
         self.skills_search.update(cx, |input, cx| {
             input.set_placeholder(tr!("skills.search"), cx)
         });
-        self.provider_path_input.update(cx, |input, cx| {
-            input.set_placeholder(tr!("input.detected_automatically"), cx)
-        });
         self.usage_project_filter.update(cx, |input, cx| {
             input.set_placeholder(tr!("input.filter_projects"), cx)
         });
@@ -2390,10 +2540,6 @@ impl Waku {
         for terminal in self.right_panel_terminals.values() {
             terminal.update(cx, |terminal, cx| terminal.refresh_localized_text(cx));
         }
-        for probe in &mut self.probes {
-            probe.models = crate::model_catalog::fallback_models(probe.provider);
-        }
-        self.refresh_provider_detection(None);
         self.invalidate_composer_sources(cx);
 
         let updater_available = cx
@@ -2405,118 +2551,449 @@ impl Waku {
         window.refresh();
         cx.notify();
     }
-}
 
-/// "Checked …" caption for the Providers page. Recomputed whenever the page
-/// redraws; precision beyond the minute is noise here.
-fn detection_checked_label(elapsed: Duration) -> String {
-    let seconds = elapsed.as_secs();
-    if seconds < 90 {
-        tr!("providers.checked_just_now")
-    } else if seconds < 3600 {
-        tr!("providers.checked_minutes_ago", count = seconds / 60)
-    } else {
-        tr!("providers.checked_hours_ago", count = seconds / 3600)
+    pub(super) fn refresh_provider_auth_statuses(&mut self, cx: &mut Context<Self>) {
+        self.auth_generation = self.auth_generation.wrapping_add(1);
+        let generation = self.auth_generation;
+        let client = self.daemon.client();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { client.get_auth_status(None) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if generation != this.auth_generation {
+                    return;
+                }
+                this.auth_pending.clear();
+                match result {
+                    Ok(waku_client::ResponsePayload::AuthStatus { statuses, phases }) => {
+                        this.auth_statuses = statuses
+                            .into_iter()
+                            .map(|status| (status.provider.clone(), status))
+                            .collect();
+                        this.auth_phases = phases;
+                        this.auth_error.clear();
+                    }
+                    Ok(_) => {
+                        this.auth_error.insert(
+                            ProviderId::new("all"),
+                            "invalid auth status response".into(),
+                        );
+                    }
+                    Err(error) => {
+                        this.auth_error
+                            .insert(ProviderId::new("all"), error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn refresh_provider_catalogs(&mut self, force: bool, cx: &mut Context<Self>) {
+        self.model_catalog_generation = self.model_catalog_generation.wrapping_add(1);
+        let generation = self.model_catalog_generation;
+        let providers = self
+            .state
+            .external_providers
+            .iter()
+            .map(|provider| provider.id.clone())
+            .collect::<Vec<_>>();
+        let client = self.daemon.client();
+        self.model_catalog_pending.extend(providers.iter().cloned());
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut catalogs = Vec::new();
+                    for provider in providers {
+                        let response = if force {
+                            client.refresh_models(provider.clone())?
+                        } else {
+                            client.list_models(provider.clone())?
+                        };
+                        if let waku_client::ResponsePayload::Models { catalog } = response {
+                            catalogs.push(catalog);
+                        }
+                    }
+                    Ok::<_, anyhow::Error>(catalogs)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if generation != this.model_catalog_generation {
+                    return;
+                }
+                this.model_catalog_pending.clear();
+                match result {
+                    Ok(catalogs) => {
+                        for catalog in catalogs {
+                            this.model_catalogs
+                                .insert(catalog.provider.clone(), catalog);
+                        }
+                        this.model_catalog_error.clear();
+                    }
+                    Err(error) => {
+                        this.model_catalog_error
+                            .insert(ProviderId::new("all"), error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    fn start_provider_login(
+        &mut self,
+        provider: ProviderId,
+        method: waku_client::LoginMethod,
+        cx: &mut Context<Self>,
+    ) {
+        self.auth_generation = self.auth_generation.wrapping_add(1);
+        let generation = self.auth_generation;
+        self.auth_pending.insert(provider.clone());
+        self.clear_auth_api_key(cx);
+        let pending_provider = provider.clone();
+        let client = self.daemon.client();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { client.start_login(provider, method) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if generation != this.auth_generation {
+                    return;
+                }
+                match result {
+                    Ok(waku_client::ResponsePayload::Login { phase }) => {
+                        match &phase {
+                            waku_client::AuthPhase::AwaitingBrowser { url, .. }
+                            | waku_client::AuthPhase::AwaitingDevice {
+                                verification_url: url,
+                                ..
+                            } => cx.open_url(url),
+                            _ => {}
+                        }
+                        this.auth_phases.push(phase);
+                    }
+                    Ok(_) => {
+                        this.auth_error
+                            .insert(ProviderId::new("all"), "invalid login response".into());
+                    }
+                    Err(error) => {
+                        this.auth_error
+                            .insert(ProviderId::new("all"), error.to_string());
+                    }
+                };
+                this.auth_pending.remove(&pending_provider);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn cancel_provider_login(&mut self, login_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.clear_auth_api_key(cx);
+        let client = self.daemon.client();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { client.cancel_login(login_id) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.auth_error
+                        .insert(ProviderId::new("all"), error.to_string());
+                }
+                this.refresh_provider_auth_statuses(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn complete_api_key_login(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
+        let key = self.auth_api_key_input.read(cx).content().trim().to_owned();
+        if key.is_empty() {
+            return;
+        }
+        let Some(login_id) = self.auth_phases.iter().find_map(|phase| {
+            let waku_client::AuthPhase::AwaitingApiKey {
+                login_id,
+                provider: phase_provider,
+                ..
+            } = phase
+            else {
+                return None;
+            };
+            (phase_provider == &provider).then_some(*login_id)
+        }) else {
+            return;
+        };
+        self.clear_auth_api_key(cx);
+        let client = self.daemon.client();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    client.complete_api_key_login(
+                        login_id,
+                        provider,
+                        waku_client::SecretString::new(key),
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.auth_error
+                        .insert(ProviderId::new("all"), error.to_string());
+                }
+                this.refresh_provider_auth_statuses(cx);
+                this.refresh_provider_catalogs(true, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn clear_auth_api_key(&mut self, cx: &mut Context<Self>) {
+        self.auth_api_key_input
+            .update(cx, |input, cx| input.clear(cx));
+    }
+
+    fn logout_provider(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
+        self.clear_auth_api_key(cx);
+        let client = self.daemon.client();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { client.logout(provider) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if result.is_ok() {
+                    this.refresh_provider_auth_statuses(cx);
+                    this.refresh_provider_catalogs(true, cx);
+                } else if let Err(error) = result {
+                    this.auth_error
+                        .insert(ProviderId::new("all"), error.to_string());
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+fn preset_login_methods(preset_id: &str) -> &'static [waku_client::LoginMethod] {
+    match preset_id {
+        waku_client::ProviderId::OPENAI_CODEX => &[
+            waku_client::LoginMethod::OauthBrowser,
+            waku_client::LoginMethod::OauthDevice,
+        ],
+        waku_client::ProviderId::XAI_OAUTH => &[waku_client::LoginMethod::OauthDevice],
+        _ => &[waku_client::LoginMethod::ApiKey],
     }
 }
 
-/// Keep the full binary path, abbreviating only the user's home directory.
-fn abbreviate_home_path(path: &Path, home: Option<&Path>) -> String {
-    match home.and_then(|home| path.strip_prefix(home).ok()) {
-        Some(relative) if relative.as_os_str().is_empty() => "~".to_owned(),
-        Some(relative) => format!("~/{}", relative.display()),
-        None => path.display().to_string(),
+fn login_method_label(method: waku_client::LoginMethod) -> String {
+    match method {
+        waku_client::LoginMethod::ApiKey => tr!("providers.connect").to_string(),
+        waku_client::LoginMethod::OauthBrowser => tr!("providers.sign_in").to_string(),
+        waku_client::LoginMethod::OauthDevice => tr!("providers.use_device_code").to_string(),
     }
 }
 
-fn permission_status_row(
-    name: String,
-    description: String,
-    granted: bool,
-    id: &'static str,
-    theme: Theme,
-    cx: &mut Context<Waku>,
-) -> Div {
-    let status = if granted {
-        div()
-            .id(id)
-            .h(px(25.0))
-            .px(px(4.0))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(5.0))
-            .cursor_default()
-            .text_size(px(10.0))
-            .text_color(theme.success)
-            .child(icon("icons/check.svg", 12.0, theme.success))
-            .child(tr!("computer_use.access_granted"))
-    } else {
-        div()
-            .id(id)
-            .h(px(25.0))
-            .px(px(9.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .flex()
-            .items_center()
-            .cursor_default()
-            .text_size(px(10.0))
-            .text_color(theme.text_secondary)
-            .hover(|element| element.bg(theme.overlay).text_color(theme.text))
-            .child(tr!("computer_use.grant_access"))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.request_computer_permissions(true, cx);
-            }))
+fn auth_phase_summary(phase: &waku_client::AuthPhase) -> String {
+    match phase {
+        waku_client::AuthPhase::AwaitingBrowser { url, .. } => format!("Opening browser: {url}"),
+        waku_client::AuthPhase::AwaitingDevice {
+            user_code,
+            verification_url,
+            ..
+        } => format!("Code {user_code} at {verification_url}"),
+        waku_client::AuthPhase::AwaitingApiKey { instructions, .. } => instructions.clone(),
+        waku_client::AuthPhase::Completed { .. } => tr!("providers.connected").to_string(),
+        waku_client::AuthPhase::Failed { message, .. } => message.clone(),
+        waku_client::AuthPhase::Idle => String::new(),
+    }
+}
+struct ProviderDraftPolicy<'a> {
+    id: &'a str,
+    name: &'a str,
+    base_url: &'a str,
+    api_key_env: Option<&'a str>,
+    models_text: &'a str,
+    default_model: &'a str,
+    context_window: &'a str,
+    max_output_tokens: &'a str,
+    headers_text: &'a str,
+}
+
+fn parse_provider_draft_policy(
+    policy: ProviderDraftPolicy<'_>,
+) -> Result<ExternalProvider, String> {
+    let ProviderDraftPolicy {
+        id,
+        name,
+        base_url,
+        api_key_env,
+        models_text,
+        default_model,
+        context_window,
+        max_output_tokens,
+        headers_text,
+    } = policy;
+
+    let models = models_text
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut seen = std::collections::HashSet::new();
+    if models
+        .iter()
+        .any(|model| !seen.insert(model.to_ascii_lowercase()))
+    {
+        return Err(tr!("providers.duplicate_models").to_owned());
+    }
+    let context_window = context_window
+        .parse::<u64>()
+        .map_err(|_| tr!("providers.invalid_context_window").to_owned())?;
+    let max_output_tokens = max_output_tokens
+        .parse::<u64>()
+        .map_err(|_| tr!("providers.invalid_max_output_tokens").to_owned())?;
+    let mut headers = Vec::new();
+    let mut names = std::collections::HashSet::new();
+    for line in headers_text.lines().filter(|line| !line.trim().is_empty()) {
+        let Some((key, value)) = line.split_once(':') else {
+            return Err(tr!("providers.invalid_header_format").to_owned());
+        };
+        let key = key.trim().to_owned();
+        let value = value.trim().to_owned();
+        let lower = key.to_ascii_lowercase();
+        if key.is_empty()
+            || value.is_empty()
+            || !names.insert(lower.clone())
+            || matches!(
+                lower.as_str(),
+                "authorization"
+                    | "x-api-key"
+                    | "host"
+                    | "content-length"
+                    | "content-type"
+                    | "anthropic-version"
+            )
+        {
+            return Err(tr!("providers.invalid_headers").to_owned());
+        }
+        headers.push((key, value));
+    }
+    let provider = ExternalProvider {
+        id: ProviderId::new(id),
+        name: name.into(),
+        base_url: base_url.into(),
+        api_format: Default::default(),
+        api_key_env: api_key_env.map(str::to_owned),
+        headers,
+        models,
+        default_model: default_model.into(),
+        context_window,
+        max_output_tokens,
     };
-
-    div()
-        .mt(px(10.0))
-        .pt(px(10.0))
-        .border_t_1()
-        .border_color(theme.border)
-        .flex()
-        .items_center()
-        .gap(px(10.0))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(
-                    div()
-                        .text_size(px(11.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(name),
-                )
-                .child(
-                    div()
-                        .mt(px(2.0))
-                        .text_size(px(10.0))
-                        .text_color(theme.text_tertiary)
-                        .child(description),
-                ),
-        )
-        .child(status)
+    provider.validate().map_err(|error| error.to_owned())?;
+    Ok(provider)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::abbreviate_home_path;
-    use std::path::Path;
+fn auth_phase_url(phase: &waku_client::AuthPhase) -> Option<&str> {
+    match phase {
+        waku_client::AuthPhase::AwaitingBrowser { url, .. }
+        | waku_client::AuthPhase::AwaitingDevice {
+            verification_url: url,
+            ..
+        } => Some(url),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn accepts_generation(current: u64, response: u64) -> bool {
+    current == response
+}
+
+#[cfg(test)]
+mod auth_behavior_tests {
+    use super::{accepts_generation, auth_phase_url, preset_login_methods};
+    use uuid::Uuid;
+    use waku_client::{LoginMethod, ProviderId};
 
     #[test]
-    fn provider_paths_abbreviate_only_the_home_prefix() {
-        let home = Path::new("/Users/example");
+    fn browser_and_device_phases_provide_system_urls() {
+        let browser = waku_client::AuthPhase::AwaitingBrowser {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("openai-codex"),
+            url: "https://browser".into(),
+        };
+        let device = waku_client::AuthPhase::AwaitingDevice {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("openai-codex"),
+            user_code: "CODE".into(),
+            verification_url: "https://device".into(),
+            instructions: "verify".into(),
+        };
+        assert_eq!(auth_phase_url(&browser), Some("https://browser"));
+        assert_eq!(auth_phase_url(&device), Some("https://device"));
+    }
 
+    #[test]
+    fn stale_auth_and_catalog_generations_are_discarded() {
+        assert!(accepts_generation(7, 7));
+        assert!(!accepts_generation(8, 7));
+    }
+
+    #[test]
+    fn secret_material_is_redacted_from_debug_and_display() {
+        let secret = waku_client::SecretString::new("not-persisted");
+        assert!(!format!("{secret:?}").contains("not-persisted"));
+        assert!(!secret.to_string().contains("not-persisted"));
+    }
+
+    #[test]
+    fn codex_exposes_explicit_browser_and_device_login() {
         assert_eq!(
-            abbreviate_home_path(Path::new("/Users/example/.local/bin/amp"), Some(home)),
-            "~/.local/bin/amp"
+            preset_login_methods(waku_client::ProviderId::OPENAI_CODEX),
+            [LoginMethod::OauthBrowser, LoginMethod::OauthDevice]
         );
+    }
+
+    #[test]
+    fn auth_phases_are_scoped_to_the_login_owner() {
+        let phase = waku_client::AuthPhase::AwaitingDevice {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("openai-codex"),
+            user_code: "CODE".into(),
+            verification_url: "https://device".into(),
+            instructions: "verify".into(),
+        };
         assert_eq!(
-            abbreviate_home_path(Path::new("/opt/homebrew/bin/codex"), Some(home)),
-            "/opt/homebrew/bin/codex"
+            phase.provider().map(ProviderId::as_str),
+            Some("openai-codex")
+        );
+        assert_ne!(phase.provider().map(ProviderId::as_str), Some("xai-oauth"));
+    }
+
+    #[test]
+    fn failed_login_always_carries_login_id_and_provider() {
+        let phase = waku_client::AuthPhase::Failed {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("openai-codex"),
+            message: "loopback unavailable".into(),
+        };
+        assert_eq!(phase.login_id(), Some(Uuid::nil()));
+        assert_eq!(
+            phase.provider().map(ProviderId::as_str),
+            Some("openai-codex")
         );
     }
 }

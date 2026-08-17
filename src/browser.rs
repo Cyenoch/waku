@@ -1056,10 +1056,10 @@ impl BrowserView {
         icon_path: &'static str,
         enabled: bool,
         tooltip: String,
-        theme: Theme,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let theme = Theme::current(cx);
         let base = div()
             .id(id)
             .size(px(26.0))
@@ -1106,7 +1106,6 @@ impl BrowserView {
                     "browser.back",
                     shortcut = crate::platform::primary_shortcut("⌘[", "Ctrl+[")
                 ),
-                theme,
                 |this, _, cx| this.go_back(cx),
                 cx,
             ))
@@ -1118,7 +1117,6 @@ impl BrowserView {
                     "browser.forward",
                     shortcut = crate::platform::primary_shortcut("⌘]", "Ctrl+]")
                 ),
-                theme,
                 |this, _, cx| this.go_forward(cx),
                 cx,
             ))
@@ -1128,7 +1126,6 @@ impl BrowserView {
                     "icons/x.svg",
                     true,
                     tr!("browser.stop_loading"),
-                    theme,
                     |this, _, cx| this.stop_loading(cx),
                     cx,
                 )
@@ -1141,7 +1138,6 @@ impl BrowserView {
                         "browser.reload",
                         shortcut = crate::platform::primary_shortcut("⌘R", "Ctrl+R")
                     ),
-                    theme,
                     |this, _, cx| this.reload(cx),
                     cx,
                 )
@@ -1182,7 +1178,6 @@ impl BrowserView {
                 "icons/external-link.svg",
                 has_page,
                 tr!("browser.open_external"),
-                theme,
                 |this, _, cx| this.open_external(cx),
                 cx,
             ))

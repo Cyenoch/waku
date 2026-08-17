@@ -166,7 +166,6 @@ impl Render for Waku {
         let theme = Theme::current(cx);
         let empty = should_render_empty_state(self.selected_session());
         let permission = self.render_permission(cx);
-        let computer_use = self.render_computer_use_overlay(cx);
         let command_palette = self.render_command_palette(window, cx);
         let commit_dialog = self.render_commit_dialog(cx);
         let toast = self.render_active_toast(cx);
@@ -207,12 +206,14 @@ impl Render for Waku {
             .text_color(theme.text)
             .font_family(".SystemUIFont")
             .when(self.sidebar_visible, |root| {
-                root.child(self.sidebar_pane.clone().cached(
-                    StyleRefinement::default()
-                        .w(px(sidebar_width))
-                        .h_full()
-                        .flex_none(),
-                ))
+                root.child(
+                    self.sidebar_pane.clone().cached(
+                        StyleRefinement::default()
+                            .w(px(sidebar_width))
+                            .h_full()
+                            .flex_none(),
+                    ),
+                )
             })
             .child(
                 div()
@@ -231,9 +232,7 @@ impl Render for Waku {
                     } else {
                         self.transcript_pane
                             .clone()
-                            .cached(
-                                StyleRefinement::default().flex_1().min_h(px(0.0)).w_full(),
-                            )
+                            .cached(StyleRefinement::default().flex_1().min_h(px(0.0)).w_full())
                             .into_any_element()
                     })
                     .children(permission)
@@ -245,7 +244,6 @@ impl Render for Waku {
                     })
                     .relative()
                     .children(toast)
-                    .children(computer_use)
                     .when(self.sidebar_visible, |element| {
                         element.child(self.render_panel_resize_handle(
                             "sidebar-resize-handle",
@@ -255,12 +253,14 @@ impl Render for Waku {
                     }),
             )
             .when(self.right_panel_visible, |root| {
-                root.child(self.right_panel_pane.clone().cached(
-                    StyleRefinement::default()
-                        .w(px(right_panel_width))
-                        .h_full()
-                        .flex_none(),
-                ))
+                root.child(
+                    self.right_panel_pane.clone().cached(
+                        StyleRefinement::default()
+                            .w(px(right_panel_width))
+                            .h_full()
+                            .flex_none(),
+                    ),
+                )
             })
             .children(command_palette)
             .children(commit_dialog)
@@ -268,23 +268,6 @@ impl Render for Waku {
             .into_any_element();
 
         self.render_window_frame(content, window, cx)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unloaded_history_never_renders_the_new_task_prompt() {
-        let mut stored = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        stored.detail_loaded = false;
-
-        assert!(!should_render_empty_state(Some(&stored)));
-
-        let draft = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
-        assert!(should_render_empty_state(Some(&draft)));
-        assert!(should_render_empty_state(None));
     }
 }
 
@@ -409,5 +392,22 @@ impl Waku {
                         .opacity(0.4 + 0.6 * delta)
                 },
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unloaded_history_never_renders_the_new_task_prompt() {
+        let mut stored = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+        stored.detail_loaded = false;
+
+        assert!(!should_render_empty_state(Some(&stored)));
+
+        let draft = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+        assert!(should_render_empty_state(Some(&draft)));
+        assert!(should_render_empty_state(None));
     }
 }

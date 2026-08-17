@@ -32,7 +32,6 @@ mod analytics;
 mod app;
 mod assets;
 mod browser;
-mod computer_use;
 pub mod daemon;
 mod driver;
 mod input;
@@ -47,7 +46,7 @@ mod updater;
 
 pub use waku_client::{
     checkpoint, command_env, composer_complete, git_branch, git_commit, i18n, identity, model,
-    model_catalog, persistence, projectless, skills, usage, usage_history, worktree,
+    persistence, projectless, skills, usage, usage_history, worktree,
 };
 
 use gpui::{
@@ -324,10 +323,7 @@ pub fn run() {
                         icon: crate::platform::linux_app_icon(),
                         window_bounds: Some(window_bounds),
                         display_id,
-                        window_min_size: Some(size(
-                            px(MIN_WINDOW_WIDTH),
-                            px(MIN_WINDOW_HEIGHT),
-                        )),
+                        window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
                         ..Default::default()
                     },
                     move |window, cx| {
@@ -341,7 +337,6 @@ pub fn run() {
                 .expect("failed to open Waku window");
 
             cx.on_system_notification_response({
-                let window = window;
                 move |response, cx| {
                     let Some(session_id) = crate::app::task_id_from_notification_tag(&response.tag)
                     else {

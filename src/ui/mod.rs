@@ -10,7 +10,7 @@ pub mod scrollbar;
 pub mod text_field;
 pub mod tooltip;
 
-use crate::model::{ActivityKind, ProviderKind, SessionStatus};
+use crate::model::{ActivityKind, ProviderId, SessionStatus};
 use crate::theme::Theme;
 
 /// A monochrome icon from the embedded set, tinted via text color.
@@ -62,38 +62,48 @@ pub fn contain_scroll(handle: &ScrollHandle, cx: &mut App) {
     }
 }
 
-/// Brand hue for each provider's official mark.
-pub fn provider_color(theme: &Theme, provider: ProviderKind) -> Hsla {
-    match provider {
-        ProviderKind::Amp => rgb(0xF34E3F).into(),
-        ProviderKind::Claude => rgb(0xD97757).into(),
-        ProviderKind::DeepSeek => rgb(0x4D6BFE).into(),
-        ProviderKind::Codex
-        | ProviderKind::Cursor
-        | ProviderKind::OpenCode
-        | ProviderKind::Grok
-        | ProviderKind::Pi => {
-            if theme.is_dark {
-                rgb(0xF3F3F3).into()
-            } else {
-                rgb(0x34363B).into()
+const PROVIDER_SERIES_RGB: [u32; 8] = [
+    0x00D9_7757,
+    0x0010_A37F,
+    0x000E_A5E9,
+    0x00A8_55F7,
+    0x00F5_9E0B,
+    0x00EF_4444,
+    0x0014_B8A6,
+    0x0063_66F1,
+];
+
+pub fn provider_series_rgb(provider: &ProviderId) -> u32 {
+    let slot = match provider.as_str().to_ascii_lowercase().as_str() {
+        "anthropic" | "claude" => 0,
+        "openai-responses" | "openai" => 1,
+        "xai" => 2,
+        "opencode-zen" => 3,
+        "opencode-go" => 4,
+        "xai-oauth" => 5,
+        "openai-chat" => 6,
+        "openai-codex" => 7,
+        id => {
+            let mut hash: u32 = 2_166_136_261;
+            for byte in id.bytes() {
+                hash ^= u32::from(byte);
+                hash = hash.wrapping_mul(16_777_619);
             }
+            return PROVIDER_SERIES_RGB[(hash as usize) % PROVIDER_SERIES_RGB.len()];
         }
-    }
+    };
+    PROVIDER_SERIES_RGB[slot]
 }
 
-/// Recognizable provider marks, matching the model picker vocabulary.
-pub fn provider_icon(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Amp => "icons/provider-amp.svg",
-        ProviderKind::Claude => "icons/provider-claude.svg",
-        ProviderKind::Codex => "icons/provider-openai.svg",
-        ProviderKind::Cursor => "icons/provider-cursor.svg",
-        ProviderKind::DeepSeek => "icons/provider-deepseek.svg",
-        ProviderKind::OpenCode => "icons/provider-opencode.svg",
-        ProviderKind::Grok => "icons/provider-grok.svg",
-        ProviderKind::Pi => "icons/provider-pi.svg",
-    }
+/// Brand hue for each provider series on the Usage page.
+pub fn provider_color(_theme: &Theme, provider: &ProviderId) -> Hsla {
+    rgb(provider_series_rgb(provider)).into()
+}
+
+/// Recognizable provider marks, matching the model picker vocabulary. HTTP
+/// endpoints are user-configured, so every provider shares the generic mark.
+pub fn provider_icon(_provider: &ProviderId) -> &'static str {
+    "icons/bot.svg"
 }
 
 pub fn status_color(theme: &Theme, status: SessionStatus) -> Hsla {
@@ -356,7 +366,7 @@ mod tests {
     #[test]
     fn every_referenced_icon_is_embedded() {
         use crate::assets::Assets;
-        use crate::model::{ActivityKind, ProviderKind};
+        use crate::model::{ActivityKind, ProviderId};
         use gpui::AssetSource;
 
         let mut paths = vec![
@@ -395,8 +405,12 @@ mod tests {
             "icons/package.svg",
             "icons/trash.svg",
         ];
-        for provider in ProviderKind::ALL {
-            paths.push(provider_icon(provider));
+        for provider in [
+            ProviderId::OPENAI_RESPONSES,
+            ProviderId::OPENAI_CHAT,
+            ProviderId::ANTHROPIC,
+        ] {
+            paths.push(provider_icon(&ProviderId::new(provider)));
         }
         for kind in [
             ActivityKind::Reasoning,
@@ -417,5 +431,40 @@ mod tests {
                 "missing embedded icon: {path}"
             );
         }
+    }
+
+    #[test]
+    fn builtin_provider_series_colors_are_stable_and_distinct() {
+        let ids = [
+            ProviderId::new("anthropic"),
+            ProviderId::new("openai-responses"),
+            ProviderId::new("openai-chat"),
+            ProviderId::new("openai-codex"),
+            ProviderId::new("xai"),
+            ProviderId::new("xai-oauth"),
+            ProviderId::new("opencode-zen"),
+            ProviderId::new("opencode-go"),
+        ];
+        let colors: Vec<u32> = ids.iter().map(provider_series_rgb).collect();
+        assert_eq!(
+            provider_series_rgb(&ProviderId::new("Anthropic")),
+            provider_series_rgb(&ProviderId::new("anthropic"))
+        );
+        let unique = colors
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), ids.len());
+        assert!(
+            colors
+                .iter()
+                .all(|color| PROVIDER_SERIES_RGB.contains(color))
+        );
+    }
+
+    #[test]
+    fn custom_provider_series_color_stays_inside_the_palette() {
+        let color = provider_series_rgb(&ProviderId::new("my-gateway"));
+        assert!(PROVIDER_SERIES_RGB.contains(&color));
     }
 }

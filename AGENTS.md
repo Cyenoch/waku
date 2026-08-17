@@ -71,6 +71,9 @@
   activity, or transcript presentation and the comparison would materially
   clarify an ambiguous product decision, or when the user explicitly asks for
   the comparison.
+- Use [oh-my-pi](https://github.com/can1357/oh-my-pi) as a secondary product reference when a task concerns coding-agent
+  workflow, onboarding, tool affordances, or transcript presentation and the
+  comparison would materially clarify a product decision or interaction pattern.
 - Do not inspect T3 Code for localized bug fixes, straightforward visual
   corrections, native platform behavior, or changes already specified clearly
   by the user. When T3 Code is relevant, inspect its current app or source

@@ -97,7 +97,6 @@ export function sessionHasStarted(session: AgentSession): boolean {
   return Boolean(
     session.turns.length
       || session.messages.length
-      || session.provider_cursor
       || session.last_reply_at,
   )
 }

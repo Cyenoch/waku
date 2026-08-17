@@ -1,31 +1,34 @@
 # Waku
 
-Waku is a fast, native desktop app for working with local coding agents. It is
-built in Rust with [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)
-and keeps projects, sessions, transcripts on your machine.
+Waku is a fast, native desktop app built in Rust with GPUI. It uses a built-in
+Rust harness and connects to direct HTTP model endpoints while keeping projects,
+sessions, and transcripts on your machine.
 
 [Download Waku](https://waku.sh)
 
-## Supported agents
+## Providers
 
-Waku works with:
+Waku uses its built-in Rust harness to connect directly to HTTP model endpoints.
+The harness supports OpenAI Responses, OpenAI Chat Completions, and Anthropic
+wire formats. Built-in providers include the official OpenAI API, ChatGPT Codex
+subscription, Anthropic, OpenCode Zen, OpenCode Go, xAI API, and SuperGrok /
+X Premium+ (xAI device OAuth). Their model catalogs are discovered live.
 
-- [Amp](https://ampcode.com/)
-- Claude Code
-- Codex CLI
-- Cursor CLI
-- Grok Build
-- OpenCode
-- Pi
+Add custom endpoints in Settings → Providers with an ID, API root URL (including
+any required `/v1` path), API format, API-key environment variable, and
+non-secret headers. A successful discovery response, including an empty catalog,
+is authoritative; discovery errors fall back to the last-good cache or provider
+seed. Explicit model IDs on custom endpoints are used only when discovery fails.
+Catalog compatibility prevents unsupported model selection, and typed service
+tier applies only to supported entries in the official OpenAI API catalogs.
+API keys entered in Waku are stored in the macOS Keychain; environment-variable
+credentials are read at runtime and never persisted.
 
-Install and authenticate at least one supported agent CLI before starting Waku.
-Waku detects available CLIs automatically and uses each provider's native
-structured protocol and session continuity.
 
 ## Highlights
 
 - Keep projects and independent agent sessions in one native app.
-- Switch models, reasoning effort, and access modes from a shared interface.
+- Switch configured models and access modes from a shared interface.
 - Queue or steer follow-up messages while an agent is working.
 - Rewind Git-backed tasks with conversation-aware checkpoints.
 - Store app state locally, with no Waku account or remote service required.
@@ -33,14 +36,16 @@ structured protocol and session continuity.
 ## Architecture
 
 The native desktop is an RPC client of the standalone `waku-daemon` process.
-Provider sessions run in [`waku-core`](crates/waku-core), behind the
-authenticated, versioned WebSocket contract in
-[`waku-protocol`](crates/waku-protocol). Waku Desktop depends on
+Provider sessions run through the built-in HTTP harness in
+[`waku-core`](crates/waku-core), behind the authenticated, versioned WebSocket
+contract in [`waku-protocol`](crates/waku-protocol). Waku Desktop depends on
 [`waku-client`](crates/waku-client), not on the daemon implementation. The
-daemon owns task SQLite data, uploaded attachments, provider-native session
-forks, and all workspace filesystem and Git operations; paths returned by it
-always refer to the daemon host. The desktop retains only presentation state
-and a disposable preview cache.
+daemon owns task SQLite data, uploaded attachments, harness session snapshots,
+an append-only usage ledger, and all workspace filesystem and Git operations;
+paths returned by it always refer to the daemon host. The desktop retains only
+presentation state and a disposable preview cache. The harness keeps the
+generic `Tool` seam for local tools; the removed legacy Computer Use integration
+is not part of the runtime.
 
 The browser client lives at [`apps/web`](apps/web) and uses the generated
 browser transport in [`packages/waku-client`](packages/waku-client). Its
@@ -55,9 +60,7 @@ Projectless task workspaces live on the daemon host under
 older `~/.waku/<date>/<slug>` layout on first load.
 
 Configuration ownership is separate too: the Release desktop writes
-`~/.waku/app.json`, while Debug stays isolated at `temp/app.json`. Daemon
-provider and Computer Use settings live in `~/.waku/settings.json`. The
-desktop's Settings → Daemon page can explicitly
+`~/.waku/app.json`, while Debug stays isolated at `temp/app.json`. Daemon settings live in `~/.waku/settings.json`. The desktop's Settings → Daemon page can explicitly
 expose the child daemon on a fixed port, configure exact browser origins, and
 copy its stable authentication token. It remains loopback-only by default.
 
@@ -83,9 +86,9 @@ bun install
 bun run dev
 ```
 
-The embedded browser and experimental computer-use integration currently
-remain macOS-only. Agent sessions, projects, transcripts, skills, usage,
-diffs, file editing, and the terminal run natively on Linux.
+The embedded browser currently remains macOS-only. Agent sessions, projects,
+transcripts, skills, usage, diffs, file editing, and the terminal run natively
+on Linux.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and checks.
 Release maintainers should also read [RELEASING.md](RELEASING.md).

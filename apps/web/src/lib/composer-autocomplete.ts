@@ -1,7 +1,5 @@
 import type {
   FileEntry,
-  ProviderKind,
-  ProviderModelOption,
   ReportedCommand,
   SlashCommand,
 } from '@waku/client'
@@ -62,28 +60,6 @@ export function mergeComposerCommands(
     const byScope = commandScopeRank(left.scope) - commandScopeRank(right.scope)
     return byScope || left.name.localeCompare(right.name)
   })
-}
-
-export function isFastModeToggleSubmission(
-  provider: ProviderKind,
-  prompt: string,
-  commands: SlashCommand[],
-): boolean {
-  return provider === 'codex'
-    && prompt.trim() === '/fast'
-    && commands.some((command) => command.name === 'fast'
-      && command.scope === 'Builtin'
-      && command.template === null)
-}
-
-export function toggledFastServiceTier(
-  current: string | null | undefined,
-  serviceTiers: ProviderModelOption[],
-): string | null {
-  const fast = serviceTiers.find((tier) => ['fast', 'priority'].includes(tier.id)
-    || tier.label.toLocaleLowerCase() === 'fast')
-  if (!fast) return null
-  return current === fast.id ? 'default' : fast.id
 }
 
 export function composerAutocompleteRows(

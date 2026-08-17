@@ -89,3 +89,25 @@ export const sessionDetails = sqliteTable("session_details", {
   sessionId: text("session_id").primaryKey(),
   data: text("data").notNull(),
 });
+
+/**
+ * Append-only billed assistant responses. Rewind, fork, and session delete
+ * never rewrite these rows; `event_id` is the insert-once identity.
+ */
+export const usageEvents = sqliteTable(
+  "usage_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    projectPath: text("project_path").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    timestampMs: integer("timestamp_ms").notNull(),
+    input: integer("input").notNull(),
+    output: integer("output").notNull(),
+    cacheRead: integer("cache_read").notNull(),
+    cacheWrite: integer("cache_write").notNull(),
+    reasoning: integer("reasoning"),
+  },
+  (table) => [index("usage_events_by_time").on(table.timestampMs)],
+);

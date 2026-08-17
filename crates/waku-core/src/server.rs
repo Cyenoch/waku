@@ -17,7 +17,7 @@ use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Message, WebSocket, accept_hdr_with_config};
 use uuid::Uuid;
 
-use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
+use crate::model::{AgentSession, Project, ProviderId, SessionStatus};
 use crate::protocol::MAX_WIRE_MESSAGE_BYTES;
 use crate::protocol::{
     ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
@@ -115,7 +115,7 @@ struct SessionCatalogEntry {
     title: String,
     auto_title: Option<String>,
     project_id: Uuid,
-    provider: ProviderKind,
+    provider: ProviderId,
     model: Option<String>,
     status: SessionStatus,
     created_at: u64,
@@ -128,7 +128,7 @@ impl From<&AgentSession> for SessionCatalogEntry {
             title: session.title.clone(),
             auto_title: session.auto_title.clone(),
             project_id: session.project_id,
-            provider: session.provider,
+            provider: session.provider.clone(),
             model: session.model.clone(),
             status: session.status,
             created_at: session.created_at,
@@ -512,6 +512,10 @@ pub fn serve(
     Ok(())
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "tungstenite handshake callback returns ErrorResponse"
+)]
 fn handle_connection(
     stream: TcpStream,
     expected_token: &str,
@@ -632,6 +636,10 @@ fn handle_connection(
     Ok(())
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "tungstenite handshake callback requires ErrorResponse"
+)]
 fn validate_handshake(
     request: &HandshakeRequest,
     response: HandshakeResponse,
@@ -677,13 +685,10 @@ fn command_targets_runtime(command: &Command) -> bool {
             | Command::Prompt { .. }
             | Command::Steer { .. }
             | Command::Cancel
-            | Command::CancelComputerUse
-            | Command::RefreshBackgroundWork
-            | Command::StopBackgroundWork { .. }
             | Command::Respond { .. }
             | Command::RespondUserInput { .. }
-            | Command::RunComputerTool { .. }
-            | Command::RejectComputerTool { .. }
+            | Command::RefreshBackgroundWork
+            | Command::StopBackgroundWork { .. }
             | Command::ApplyOptions { .. }
             | Command::Rollback { .. }
             | Command::Fork { .. }
@@ -738,13 +743,10 @@ fn run_runtime_mailbox(
             if starts_runtime {
                 active_runtime_id =
                     matches!(&handled.outcome, ResponseOutcome::Ok { .. }).then_some(runtime_id);
-            } else if let ResponseOutcome::Ok {
-                payload:
-                    ResponsePayload::SessionRuntime {
-                        runtime_id: Some(attached_runtime_id),
-                        ..
-                    },
-            } = &handled.outcome
+            } else if let Some(ResponsePayload::SessionRuntime {
+                runtime_id: Some(attached_runtime_id),
+                ..
+            }) = handled.outcome.payload()
             {
                 // A replacement mailbox can rediscover a provider runtime
                 // that survived its previous actor worker.
@@ -758,10 +760,8 @@ fn run_runtime_mailbox(
                 }
             } else if active_runtime_id.is_none()
                 && !matches!(
-                    &handled.outcome,
-                    ResponseOutcome::Ok {
-                        payload: ResponsePayload::SessionRuntime { .. }
-                    }
+                    handled.outcome.payload(),
+                    Some(ResponsePayload::SessionRuntime { .. })
                 )
                 && matches!(&handled.outcome, ResponseOutcome::Ok { .. })
             {
@@ -845,7 +845,7 @@ fn handle_request(
             hub.begin_runtime(session_id, runtime_id);
         }
         let outcome = match backend.handle(request, hub.event_sink(session_id, runtime_id)) {
-            Ok(payload) => ResponseOutcome::Ok { payload },
+            Ok(payload) => ResponseOutcome::ok(payload),
             Err(error) => ResponseOutcome::Error {
                 error: RpcError::from(error),
             },
@@ -859,23 +859,18 @@ fn handle_request(
         hub.end_runtime(session_id, Some(runtime_id));
     }
     if executed {
-        match (&task_catalog_action, &outcome) {
+        match (&task_catalog_action, outcome.payload()) {
             (
                 TaskCatalogAction::Load,
-                ResponseOutcome::Ok {
-                    payload:
-                        ResponsePayload::TaskState {
-                            projects, sessions, ..
-                        },
-                },
+                Some(ResponsePayload::TaskState {
+                    projects, sessions, ..
+                }),
             ) => hub.replace_task_catalog(projects, sessions),
             (
                 TaskCatalogAction::Save { projects },
-                ResponseOutcome::Ok {
-                    payload: ResponsePayload::TaskStateSaved { sessions },
-                },
+                Some(ResponsePayload::TaskStateSaved { sessions }),
             ) => hub.task_state_saved(source_subscriber_id, projects, sessions),
-            (TaskCatalogAction::Changed, ResponseOutcome::Ok { .. }) => {
+            (TaskCatalogAction::Changed, Some(_)) => {
                 hub.task_state_changed(source_subscriber_id);
             }
             _ => {}
@@ -893,8 +888,8 @@ fn handle_request(
 fn task_catalog_action(command: &Command) -> TaskCatalogAction {
     match command {
         Command::LoadTaskState => TaskCatalogAction::Load,
-        Command::SaveTaskState { projects, .. } => TaskCatalogAction::Save {
-            projects: projects.clone(),
+        Command::SaveTaskState(payload) => TaskCatalogAction::Save {
+            projects: payload.projects.clone(),
         },
         Command::RemoveSession
         | Command::ForkSessionFromResponse { .. }
@@ -914,7 +909,7 @@ fn send_dispatch_error(
     }
     let outcome = hub
         .cached_response(request_id)
-        .unwrap_or_else(|| ResponseOutcome::Error {
+        .unwrap_or(ResponseOutcome::Error {
             error: RpcError { message },
         });
     hub.cache_response(request_id, outcome.clone());
@@ -973,9 +968,10 @@ mod tests {
     use crate::daemon::WakuBackend;
     #[cfg(unix)]
     use crate::model::Project;
-    use crate::model::{AgentSession, ProviderKind};
+    use crate::model::{AgentSession, ProviderId};
     #[cfg(unix)]
     use crate::persistence::StateStore;
+    use crate::protocol::SaveTaskState;
     #[cfg(unix)]
     use crate::settings::DaemonSettingsStore;
     #[cfg(unix)]
@@ -1006,8 +1002,8 @@ mod tests {
                     runtime_id: self.runtimes.lock().get(&session_id).copied(),
                     supports_steer: true,
                 }),
-                Command::Prompt { prompt } => {
-                    events.send(WireDriverEvent::new("textDelta", json!(prompt)))?;
+                Command::Prompt { input } => {
+                    events.send(WireDriverEvent::new("textDelta", json!(input.text)))?;
                     Ok(ResponsePayload::Ack)
                 }
                 Command::CloseSession => {
@@ -1027,9 +1023,9 @@ mod tests {
     impl Backend for TaskStateBackend {
         fn handle(&self, request: Request, _events: EventSink) -> anyhow::Result<ResponsePayload> {
             match request.command {
-                Command::SaveTaskState { sessions, .. } => {
+                Command::SaveTaskState(payload) => {
                     let mut stored = self.sessions.lock();
-                    for session in sessions {
+                    for session in payload.sessions {
                         if let Some(existing) =
                             stored.iter_mut().find(|existing| existing.id == session.id)
                         {
@@ -1094,7 +1090,7 @@ mod tests {
         let observer = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
         let source_revisions = source.subscribe_task_state();
         let observer_revisions = observer.subscribe_task_state();
-        let session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let session = AgentSession::new(Uuid::new_v4(), ProviderId::new("openai-responses"));
         let session_id = session.id;
 
         assert!(matches!(
@@ -1102,11 +1098,11 @@ mod tests {
                 .request(
                     Uuid::nil(),
                     Uuid::nil(),
-                    Command::SaveTaskState {
-                        projects: Vec::new(),
-                        live_session_ids: vec![session_id],
-                        sessions: vec![session],
-                    },
+                    Command::SaveTaskState(SaveTaskState::boxed(
+                        Vec::new(),
+                        vec![session_id],
+                        vec![session],
+                    )),
                 )
                 .unwrap(),
             ResponsePayload::TaskStateSaved { .. }
@@ -1134,11 +1130,11 @@ mod tests {
             .request(
                 Uuid::nil(),
                 Uuid::nil(),
-                Command::SaveTaskState {
-                    projects: Vec::new(),
-                    live_session_ids: vec![session_id],
-                    sessions: vec![checkpoint],
-                },
+                Command::SaveTaskState(SaveTaskState::boxed(
+                    Vec::new(),
+                    vec![session_id],
+                    vec![checkpoint],
+                )),
             )
             .unwrap();
         assert!(
@@ -1150,17 +1146,17 @@ mod tests {
         // Desktop persistence uses fire-and-forget notifications, while Web
         // uses requests. Both directions must wake the other application's
         // catalog without echoing back to the source connection.
-        let second = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        let second = AgentSession::new(Uuid::new_v4(), ProviderId::new("anthropic"));
         let second_id = second.id;
         observer
             .notify(
                 Uuid::nil(),
                 Uuid::nil(),
-                Command::SaveTaskState {
-                    projects: Vec::new(),
-                    live_session_ids: vec![session_id, second_id],
-                    sessions: vec![second],
-                },
+                Command::SaveTaskState(SaveTaskState::boxed(
+                    Vec::new(),
+                    vec![session_id, second_id],
+                    vec![second],
+                )),
             )
             .unwrap();
         assert_eq!(source_revisions.recv_timeout(Duration::from_secs(1)), Ok(2));
@@ -1209,17 +1205,17 @@ mod tests {
         let stale_client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
         let remover = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
         let project = Project::from_path(root.join("repo"));
-        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        let mut session = AgentSession::new(project.id, ProviderId::new("openai-responses"));
         session.begin_turn("persist me");
         stale_client
             .request(
                 Uuid::nil(),
                 Uuid::nil(),
-                Command::SaveTaskState {
-                    projects: vec![project.clone()],
-                    live_session_ids: vec![session.id],
-                    sessions: vec![session.clone()],
-                },
+                Command::SaveTaskState(SaveTaskState::boxed(
+                    vec![project.clone()],
+                    vec![session.id],
+                    vec![session.clone()],
+                )),
             )
             .unwrap();
         remover
@@ -1229,11 +1225,11 @@ mod tests {
             .request(
                 Uuid::nil(),
                 Uuid::nil(),
-                Command::SaveTaskState {
-                    projects: vec![project],
-                    live_session_ids: vec![session.id],
-                    sessions: vec![session],
-                },
+                Command::SaveTaskState(SaveTaskState::boxed(
+                    vec![project],
+                    vec![session.id],
+                    vec![session],
+                )),
             )
             .unwrap()
         else {
@@ -1287,7 +1283,6 @@ mod tests {
                 Command::Start {
                     options: WireDriverStartOptions {
                         provider: "codex".into(),
-                        binary: PathBuf::from("codex"),
                         cwd: PathBuf::from("."),
                         mode: "fullAccess".into(),
                         interaction_mode: "build".into(),
@@ -1295,9 +1290,6 @@ mod tests {
                         reasoning_effort: None,
                         service_tier: None,
                         context_window: None,
-                        agent_preset: None,
-                        computer_use_enabled: false,
-                        provider_cursor: None,
                     },
                 },
             )
@@ -1354,7 +1346,6 @@ mod tests {
                 Command::Start {
                     options: WireDriverStartOptions {
                         provider: "codex".into(),
-                        binary: PathBuf::from("codex"),
                         cwd: PathBuf::from("."),
                         mode: "fullAccess".into(),
                         interaction_mode: "build".into(),
@@ -1362,9 +1353,6 @@ mod tests {
                         reasoning_effort: None,
                         service_tier: None,
                         context_window: None,
-                        agent_preset: None,
-                        computer_use_enabled: false,
-                        provider_cursor: None,
                     },
                 },
             )
@@ -1397,7 +1385,7 @@ mod tests {
                 session_id,
                 runtime_id,
                 Command::Prompt {
-                    prompt: "streamed from the first client".into(),
+                    input: waku_protocol::PromptInput::text("streamed from the first client"),
                 },
             )
             .unwrap();
@@ -1652,7 +1640,7 @@ mod tests {
 
     impl Backend for BlockingProbeBackend {
         fn handle(&self, request: Request, _: EventSink) -> anyhow::Result<ResponsePayload> {
-            if matches!(request.command, Command::ProbeProvider { .. }) {
+            if matches!(request.command, Command::LoadSkills { .. }) {
                 self.probe_started.send(()).unwrap();
                 self.release_probe.recv().unwrap();
             }
@@ -1678,11 +1666,8 @@ mod tests {
                 request_id: probe_id,
                 session_id: Uuid::nil(),
                 runtime_id: Uuid::nil(),
-                command: Command::ProbeProvider {
-                    provider: crate::model::ProviderKind::Codex,
-                    binary_override: None,
-                    discover_models: false,
-                    probe_version: false,
+                command: Command::LoadSkills {
+                    projects: Vec::new(),
                 },
             },
             outgoing.clone(),
@@ -1789,7 +1774,7 @@ mod tests {
                 session_id: blocked_session_id,
                 runtime_id: blocked_runtime_id,
                 command: Command::Prompt {
-                    prompt: "after start".into(),
+                    input: waku_protocol::PromptInput::text("after start"),
                 },
             },
             second_client_outgoing,
@@ -1881,7 +1866,6 @@ mod tests {
     fn test_start_options() -> WireDriverStartOptions {
         WireDriverStartOptions {
             provider: "codex".into(),
-            binary: PathBuf::from("codex"),
             cwd: PathBuf::from("."),
             mode: "fullAccess".into(),
             interaction_mode: "build".into(),
@@ -1889,9 +1873,6 @@ mod tests {
             reasoning_effort: None,
             service_tier: None,
             context_window: None,
-            agent_preset: None,
-            computer_use_enabled: false,
-            provider_cursor: None,
         }
     }
 }

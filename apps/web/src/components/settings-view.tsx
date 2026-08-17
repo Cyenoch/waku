@@ -1,9 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query'
-import type {
-  DaemonSettings,
-  Project,
-  ProviderKind,
-} from '@waku/client'
+import type { ApiFormat, AuthPhase, DaemonSettings, ExternalProvider, LoginMethod, Project } from '@waku/client'
 import { useEffect, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { ControlMenu } from '@/components/control-menu'
@@ -11,17 +7,19 @@ import { SkillsSettings } from '@/components/skills-settings'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { UsageSettings } from '@/components/usage-settings'
-import { ProviderIcon, PROVIDERS, WakuIcon, type WakuIconName } from '@/components/waku-icon'
-import {
-  useDaemonSettings,
-  useProviderProbes,
-} from '@/hooks/use-daemon-data'
+import { WakuIcon, type WakuIconName } from '@/components/waku-icon'
+import { useDaemonSettings, useProviderAuth } from '@/hooks/use-daemon-data'
 import { useCopyFeedback } from '@/hooks/use-copy-feedback'
 import {
+  cancelLogin,
+  completeApiKeyLogin,
   daemonKeys,
+  logoutProvider,
+  startLogin,
   updateDaemonSettings,
 } from '@/lib/daemon-api'
 import { useDaemon } from '@/lib/daemon-context'
+import type { Translator } from '@/lib/transcript-presentation'
 import {
   applyThemeChoice,
   readThemeChoice,
@@ -52,7 +50,7 @@ export const SETTINGS_PAGES: Array<{
 }> = [
   { id: 'general', label: 'General', labelKey: 'settings.general', icon: 'settings', keywords: 'general local projects conversations privacy analytics telemetry anonymous sharing', keywordsKey: 'settings.general_keywords' },
   { id: 'appearance', label: 'Appearance', labelKey: 'settings.appearance', icon: 'appearance', keywords: 'appearance theme system light dark language', keywordsKey: 'settings.appearance_keywords' },
-  { id: 'providers', label: 'Providers', labelKey: 'settings.providers', icon: 'bot', keywords: 'providers agents models cli version install detect claude codex cursor opencode amp grok pi', keywordsKey: 'settings.providers_keywords' },
+  { id: 'providers', label: 'Providers', labelKey: 'settings.providers', icon: 'bot', keywords: 'providers endpoint models api url headers limits', keywordsKey: 'settings.providers_keywords' },
   { id: 'skills', label: 'Skills', labelKey: 'settings.skills', icon: 'package', keywords: 'skills library agent disable enable delete shared', keywordsKey: 'settings.skills_keywords' },
   { id: 'usage', label: 'Usage', labelKey: 'settings.usage', icon: 'chartColumn', keywords: 'usage tokens cost spend cache daily monthly project model history', keywordsKey: 'settings.usage_keywords' },
   { id: 'daemon', label: 'Daemon', labelKey: 'settings.daemon', icon: 'server', keywords: 'daemon server remote web network connection url token websocket', keywordsKey: 'settings.daemon_keywords' },
@@ -239,227 +237,211 @@ function AppearanceSettings() {
   )
 }
 
+const BUILTIN_AUTH_PROVIDERS: Array<{ id: string; name: string; method: LoginMethod; secondary?: LoginMethod }> = [
+  { id: 'openai-codex', name: 'ChatGPT Codex', method: 'oauthBrowser', secondary: 'oauthDevice' },
+  { id: 'opencode-go', name: 'OpenCode Go', method: 'apiKey' },
+  { id: 'opencode-zen', name: 'OpenCode Zen', method: 'apiKey' },
+  { id: 'xai', name: 'xAI API', method: 'apiKey' },
+  { id: 'xai-oauth', name: 'SuperGrok', method: 'oauthDevice' },
+]
+
 function ProvidersSettings() {
   const { t } = useI18n()
   const { client, config } = useDaemon()
   const queryClient = useQueryClient()
   const settings = useDaemonSettings()
-  const probes = useProviderProbes()
-  const [expanded, setExpanded] = useState<ProviderKind | null>(null)
-  const [paths, setPaths] = useState<Partial<Record<ProviderKind, string>>>({})
-  const checkedAt = Math.max(
-    0,
-    ...Object.values(probes.states).map((state) => state.dataUpdatedAt),
-  )
+  const providers = settings.data?.external_providers ?? []
+  const [editing, setEditing] = useState<ExternalProvider | null>(null)
+  const [form, setForm] = useState<ProviderForm>(() => emptyProviderForm())
 
   async function apply(next: DaemonSettings) {
     if (!client || !config) return
     try {
       await updateDaemonSettings(client, next)
       queryClient.setQueryData(daemonKeys.settings(config.address), next)
-      await queryClient.invalidateQueries({ queryKey: daemonKeys.providers(config.address) })
+      await queryClient.invalidateQueries({ queryKey: daemonKeys.models(config.address, '') })
+    } catch (error) { toast.error(errorMessage(error)) }
+  }
+  function beginAdd() { setEditing(null); setForm(emptyProviderForm()) }
+  function beginEdit(provider: ExternalProvider) { setEditing(provider); setForm(providerToForm(provider)) }
+  async function save() {
+    if (!settings.data) return
+    const next = formToProvider(form)
+    if (!next.id || !next.name || !next.baseUrl) { toast.error(t('providers.required_fields')); return }
+    const externalProviders = providers.filter((provider) => provider.id !== next.id)
+    await apply({ ...settings.data, external_providers: [...externalProviders, next] })
+    setEditing(next)
+  }
+  async function remove(provider: ExternalProvider) {
+    if (!settings.data) return
+    await apply({ ...settings.data, external_providers: providers.filter((candidate) => candidate.id !== provider.id) })
+    if (editing?.id === provider.id) beginAdd()
+  }
+  const update = (patch: Partial<ProviderForm>) => setForm((current) => ({ ...current, ...patch }))
+  return (
+    <div className="mt-[15px] space-y-3">
+      <SettingsCard><div className="flex items-start justify-between gap-4"><SettingText title={t('providers.title')} description={t('providers.web_description')} /><Button className="shrink-0" onClick={beginAdd}><WakuIcon className="mr-1.5 size-3.5" name="plus" />{t('providers.add')}</Button></div></SettingsCard>
+      {BUILTIN_AUTH_PROVIDERS.map((provider) => <BuiltinProviderCard key={provider.id} provider={provider} t={t} />)}
+      {providers.map((provider) => <SettingsCard key={provider.id}><div className="flex items-center gap-3"><span className="min-w-0 flex-1"><span className="block truncate text-[13px] font-medium">{provider.name}</span><span className="block truncate text-[11px] text-[var(--text-tertiary)]">{provider.baseUrl} · {provider.defaultModel || t('providers.catalog_models')}</span></span><Button variant="ghost" size="sm" onClick={() => beginEdit(provider)}>{t('common.edit')}</Button><Button variant="ghost" size="sm" onClick={() => void remove(provider)}>{t('common.delete')}</Button></div>{editing?.id === provider.id && <ProviderFormView form={form} update={update} onSave={() => void save()} onCancel={beginAdd} t={t} />}</SettingsCard>)}
+      {!editing && <SettingsCard><ProviderFormView form={form} update={update} onSave={() => void save()} onCancel={() => undefined} t={t} /></SettingsCard>}
+    </div>
+  )
+}
+
+function BuiltinProviderCard({ provider, t }: { provider: typeof BUILTIN_AUTH_PROVIDERS[number]; t: Translator }) {
+  const { client, config } = useDaemon()
+  const queryClient = useQueryClient()
+  const auth = useProviderAuth(provider.id)
+  const [key, setKey] = useState('')
+  const [pending, setPending] = useState<AuthPhase | null>(null)
+  const status = auth.data?.statuses.find((candidate) => candidate.provider === provider.id)
+  const phase = pending && isActiveAuthPhase(pending)
+    ? pending
+    : activeAuthPhase(auth.data?.phases ?? [], provider.id)
+
+  useEffect(() => {
+    setPending(null)
+    setKey('')
+  }, [client])
+
+  async function login(method: LoginMethod) {
+    if (!client) return
+    try {
+      const next = await startLogin(client, provider.id, method)
+      setPending(isActiveAuthPhase(next) ? next : null)
+      if (next.type === 'awaitingBrowser') openExternal(next.url)
+      if (next.type === 'awaitingDevice') openExternal(next.verificationUrl)
     } catch (error) {
       toast.error(errorMessage(error))
     }
   }
 
-  function applyProviderPath(provider: ProviderKind, value: string) {
-    if (!settings.data) return
-    const overrides = { ...(settings.data.provider_binary_overrides ?? {}) }
-    const trimmed = value.trim()
-    if (trimmed) overrides[provider] = trimmed
-    else delete overrides[provider]
-    setPaths((current) => ({ ...current, [provider]: trimmed }))
-    void apply({ ...settings.data, provider_binary_overrides: overrides })
+  async function complete() {
+    if (!client || !pending || pending.type !== 'awaitingApiKey' || !key) return
+    try {
+      const next = await completeApiKeyLogin(client, pending.loginId, provider.id, key)
+      setPending(isActiveAuthPhase(next) ? next : null)
+      setKey('')
+      await auth.refetch()
+    } catch (error) {
+      setKey('')
+      toast.error(errorMessage(error))
+    }
   }
 
-  function toggleExpandedProvider(provider: ProviderKind) {
-    if (expanded) {
-      const pending = paths[expanded]
-      const applied = settings.data?.provider_binary_overrides?.[expanded] ?? ''
-      if (pending !== undefined && pending.trim() !== applied) {
-        applyProviderPath(expanded, pending)
-      }
+  async function cancel() {
+    if (!client || !phase) return
+    try {
+      await cancelLogin(client, phase.loginId)
+      setPending(null)
+      setKey('')
+      await auth.refetch()
+    } catch (error) {
+      toast.error(errorMessage(error))
     }
-    if (expanded !== provider) {
-      setPaths((current) => ({
-        ...current,
-        [provider]: settings.data?.provider_binary_overrides?.[provider] ?? '',
-      }))
+  }
+
+  async function logout() {
+    if (!client) return
+    try {
+      await logoutProvider(client, provider.id)
+      setPending(null)
+      setKey('')
+      await auth.refetch()
+      if (config) await queryClient.invalidateQueries({ queryKey: daemonKeys.models(config.address, provider.id) })
+    } catch (error) {
+      toast.error(errorMessage(error))
     }
-    setExpanded(expanded === provider ? null : provider)
   }
 
   return (
-    <div className="mt-[15px] overflow-hidden rounded-[13px] bg-[var(--raised)] px-5 py-[14px]">
-      <div className="flex items-start gap-5">
-        <div className="min-w-0 flex-1">
-          <div className="text-[13.5px] font-medium">{t('providers.coding_agents')}</div>
-          <p className="mt-[5px] text-[12px] leading-[18px] text-[var(--text-secondary)]">
-            {t('providers.web_description')}
-          </p>
-        </div>
-        <div className="flex shrink-0 flex-col items-end gap-1.5">
-          <button
-            className="flex h-7 items-center gap-1.5 rounded-[7px] border border-input px-[11px] text-[10.5px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
-            disabled={probes.isFetching}
-            type="button"
-            onClick={() => {
-              if (!config) return
-              void queryClient.invalidateQueries({ queryKey: daemonKeys.providers(config.address) })
-            }}
-          >
-            <WakuIcon className={cn('size-[11px] text-[var(--text-tertiary)]', probes.isFetching && 'motion-safe:animate-spin')} name="rotateCw" />
-            {probes.isFetching ? t('common.checking') : t('common.refresh')}
-          </button>
-          {!probes.isFetching && checkedAt > 0 && (
-            <span className="text-[9.5px] text-[var(--text-ghost)]">{providerCheckedLabel(checkedAt, t)}</span>
-          )}
-        </div>
+    <SettingsCard>
+      <div className="flex items-center gap-3">
+        <SettingText title={provider.name} description={status?.email || status?.accountId || t('providers.not_authenticated')} />
+        <span className="text-[11px] text-[var(--text-tertiary)]">{phase?.type ?? status?.method ?? 'none'}</span>
+        {status?.method === 'none' && !phase && (
+          <>
+            <Button size="sm" onClick={() => void login(provider.method)}>{t('providers.connect')}</Button>
+            {provider.secondary ? (
+              <Button size="sm" variant="ghost" onClick={() => { const method = provider.secondary; if (method) void login(method) }}>{t('providers.sign_in')}</Button>
+            ) : null}
+          </>
+        )}
+        {status?.method !== 'none' && <Button size="sm" variant="ghost" onClick={() => void logout()}>{t('providers.logout')}</Button>}
       </div>
-      <div className="mt-1 flex flex-col">
-        {PROVIDERS.map((provider) => {
-          const probe = probes.data[provider.id]
-          const probeState = probes.states[provider.id]
-          const installed = probe?.installed ?? false
-          const disabled = settings.data?.disabled_providers.includes(provider.id) ?? false
-          const open = expanded === provider.id
-          const detail = providerProbeDetail(provider.command, probe, probeState, disabled, t)
-          const dotColor = probeState.error
-            ? 'bg-[var(--warning)]'
-            : !installed
-              ? 'bg-[var(--text-ghost)]'
-              : disabled
-                ? 'bg-[var(--warning)]'
-                : 'bg-[var(--success)]'
-          return (
-            <div className="border-b last:border-0" key={provider.id}>
-              <div className="flex items-center gap-3 py-[11px]">
-                <span className="relative grid size-[30px] shrink-0 place-items-center rounded-[7px] bg-accent">
-                  <ProviderIcon className={cn('size-4', !installed && 'opacity-50')} provider={provider.id} />
-                  <span className={cn('absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-[var(--raised)]', dotColor)} />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-baseline gap-[7px]">
-                    <span className={cn('truncate text-[12.5px] font-medium', !installed && 'text-[var(--text-secondary)]')}>{provider.name}</span>
-                    {probe?.version && (
-                      <span className="shrink-0 font-mono text-[10px] text-[var(--text-tertiary)]">v{probe.version}</span>
-                    )}
-                  </span>
-                  <span className="mt-[3px] block truncate text-[10.5px] text-[var(--text-tertiary)]" title={detail}>{detail}</span>
-                </span>
-                <button
-                  aria-expanded={open}
-                  aria-label={t(open ? 'providers.hide_settings' : 'providers.show_settings', { provider: provider.name })}
-                  className="grid size-7 shrink-0 place-items-center rounded-[7px] text-[var(--text-tertiary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
-                  type="button"
-                  onClick={() => toggleExpandedProvider(provider.id)}
-                >
-                  <WakuIcon className="size-2.5" name={open ? 'chevronDown' : 'chevronRight'} />
-                </button>
-                {installed && (
-                  <Toggle
-                    checked={!disabled}
-                    label={t(disabled ? 'providers.enable' : 'providers.disable', { provider: provider.name })}
-                    onChange={(enabled) => {
-                      if (!settings.data) return
-                      const disabledProviders = enabled
-                        ? settings.data.disabled_providers.filter((kind) => kind !== provider.id)
-                        : [...new Set([...settings.data.disabled_providers, provider.id])]
-                      void apply({ ...settings.data, disabled_providers: disabledProviders })
-                    }}
-                  />
-                )}
-              </div>
-              {open && settings.data && (
-                <div className="mb-[11px] ml-[42px] flex flex-col gap-[5px]">
-                  <label className="text-[11.5px] font-medium">{t('providers.binary_path')}</label>
-                  <p className="text-[10.5px] leading-[15px] text-[var(--text-tertiary)]">
-                    {t('providers.binary_path_description', { provider: provider.shortName })}
-                  </p>
-                  <div className="mt-[3px] flex items-center gap-2">
-                    <Input
-                      autoFocus
-                      className="h-[29px] max-w-[430px] flex-1 bg-[var(--inset)] font-mono text-[11px]"
-                      placeholder={t('input.detected_automatically')}
-                      value={paths[provider.id] ?? settings.data.provider_binary_overrides?.[provider.id] ?? ''}
-                      onChange={(event) => setPaths((current) => ({ ...current, [provider.id]: event.target.value }))}
-                      onKeyDown={(event) => {
-                        if (event.key !== 'Enter') return
-                        applyProviderPath(provider.id, event.currentTarget.value)
-                      }}
-                    />
-                    {settings.data.provider_binary_overrides?.[provider.id] && (
-                      <button
-                        className="h-[29px] shrink-0 rounded-[7px] border border-input px-2.5 text-[10.5px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring"
-                        type="button"
-                        onClick={() => applyProviderPath(provider.id, '')}
-                      >
-                        {t('common.reset')}
-                      </button>
-                    )}
-                  </div>
-                  <p className="truncate text-[10px] text-[var(--text-ghost)]" title={providerProbeCaption(provider.command, probe, Boolean(settings.data.provider_binary_overrides?.[provider.id]), t)}>
-                    {providerProbeCaption(provider.command, probe, Boolean(settings.data.provider_binary_overrides?.[provider.id]), t)}
-                  </p>
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-    </div>
+      {phase?.type === 'awaitingApiKey' && (
+        <div className="mt-3 flex gap-2">
+          <Input autoComplete="off" placeholder={t('providers.api_key_placeholder')} type="password" value={key} onChange={(event) => setKey(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void complete() }} />
+          <Button disabled={!key} onClick={() => void complete()}>{t('common.continue')}</Button>
+          <Button variant="ghost" onClick={() => void cancel()}>{t('common.cancel')}</Button>
+        </div>
+      )}
+    </SettingsCard>
   )
 }
 
-function providerProbeDetail(
-  command: string,
-  probe: ReturnType<typeof useProviderProbes>['data'][ProviderKind],
-  state: ReturnType<typeof useProviderProbes>['states'][ProviderKind],
-  disabled: boolean,
-  t: Translator,
-) {
-  if (state.isPending) return t('common.checking')
-  if (state.error) return t('providers.check_failed', { command, error: errorMessage(state.error) })
-  if (!probe?.installed) return t('providers.not_detected_as', { command })
-  const parts = []
-  if (probe.path) parts.push(abbreviateHomePath(probe.path))
-  if (disabled) parts.push(t('providers.disabled_for_new_tasks'))
-  else if (probe.models.length) parts.push(t(
-    probe.models.length === 1 ? 'providers.model_count_one' : 'providers.model_count_many',
-    { count: probe.models.length },
-  ))
-  return parts.join('  ·  ') || t('providers.detected_as', { command })
+type ActiveAuthPhase = Extract<AuthPhase, { type: 'awaitingBrowser' | 'awaitingDevice' | 'awaitingApiKey' }>
+
+export function isActiveAuthPhase(phase: AuthPhase): phase is ActiveAuthPhase {
+  return phase.type === 'awaitingBrowser' || phase.type === 'awaitingDevice' || phase.type === 'awaitingApiKey'
 }
 
-function providerProbeCaption(
-  command: string,
-  probe: ReturnType<typeof useProviderProbes>['data'][ProviderKind],
-  hasOverride: boolean,
-  t: Translator,
-) {
-  if (hasOverride && probe?.installed && probe.path) return t('providers.using_override', { path: probe.path })
-  if (hasOverride) return t('providers.invalid_override')
-  if (probe?.installed && probe.path) return t('providers.detected_at', { path: probe.path })
-  return t('providers.searches_path', { command })
+export function activeAuthPhase(phases: readonly AuthPhase[], provider: string): ActiveAuthPhase | null {
+  return phases.find((phase): phase is ActiveAuthPhase => isActiveAuthPhase(phase) && phase.provider === provider) ?? null
 }
 
-function providerCheckedLabel(updatedAt: number, t: Translator) {
-  const seconds = Math.max(0, Math.floor((Date.now() - updatedAt) / 1_000))
-  if (seconds < 60) return t('providers.checked_just_now')
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return t('providers.checked_minutes_ago', { count: minutes })
-  const hours = Math.floor(minutes / 60)
-  return t('providers.checked_hours_ago', { count: hours })
+export function isAllowedExternalUrl(value: string): boolean {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return false
+  }
+  if (url.username || url.password) return false
+  if (url.protocol === 'https:') return true
+  if (url.protocol !== 'http:') return false
+  return url.hostname.toLowerCase() === 'localhost'
+    || url.hostname === '127.0.0.1'
+    || url.hostname === '[::1]'
 }
 
-type Translator = (key: string, params?: Record<string, string | number>) => string
+function openExternal(url: string) {
+  if (!isAllowedExternalUrl(url)) return
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
 
-function abbreviateHomePath(path: string) {
-  return path
-    .replace(/^\/Users\/[^/]+(?=\/|$)/, '~')
-    .replace(/^\/home\/[^/]+(?=\/|$)/, '~')
-    .replace(/^\/root(?=\/|$)/, '~')
+type ProviderForm = {
+  id: string
+  name: string
+  baseUrl: string
+  apiFormat: ApiFormat
+  apiKeyEnv: string
+  headers: string
+  models: string
+  defaultModel: string
+  contextWindow: string
+  maxOutputTokens: string
+}
+
+const API_FORMATS: ApiFormat[] = ['openAiResponses', 'openAiChat', 'anthropic']
+
+function emptyProviderForm(): ProviderForm {
+  return { id: '', name: '', baseUrl: '', apiFormat: 'openAiResponses', apiKeyEnv: '', headers: '', models: '', defaultModel: '', contextWindow: '128000', maxOutputTokens: '8192' }
+}
+
+function providerToForm(provider: ExternalProvider): ProviderForm {
+  return { id: provider.id, name: provider.name, baseUrl: provider.baseUrl, apiFormat: provider.apiFormat, apiKeyEnv: provider.apiKeyEnv ?? '', headers: (provider.headers ?? []).map(([key, value]) => `${key}: ${value}`).join('\n'), models: (provider.models ?? []).join('\n'), defaultModel: provider.defaultModel, contextWindow: String(provider.contextWindow), maxOutputTokens: String(provider.maxOutputTokens) }
+}
+
+function formToProvider(form: ProviderForm): ExternalProvider {
+  const headers = form.headers.split('\n').map((line) => line.trim()).filter(Boolean).flatMap((line) => { const separator = line.indexOf(':'); return separator > 0 ? [[line.slice(0, separator).trim(), line.slice(separator + 1).trim()] as [string, string]] : [] })
+  const models = form.models.split(/[\n,]/).map((model) => model.trim()).filter(Boolean)
+  return { id: form.id.trim(), name: form.name.trim(), baseUrl: form.baseUrl.trim(), apiFormat: form.apiFormat, apiKeyEnv: form.apiKeyEnv.trim() || null, headers, models, defaultModel: form.defaultModel.trim(), contextWindow: Number(form.contextWindow) || 128000, maxOutputTokens: Number(form.maxOutputTokens) || 8192 }
+}
+
+function ProviderFormView({ form, update, onSave, onCancel, t }: { form: ProviderForm; update: (patch: Partial<ProviderForm>) => void; onSave: () => void; onCancel: () => void; t: Translator }) {
+  const field = (key: keyof ProviderForm, label: string, type = 'text') => <label className="space-y-1"><span className="text-[11px] font-medium">{label}</span><Input type={type} value={form[key]} onChange={(event) => update({ [key]: event.target.value })} /></label>
+  return <div className="mt-4 grid gap-3 sm:grid-cols-2">{field('id', t('providers.id'))}{field('name', t('providers.name'))}{field('baseUrl', t('providers.base_url'), 'url')}<label className="space-y-1"><span className="text-[11px] font-medium">{t('providers.api_format')}</span><select className="h-8 w-full rounded-md border bg-background px-2 text-xs" value={form.apiFormat} onChange={(event) => update({ apiFormat: event.target.value as ApiFormat })}>{API_FORMATS.map((format) => <option key={format} value={format}>{format}</option>)}</select></label>{field('apiKeyEnv', t('providers.api_key_env'))}{field('defaultModel', t('providers.default_model'))}{field('models', t('providers.models'))}{field('headers', t('providers.headers'))}{field('contextWindow', t('providers.context_window'), 'number')}{field('maxOutputTokens', t('providers.max_output_tokens'), 'number')}<div className="flex items-end justify-end gap-2 sm:col-span-2"><Button variant="ghost" onClick={onCancel}>{t('common.cancel')}</Button><Button onClick={onSave}>{t('common.save')}</Button></div></div>
 }
 
 function DaemonSettings() {

@@ -87,10 +87,10 @@ impl PaletteSection {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum PaletteIcon {
     Asset(&'static str),
-    Provider(ProviderKind),
+    Provider(ProviderId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -546,7 +546,7 @@ impl Waku {
 
         let can_choose_model = self
             .selected_session()
-            .is_some_and(|session| session.can_choose_model(session.provider));
+            .is_some_and(|session| session.can_choose_model(session.provider.clone()));
         if can_choose_model {
             commands.push(CommandPaletteItem::command(
                 display_section(PaletteSection::Suggested),
@@ -627,7 +627,7 @@ impl Waku {
                 SettingsPage::Providers,
                 "settings.providers",
                 "icons/bot.svg",
-                "settings preferences providers agents models cli",
+                "settings preferences providers agents models endpoint api",
             ),
             (
                 SettingsPage::Skills,
@@ -646,12 +646,6 @@ impl Waku {
                 "settings.daemon",
                 "icons/server.svg",
                 "settings preferences daemon server remote web network origin token port",
-            ),
-            (
-                SettingsPage::ComputerUse,
-                "settings.computer_use",
-                "icons/cursor-spark.svg",
-                "settings preferences computer use accessibility screen recording",
             ),
         ] {
             if !page.is_visible_in_navigation() {
@@ -724,13 +718,13 @@ impl Waku {
                     search_text: format!(
                         "{label} {project} {project_path} {workspace_path} {} {} {} {} task session chat conversation",
                         branch.unwrap_or_default(),
-                        session.provider.short_name(),
-                        session.provider.display_name(),
+                        session.provider.as_str(),
+                        session.provider.as_str(),
                         session.model.as_deref().unwrap_or_default(),
                     ),
                     label,
                     detail: Some(detail),
-                    icon: PaletteIcon::Provider(session.provider),
+                    icon: PaletteIcon::Provider(session.provider.clone()),
                     shortcut: None,
                     action: PaletteAction::SelectTask(session.id),
                     content_match,
@@ -954,9 +948,8 @@ impl Waku {
         let theme = Theme::current(cx);
         let viewport_height = f32::from(window.viewport_size().height);
         let top = (viewport_height * 0.09).clamp(48.0, 72.0);
-        let card_max_height = (viewport_height - top - 36.0)
-            .max(SEARCH_ROW_HEIGHT)
-            .min(MAX_CARD_HEIGHT);
+        let card_max_height =
+            (viewport_height - top - 36.0).clamp(SEARCH_ROW_HEIGHT, MAX_CARD_HEIGHT);
         let selected = self
             .command_palette
             .selected
@@ -1025,12 +1018,12 @@ impl Waku {
                 }
 
                 let highlighted = index == selected;
-                let icon_color = match item.icon {
+                let icon_color = match &item.icon {
                     PaletteIcon::Asset(_) => theme.text_secondary,
                     PaletteIcon::Provider(provider) => provider_color(&theme, provider),
                 };
-                let icon_path = match item.icon {
-                    PaletteIcon::Asset(path) => path,
+                let icon_path = match &item.icon {
+                    PaletteIcon::Asset(path) => *path,
                     PaletteIcon::Provider(provider) => provider_icon(provider),
                 };
                 let detail = item.detail.clone();

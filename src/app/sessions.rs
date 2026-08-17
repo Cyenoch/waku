@@ -1,10 +1,7 @@
 use super::*;
 
-fn retain_runtime_after_cancel(provider: ProviderKind) -> bool {
-    // Codex's app-server owns the Computer Use process tree, and Amp offers no
-    // interrupt on its stream — stopping it means ending the process. Both
-    // resume their native thread on the next prompt.
-    !matches!(provider, ProviderKind::Codex | ProviderKind::Amp)
+fn retain_runtime_after_cancel(_provider: &ProviderId) -> bool {
+    true
 }
 
 impl Waku {
@@ -14,7 +11,7 @@ impl Waku {
 
     pub(super) fn select_project(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
         self.state.selected_project = Some(project_id);
-        self.create_session_for(project_id, self.state.last_provider, cx);
+        self.create_session_for(project_id, self.state.last_provider.clone(), cx);
     }
 
     pub(super) fn select_session(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
@@ -170,10 +167,10 @@ impl Waku {
             self.selected_session().map(|session| {
                 (
                     session.project_id,
-                    session.provider,
+                    session.provider.clone(),
                     session.model.clone(),
                     session.reasoning_effort.clone(),
-                    session.service_tier.clone(),
+                    session.service_tier,
                     session.context_window.clone(),
                 )
             })
@@ -238,7 +235,7 @@ impl Waku {
     pub(super) fn create_session_for(
         &mut self,
         project_id: Uuid,
-        provider: ProviderKind,
+        provider: ProviderId,
         cx: &mut Context<Self>,
     ) {
         if let Some(draft_id) = self
@@ -356,7 +353,7 @@ impl Waku {
             } else if projectless {
                 self.create_projectless_session(cx);
             } else {
-                self.create_session_for(project_id, self.state.last_provider, cx);
+                self.create_session_for(project_id, self.state.last_provider.clone(), cx);
             }
         } else {
             self.save();
@@ -387,7 +384,7 @@ impl Waku {
         } else if self.selected_project().is_some_and(Project::is_projectless) {
             self.create_projectless_session(cx);
         } else if let Some(project_id) = self.state.selected_project {
-            self.create_session_for(project_id, self.state.last_provider, cx);
+            self.create_session_for(project_id, self.state.last_provider.clone(), cx);
         } else {
             self.create_projectless_session(cx);
         }
@@ -418,7 +415,7 @@ impl Waku {
             .try_global::<crate::updater::UpdaterState>()
             .and_then(|updater| updater.0.as_ref())
             .is_some_and(|updater| updater.automatically_checks_for_updates());
-        // Warm the Usage page's transcript scan while the user is still on
+        // Warm the Usage page's ledger query while the user is still on
         // General, so clicking Usage lands on data instead of a spinner.
         self.ensure_usage_history(false, cx);
         window.focus(&self.settings_focus, cx);
@@ -792,7 +789,7 @@ impl Waku {
         for id in streaming_messages {
             message_markdown
                 .entry(id)
-                .or_insert_with(MarkdownView::new)
+                .or_default()
                 .seed_streaming_baseline();
         }
         drop(message_markdown);
@@ -825,13 +822,12 @@ impl Waku {
     }
 
     fn remember_selected_model_traits(&mut self) {
-        let Some((provider, model, reasoning_effort, service_tier, context_window)) =
+        let Some((provider, model, reasoning_effort, context_window)) =
             self.selected_session().and_then(|session| {
                 Some((
-                    session.provider,
+                    session.provider.clone(),
                     self.model_for_session(session)?.to_owned(),
                     session.reasoning_effort.clone(),
-                    session.service_tier.clone(),
                     session.context_window.clone(),
                 ))
             })
@@ -839,24 +835,51 @@ impl Waku {
             return;
         };
         self.state.remember_model_traits(
-            provider,
+            provider.clone(),
             &model,
             reasoning_effort,
-            service_tier,
             context_window,
         );
     }
 
+    pub(super) fn set_service_tier(
+        &mut self,
+        tier: waku_client::ServiceTier,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let provider = session.provider.clone();
+        let Some(model) = self.model_for_session(session).map(str::to_owned) else {
+            return;
+        };
+        let allowed = super::runtime::catalog_allows_service_tier(
+            super::runtime::catalog_entry_for(&self.model_catalogs, &provider, &model),
+        );
+        let Some(session) = self.selected_session_mut() else {
+            return;
+        };
+        if !allowed {
+            session.service_tier = None;
+            return;
+        }
+        session.service_tier = Some(tier);
+        self.state.last_service_tier = Some(tier);
+        self.save();
+        cx.notify();
+    }
+
     pub(super) fn choose_model(
         &mut self,
-        provider: ProviderKind,
+        provider: ProviderId,
         model: String,
         cx: &mut Context<Self>,
     ) {
         let Some((session_id, provider_changed)) = self
             .selected_session()
             .filter(|session| {
-                session.can_choose_model(provider)
+                session.can_choose_model(provider.clone())
                     && (session.provider != provider
                         || session.model.as_deref() != Some(model.as_str()))
             })
@@ -866,24 +889,28 @@ impl Waku {
         };
 
         self.remember_selected_model_traits();
-        let (reasoning_effort, service_tier, context_window) =
-            self.state.model_traits_for(provider, &model);
+        let (reasoning_effort, context_window) =
+            self.state.model_traits_for(provider.clone(), &model);
+        let service_tier = super::runtime::gated_service_tier(
+            self.state.last_service_tier,
+            super::runtime::catalog_allows_service_tier(super::runtime::catalog_entry_for(
+                &self.model_catalogs,
+                &provider,
+                &model,
+            )),
+        );
         if let Some(session) = self.selected_session_mut() {
-            session.provider = provider;
+            session.provider = provider.clone();
             session.model = Some(model.clone());
-            if provider_changed {
-                session.agent_preset = None;
-            }
             session.reasoning_effort.clone_from(&reasoning_effort);
-            session.service_tier.clone_from(&service_tier);
+            session.service_tier = service_tier;
             session.context_window.clone_from(&context_window);
-            self.state.last_provider = provider;
+            self.state.last_provider = provider.clone();
             self.state.last_model = Some(model);
             self.state.last_reasoning_effort = reasoning_effort;
-            self.state.last_service_tier = service_tier;
             self.state.last_context_window = context_window;
-            self.model_picker_tab = ModelPickerTab::Provider(provider);
-            // A different provider is a different binary and protocol; only a
+            self.model_picker_tab = ModelPickerTab::Provider(provider.clone());
+            // A different provider is a different endpoint and catalog; only a
             // model change within one provider can be applied in session.
             if provider_changed {
                 self.reset_session_runtime(session_id);
@@ -909,7 +936,7 @@ impl Waku {
         }
         if !self
             .selected_session()
-            .is_some_and(|session| session.can_choose_model(session.provider))
+            .is_some_and(|session| session.can_choose_model(session.provider.clone()))
         {
             return;
         }
@@ -937,49 +964,7 @@ impl Waku {
 
     /// Discovery is not requested here: launch already requested it for every
     /// installed provider, so tabs only ever switch between loaded lists.
-    pub(super) fn select_model_picker_tab(&mut self, tab: ModelPickerTab, cx: &mut Context<Self>) {
-        if self.model_picker_tab != tab {
-            self.model_picker_tab = tab;
-            if let ModelPickerTab::Provider(provider) = tab {
-                // Selecting a rail re-runs that provider's catalog discovery,
-                // so each tab is fresh when viewed without probing every
-                // provider on open.
-                self.refresh_provider_model_discovery(provider);
-            }
-            // A different tab renumbers the rows under the keyboard cursor,
-            // and would otherwise inherit the old tab's scroll offset.
-            self.model_picker_highlight = None;
-            self.reveal_selected_picker_model();
-            cx.notify();
-        }
-    }
-
-    pub(super) fn toggle_favorite_model(
-        &mut self,
-        provider: ProviderKind,
-        model: String,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(index) = self
-            .state
-            .favorite_models
-            .iter()
-            .position(|favorite| favorite.provider == provider && favorite.model == model)
-        {
-            self.state.favorite_models.remove(index);
-        } else {
-            self.state
-                .favorite_models
-                .push(FavoriteModel { provider, model });
-        }
-        self.save();
-        cx.notify();
-    }
-
     pub(super) fn set_runtime_mode(&mut self, mode: RuntimeMode, cx: &mut Context<Self>) {
-        if mode == RuntimeMode::Plan {
-            return;
-        }
         if let Some(session) = self.selected_session_mut()
             && session.runtime_mode != mode
         {
@@ -1003,80 +988,6 @@ impl Waku {
         }
     }
 
-    pub(super) fn set_reasoning_effort(&mut self, effort: String, cx: &mut Context<Self>) {
-        if let Some(session) = self.selected_session_mut()
-            && session.reasoning_effort.as_deref() != Some(effort.as_str())
-        {
-            let session_id = session.id;
-            session.reasoning_effort = Some(effort.clone());
-            self.state.last_reasoning_effort = Some(effort);
-            self.remember_selected_model_traits();
-            self.apply_session_options(session_id, cx);
-            self.save();
-            cx.notify();
-        }
-    }
-
-    pub(super) fn set_service_tier(&mut self, tier: String, cx: &mut Context<Self>) {
-        if let Some(session) = self.selected_session_mut()
-            && session.service_tier.as_deref() != Some(tier.as_str())
-        {
-            let session_id = session.id;
-            session.service_tier = Some(tier.clone());
-            self.state.last_service_tier = Some(tier);
-            self.remember_selected_model_traits();
-            self.apply_session_options(session_id, cx);
-            self.save();
-            cx.notify();
-        }
-    }
-
-    pub(super) fn set_context_window(&mut self, window: String, cx: &mut Context<Self>) {
-        if let Some(session) = self.selected_session_mut()
-            && session.context_window.as_deref() != Some(window.as_str())
-        {
-            let session_id = session.id;
-            session.context_window = Some(window.clone());
-            self.state.last_context_window = Some(window);
-            self.remember_selected_model_traits();
-            self.apply_session_options(session_id, cx);
-            self.save();
-            cx.notify();
-        }
-    }
-
-    pub(super) fn set_agent_preset(&mut self, agent_preset: String, cx: &mut Context<Self>) {
-        let selectable = self
-            .provider_probe(ProviderKind::DeepSeek)
-            .is_some_and(|probe| {
-                probe
-                    .agent_presets
-                    .iter()
-                    .any(|preset| preset.id == agent_preset)
-            });
-        if !selectable {
-            return;
-        }
-        if let Some(session) = self.selected_session_mut()
-            && session.provider == ProviderKind::DeepSeek
-            && !session.has_started()
-            && !session.is_busy()
-            && session.agent_preset.as_deref() != Some(agent_preset.as_str())
-        {
-            let session_id = session.id;
-            if agent_preset == "minimal" {
-                session.interaction_mode = InteractionMode::Build;
-            }
-            session.agent_preset = Some(agent_preset);
-            // A provider cursor makes a session started, so this is normally a
-            // no-op. It also closes the narrow race where a blank runtime was
-            // prepared but had not reported its native session yet.
-            self.reset_session_runtime(session_id);
-            self.save();
-            cx.notify();
-        }
-    }
-
     pub(super) fn cancel_turn(&mut self, cx: &mut Context<Self>) {
         self.escape_stop_confirmation.clear();
         let Some(session_id) = self.state.selected_session else {
@@ -1094,7 +1005,7 @@ impl Waku {
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .is_some_and(|session| retain_runtime_after_cancel(session.provider))
+            .is_some_and(|session| retain_runtime_after_cancel(&session.provider))
             || self.session_has_live_detached_work(session_id);
         let mut runtime = self.runtimes.remove(&session_id);
         if let Some(runtime) = runtime.as_ref() {
@@ -1102,7 +1013,6 @@ impl Waku {
             if retain_runtime {
                 // A detached process keeps Codex's app-server resident, but
                 // Computer Use descendants still belong to the cancelled turn.
-                runtime.driver.cancel_computer_use();
             }
         }
         // Do not leave already-received text in the smoothing queue: once the
@@ -1138,8 +1048,6 @@ impl Waku {
             runtime.stream_phase = None;
             runtime.pending_permission = None;
             runtime.pending_user_input = None;
-            runtime.pending_computer_approval = None;
-            runtime.computer_use_previews.clear();
         }
         if has_active_turn {
             let needs_fallback = !self.turn_has_assistant_message(session_id);
@@ -1193,7 +1101,7 @@ impl Waku {
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .map(|session| session.provider.id());
+            .map(|session| session.provider.as_str().to_owned());
         let decision = if let Some(runtime) = self.runtimes.get_mut(&session_id) {
             let decision = runtime
                 .pending_permission
@@ -1381,13 +1289,9 @@ impl Waku {
             let Some(runtime) = self.runtimes.get_mut(&session_id) else {
                 return;
             };
-            let Some(pending) = runtime.pending_user_input.take() else {
+            let Some(_pending) = runtime.pending_user_input.take() else {
                 return;
             };
-            let answers = pending.answers();
-            runtime
-                .driver
-                .respond_user_input(pending.request_id, answers);
             if let Some(session) = self.state.session_mut(session_id) {
                 session.status = SessionStatus::Working;
             }
@@ -1395,105 +1299,6 @@ impl Waku {
                 .update(cx, |input, cx| input.clear(cx));
         } else {
             self.sync_user_input_answer(cx);
-        }
-        cx.notify();
-    }
-
-    pub(super) fn respond_computer_permission(
-        &mut self,
-        decision: &'static str,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session_id) = self.state.selected_session else {
-            return;
-        };
-        let provider = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .map_or("unknown", |session| session.provider.id());
-        let Some(mut runtime) = self.runtimes.remove(&session_id) else {
-            return;
-        };
-        let Some(pending) = runtime.pending_computer_approval.take() else {
-            self.runtimes.insert(session_id, runtime);
-            return;
-        };
-
-        if decision == "deny" {
-            runtime.driver.reject_computer_tool(
-                pending.request,
-                "The user denied control of this app.".into(),
-            );
-        } else {
-            let key = pending.target.grant_key();
-            runtime.computer_session_grants.insert(key);
-            if decision == "always" && pending.target.persistable() {
-                let grant = crate::computer_use::ComputerAppGrant {
-                    bundle_id: pending.target.bundle_id.clone(),
-                    app_name: pending.target.app_name.clone(),
-                };
-                if !self
-                    .state
-                    .computer_use_allowed_apps
-                    .iter()
-                    .any(|existing| existing.key() == grant.key())
-                {
-                    self.state.computer_use_allowed_apps.push(grant);
-                    self.save();
-                }
-            }
-            runtime.driver.run_computer_tool(pending.request);
-        }
-        if let Some(session) = self.state.session_mut(session_id) {
-            session.status = SessionStatus::Working;
-        }
-        self.analytics
-            .track(crate::analytics::Event::PermissionResponded {
-                provider,
-                kind: "computer_use",
-                decision: match decision {
-                    "deny" => "deny",
-                    "always" => "allow_always",
-                    "task" => "allow_task",
-                    _ => "other",
-                },
-            });
-        self.runtimes.insert(session_id, runtime);
-        cx.notify();
-    }
-
-    pub(super) fn bring_computer_use_to_front(&mut self, window_id: u32, cx: &mut Context<Self>) {
-        if let Some(runtime) = self
-            .state
-            .selected_session
-            .and_then(|session_id| self.runtimes.get_mut(&session_id))
-            && let Some(index) = runtime.computer_use_previews.iter().position(|preview| {
-                preview
-                    .target
-                    .as_ref()
-                    .is_some_and(|target| target.window_id == window_id)
-            })
-        {
-            let preview = runtime.computer_use_previews.remove(index);
-            runtime.computer_use_previews.push(preview);
-        }
-        cx.notify();
-    }
-
-    pub(super) fn dismiss_computer_use(&mut self, window_id: u32, cx: &mut Context<Self>) {
-        if let Some(runtime) = self
-            .state
-            .selected_session
-            .and_then(|session_id| self.runtimes.get_mut(&session_id))
-        {
-            runtime.computer_use_previews.retain(|preview| {
-                preview
-                    .target
-                    .as_ref()
-                    .is_none_or(|target| target.window_id != window_id)
-            });
         }
         cx.notify();
     }
@@ -1523,7 +1328,7 @@ impl Waku {
                     let project_id = project.id;
                     this.state.projects.push(project);
                     this.analytics.track(crate::analytics::Event::ProjectAdded);
-                    this.create_session_for(project_id, this.state.last_provider, cx);
+                    this.create_session_for(project_id, this.state.last_provider.clone(), cx);
                 });
             }
         })
@@ -1570,7 +1375,7 @@ impl Waku {
                     project.name = Project::PROJECTLESS_NAME.to_owned();
                     let project_id = project.id;
                     waku.state.projects.push(project);
-                    waku.create_session_for(project_id, waku.state.last_provider, cx);
+                    waku.create_session_for(project_id, waku.state.last_provider.clone(), cx);
                 }
                 Err(error) => {
                     waku.show_toast(tr!("errors.create_projectless_task", error = error));
@@ -1589,8 +1394,8 @@ mod tests {
     #[test]
     fn new_task_navigation_keeps_the_selected_project_after_visiting_history() {
         let project_id = Uuid::new_v4();
-        let draft = AgentSession::new(project_id, ProviderKind::Codex);
-        let mut started = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        let draft = AgentSession::new(project_id, ProviderId::new("codex"));
+        let mut started = AgentSession::new(Uuid::new_v4(), ProviderId::new("claude"));
         started.begin_turn("Existing task");
         let mut navigation = SessionNavigation::default();
 
@@ -1606,7 +1411,7 @@ mod tests {
     #[test]
     fn new_task_navigation_does_not_reopen_a_started_or_removed_draft() {
         let project_id = Uuid::new_v4();
-        let mut draft = AgentSession::new(project_id, ProviderKind::Codex);
+        let mut draft = AgentSession::new(project_id, ProviderId::new("codex"));
         let mut navigation = SessionNavigation::default();
         navigation.remember_new_task(draft.id);
 
@@ -1618,14 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn stopping_releases_the_runtimes_that_cannot_be_interrupted_in_place() {
-        // Codex owns a Computer Use process tree; Amp has no stream interrupt.
-        assert!(!retain_runtime_after_cancel(ProviderKind::Codex));
-        assert!(!retain_runtime_after_cancel(ProviderKind::Amp));
-        for provider in ProviderKind::ALL {
-            if !matches!(provider, ProviderKind::Codex | ProviderKind::Amp) {
-                assert!(retain_runtime_after_cancel(provider));
-            }
-        }
+    fn configured_endpoints_keep_the_runtime_contract() {
+        assert!(retain_runtime_after_cancel(&ProviderId::new("custom")));
     }
 }

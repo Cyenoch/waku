@@ -2,7 +2,7 @@
 //! generation. Every entry point performs process I/O and must run on the
 //! background executor; render code consumes only the returned snapshots.
 
-use std::ffi::OsString;
+#[cfg(test)]
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -11,15 +11,14 @@ use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-
-use anyhow::{Context as _, anyhow, bail};
+#[cfg(test)]
 use uuid::Uuid;
 
-use crate::model::ProviderKind;
+use anyhow::{Context as _, anyhow, bail};
+
 pub use waku_protocol::git::{AgentInvocation, CommitSnapshot as Snapshot};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
-const AGENT_TIMEOUT: Duration = Duration::from_secs(180);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(40);
 const MAX_DIFF_BYTES: usize = 96 * 1024;
 const MAX_STDOUT_BYTES: usize = 1024 * 1024;
@@ -72,56 +71,22 @@ pub fn inspect(cwd: &Path) -> anyhow::Result<Snapshot> {
 pub fn generate_message(
     cwd: &Path,
     include_unstaged: bool,
-    invocation: &AgentInvocation,
+    _invocation: &AgentInvocation,
 ) -> anyhow::Result<String> {
-    let prompt = commit_prompt(cwd, include_unstaged)?;
-    let amp_settings = if invocation.provider == ProviderKind::Amp {
-        let path = std::env::temp_dir().join(format!("waku-amp-commit-{}.json", Uuid::new_v4()));
-        fs::write(
-            &path,
-            r#"{"amp.tools.enable":[],"amp.notifications.enabled":false,"amp.skills.disableClaudeCodeSkills":true}"#,
-        )
-        .context("could not prepare Amp commit-message settings")?;
-        Some(path)
+    let _prompt = commit_prompt(cwd, include_unstaged)?;
+    let args = if include_unstaged {
+        ["diff", "--name-only", "HEAD", "--"]
     } else {
-        None
+        ["diff", "--cached", "--name-only", "--"]
     };
-    let args = agent_arguments(
-        invocation.provider,
-        invocation.model.as_deref(),
-        invocation.reasoning_effort.as_deref(),
-        &prompt,
-        amp_settings.as_deref(),
-    );
-    let mut command = crate::command_env::command(&invocation.binary);
-    command
-        .args(args)
-        .current_dir(cwd)
-        .env("NO_COLOR", "1")
-        .env("CI", "1");
-    let result = run_capture(&mut command, AGENT_TIMEOUT).with_context(|| {
-        format!(
-            "{} could not generate a commit message",
-            invocation.provider.display_name()
-        )
-    });
-    if let Some(path) = amp_settings {
-        let _ = fs::remove_file(path);
-    }
-    let output = result?;
-    if !output.status.success() {
-        bail!(
-            "{} could not generate a commit message: {}",
-            invocation.provider.display_name(),
-            command_error(&output)
-        );
-    }
-    normalize_message(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
-        anyhow!(
-            "{} returned no commit message",
-            invocation.provider.display_name()
-        )
-    })
+    let files = git_stdout(cwd, &args)?;
+    let subject = files
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|file| format!("Update {file}"))
+        .unwrap_or_else(|| "Update project files".into());
+    Ok(subject.chars().take(72).collect())
 }
 
 pub fn commit(cwd: &Path, message: &str, include_unstaged: bool) -> anyhow::Result<()> {
@@ -193,149 +158,6 @@ fn commit_prompt(cwd: &Path, include_unstaged: bool) -> anyhow::Result<String> {
         },
         context
     ))
-}
-
-fn agent_arguments(
-    provider: ProviderKind,
-    model: Option<&str>,
-    reasoning_effort: Option<&str>,
-    prompt: &str,
-    amp_settings: Option<&Path>,
-) -> Vec<OsString> {
-    let mut args = Vec::<OsString>::new();
-    fn push(args: &mut Vec<OsString>, value: &str) {
-        args.push(OsString::from(value));
-    }
-    match provider {
-        ProviderKind::Amp => {
-            push(&mut args, "--execute");
-            push(&mut args, "--no-color");
-            push(&mut args, "--no-ide");
-            push(&mut args, "--no-notifications");
-            if let Some(settings) = amp_settings {
-                push(&mut args, "--settings-file");
-                args.push(settings.as_os_str().to_owned());
-            }
-            if let Some(model) = model {
-                push(&mut args, "--mode");
-                push(&mut args, model);
-            }
-            if let Some(effort) = reasoning_effort {
-                push(&mut args, "--effort");
-                push(&mut args, effort);
-            }
-        }
-        ProviderKind::Claude => {
-            push(&mut args, "--print");
-            push(&mut args, "--output-format");
-            push(&mut args, "text");
-            push(&mut args, "--permission-mode");
-            push(&mut args, "plan");
-            push(&mut args, "--tools");
-            push(&mut args, "");
-            push(&mut args, "--disable-slash-commands");
-            push(&mut args, "--no-session-persistence");
-            push(&mut args, "--no-chrome");
-            if let Some(model) = model {
-                push(&mut args, "--model");
-                push(&mut args, model);
-            }
-            if let Some(effort) = reasoning_effort {
-                push(&mut args, "--effort");
-                push(&mut args, effort);
-            }
-        }
-        ProviderKind::Codex => {
-            push(&mut args, "exec");
-            push(&mut args, "--sandbox");
-            push(&mut args, "read-only");
-            push(&mut args, "--ephemeral");
-            push(&mut args, "--color");
-            push(&mut args, "never");
-            push(&mut args, "--skip-git-repo-check");
-            if let Some(model) = model {
-                push(&mut args, "--model");
-                push(&mut args, model);
-            }
-        }
-        ProviderKind::Cursor => {
-            push(&mut args, "--print");
-            push(&mut args, "--output-format");
-            push(&mut args, "text");
-            push(&mut args, "--mode");
-            push(&mut args, "ask");
-            push(&mut args, "--sandbox");
-            push(&mut args, "enabled");
-            push(&mut args, "--trust");
-            if let Some(model) = model {
-                push(&mut args, "--model");
-                push(&mut args, model);
-            }
-        }
-        ProviderKind::DeepSeek => {
-            // The headless profile is Harness's one-shot, stdout-only client.
-            // The commit prompt embeds all context and explicitly forbids tools.
-            push(&mut args, "--profile");
-            push(&mut args, "headless");
-        }
-        ProviderKind::OpenCode => {
-            push(&mut args, "run");
-            push(&mut args, "--pure");
-            push(&mut args, "--agent");
-            push(&mut args, "plan");
-            if let Some(model) = model {
-                push(&mut args, "--model");
-                push(&mut args, model);
-            }
-            if let Some(effort) = reasoning_effort {
-                push(&mut args, "--variant");
-                push(&mut args, effort);
-            }
-        }
-        ProviderKind::Grok => {
-            push(&mut args, "--single");
-            push(&mut args, prompt);
-            push(&mut args, "--output-format");
-            push(&mut args, "plain");
-            push(&mut args, "--permission-mode");
-            push(&mut args, "plan");
-            push(&mut args, "--tools");
-            push(&mut args, "");
-            push(&mut args, "--no-memory");
-            push(&mut args, "--no-subagents");
-            push(&mut args, "--disable-web-search");
-            push(&mut args, "--verbatim");
-            if let Some(model) = model {
-                push(&mut args, "--model");
-                push(&mut args, model);
-            }
-            if let Some(effort) = reasoning_effort {
-                push(&mut args, "--reasoning-effort");
-                push(&mut args, effort);
-            }
-            return args;
-        }
-        ProviderKind::Pi => {
-            push(&mut args, "--print");
-            push(&mut args, "--no-session");
-            push(&mut args, "--no-tools");
-            push(&mut args, "--no-context-files");
-            push(&mut args, "--no-extensions");
-            push(&mut args, "--no-skills");
-            push(&mut args, "--no-prompt-templates");
-            push(&mut args, "--no-approve");
-            if let Some(model) = model {
-                push(&mut args, "--model");
-                push(&mut args, model);
-            }
-            if let Some(effort) = reasoning_effort {
-                push(&mut args, "--thinking");
-                push(&mut args, effort);
-            }
-        }
-    }
-    push(&mut args, prompt);
-    args
 }
 
 fn normalize_message(output: &str) -> Option<String> {
@@ -558,10 +380,7 @@ fn run_capture(command: &mut Command, timeout: Duration) -> anyhow::Result<Captu
 fn read_bounded(mut reader: impl Read, limit: usize) -> Vec<u8> {
     let mut kept = Vec::new();
     let mut chunk = [0u8; 8192];
-    loop {
-        let Ok(read) = reader.read(&mut chunk) else {
-            break;
-        };
+    while let Ok(read) = reader.read(&mut chunk) {
         if read == 0 {
             break;
         }
@@ -668,75 +487,5 @@ mod tests {
             normalize_message("Commit message: Add commit dialog\n").as_deref(),
             Some("Add commit dialog")
         );
-    }
-
-    #[test]
-    fn every_provider_uses_a_noninteractive_generation_mode() {
-        fn has(args: &[OsString], value: &str) -> bool {
-            args.iter().any(|arg| arg == value)
-        }
-
-        fn has_pair(args: &[OsString], first: &str, second: &str) -> bool {
-            args.windows(2)
-                .any(|pair| pair[0] == first && pair[1] == second)
-        }
-
-        let prompt = "Generate subject";
-        for provider in ProviderKind::ALL {
-            let args = agent_arguments(
-                provider,
-                Some("model"),
-                Some("low"),
-                prompt,
-                Some(Path::new("/tmp/amp.json")),
-            );
-            assert!(has(&args, prompt));
-            match provider {
-                ProviderKind::Amp => {
-                    assert!(has(&args, "--execute"));
-                    assert!(has_pair(&args, "--settings-file", "/tmp/amp.json"));
-                    assert!(has_pair(&args, "--mode", "model"));
-                    assert!(has_pair(&args, "--effort", "low"));
-                }
-                ProviderKind::Codex => {
-                    assert_eq!(args.first().and_then(|arg| arg.to_str()), Some("exec"));
-                    assert!(has_pair(&args, "--sandbox", "read-only"));
-                    assert!(has(&args, "--ephemeral"));
-                }
-                ProviderKind::OpenCode => {
-                    assert_eq!(args.first().and_then(|arg| arg.to_str()), Some("run"));
-                    assert!(has(&args, "--pure"));
-                    assert!(has_pair(&args, "--agent", "plan"));
-                    assert!(has_pair(&args, "--variant", "low"));
-                }
-                ProviderKind::Claude => {
-                    assert!(has(&args, "--print"));
-                    assert!(has_pair(&args, "--permission-mode", "plan"));
-                    assert!(has_pair(&args, "--tools", ""));
-                    assert!(has(&args, "--no-session-persistence"));
-                }
-                ProviderKind::Cursor => {
-                    assert!(has(&args, "--print"));
-                    assert!(has_pair(&args, "--mode", "ask"));
-                    assert!(has_pair(&args, "--sandbox", "enabled"));
-                }
-                ProviderKind::DeepSeek => {
-                    assert!(has_pair(&args, "--profile", "headless"));
-                }
-                ProviderKind::Grok => {
-                    assert!(has_pair(&args, "--single", prompt));
-                    assert!(has_pair(&args, "--permission-mode", "plan"));
-                    assert!(has_pair(&args, "--tools", ""));
-                    assert!(has(&args, "--no-memory"));
-                    assert!(has(&args, "--no-subagents"));
-                }
-                ProviderKind::Pi => {
-                    assert!(has(&args, "--print"));
-                    assert!(has(&args, "--no-session"));
-                    assert!(has(&args, "--no-tools"));
-                    assert!(has_pair(&args, "--thinking", "low"));
-                }
-            }
-        }
     }
 }

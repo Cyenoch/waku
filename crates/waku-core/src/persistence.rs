@@ -26,12 +26,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::blob_store::BlobStore;
-use crate::computer_use::ComputerAppGrant;
 use crate::i18n::AppLanguage;
 use crate::identity::DATA_DIRECTORY_NAME;
 use crate::model::{
     AgentSession, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole, Project,
-    ProviderKind, RuntimeMode, SessionWorkspace,
+    ProviderId, RuntimeMode, SessionWorkspace,
 };
 use crate::theme::ThemePreference;
 pub use waku_protocol::persistence::{
@@ -58,16 +57,12 @@ fn default_right_panel_visibility() -> bool {
     false
 }
 
-fn default_computer_use_enabled() -> bool {
-    false
-}
-
 fn default_analytics_enabled() -> bool {
     true
 }
 
-fn default_provider() -> ProviderKind {
-    ProviderKind::Codex
+fn default_provider() -> ProviderId {
+    ProviderId::new(ProviderId::OPENAI_RESPONSES)
 }
 
 fn default_sidebar_width() -> f32 {
@@ -80,18 +75,16 @@ fn default_right_panel_width() -> f32 {
 
 /// Explicit trait choices remembered for one provider model.
 ///
-/// Reasoning effort and service tier are model capabilities, so their option
-/// ids must not leak into another provider merely because that provider uses
-/// the same strings. Keeping the key beside the values lets the model picker
-/// restore them when the user returns to the model that owns them.
+/// Reasoning effort is a model capability, so its option id must not leak
+/// into another provider merely because that provider uses the same string.
+/// Keeping the key beside the values lets the model picker restore them
+/// when the user returns to the model that owns them.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RememberedModelTraits {
-    provider: ProviderKind,
+    provider: ProviderId,
     model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    service_tier: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     context_window: Option<String>,
 }
@@ -217,13 +210,13 @@ struct AppState {
     #[serde(default)]
     selected_session: Option<Uuid>,
     #[serde(default = "default_provider")]
-    last_provider: ProviderKind,
+    last_provider: ProviderId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    last_service_tier: Option<String>,
+    last_service_tier: Option<waku_protocol::ServiceTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_context_window: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -251,13 +244,13 @@ pub struct PersistedState {
     pub sessions: Vec<AgentSession>,
     pub selected_project: Option<Uuid>,
     pub selected_session: Option<Uuid>,
-    pub last_provider: ProviderKind,
+    pub last_provider: ProviderId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_service_tier: Option<String>,
+    pub last_service_tier: Option<waku_protocol::ServiceTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_context_window: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -276,17 +269,9 @@ pub struct PersistedState {
     pub sidebar_width: f32,
     #[serde(default = "default_right_panel_width")]
     pub right_panel_width: f32,
-    #[serde(default = "default_computer_use_enabled")]
-    pub computer_use_enabled: bool,
+    /// User-configured HTTP endpoints used by the embedded harness.
     #[serde(default)]
-    pub computer_use_allowed_apps: Vec<ComputerAppGrant>,
-    /// Providers switched off for new sessions in the Providers settings.
-    #[serde(default)]
-    pub disabled_providers: Vec<ProviderKind>,
-    /// Per-provider binary overrides from the Providers settings; empty means
-    /// detect from PATH.
-    #[serde(default)]
-    pub provider_binary_overrides: HashMap<ProviderKind, String>,
+    pub external_providers: Vec<waku_protocol::ExternalProvider>,
     /// Unknown daemon settings survive edits made by this desktop version.
     #[serde(skip)]
     daemon_settings_extra: BTreeMap<String, serde_json::Value>,
@@ -329,7 +314,7 @@ impl PersistedState {
             sessions: Vec::new(),
             selected_project: None,
             selected_session: None,
-            last_provider: ProviderKind::Codex,
+            last_provider: ProviderId::new(ProviderId::OPENAI_RESPONSES),
             last_model: None,
             last_reasoning_effort: None,
             last_service_tier: None,
@@ -342,10 +327,7 @@ impl PersistedState {
             right_panel_visible: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
-            computer_use_enabled: false,
-            computer_use_allowed_apps: Vec::new(),
-            disabled_providers: Vec::new(),
-            provider_binary_overrides: HashMap::new(),
+            external_providers: Vec::new(),
             daemon_settings_extra: BTreeMap::new(),
             dirty_sessions: HashSet::new(),
         }
@@ -353,7 +335,7 @@ impl PersistedState {
 
     pub fn fresh(cwd: PathBuf) -> Self {
         let project = Project::from_path(cwd);
-        let session = AgentSession::new(project.id, ProviderKind::Codex);
+        let session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
         Self {
             selected_project: Some(project.id),
             selected_session: Some(session.id),
@@ -363,34 +345,31 @@ impl PersistedState {
         }
     }
 
-    pub fn new_session(&self, project_id: Uuid, provider: ProviderKind) -> AgentSession {
-        let mut session = AgentSession::new(project_id, provider);
+    pub fn new_session(&self, project_id: Uuid, provider: ProviderId) -> AgentSession {
+        let mut session = AgentSession::new(project_id, provider.clone());
         if provider == self.last_provider {
             session.model.clone_from(&self.last_model);
             session
                 .reasoning_effort
                 .clone_from(&self.last_reasoning_effort);
-            session.service_tier.clone_from(&self.last_service_tier);
-            session
-                .context_window
-                .clone_from(&self.last_context_window);
+            session.service_tier = self.last_service_tier;
+            session.context_window.clone_from(&self.last_context_window);
         }
         session
     }
 
     pub fn remember_model_traits(
         &mut self,
-        provider: ProviderKind,
+        provider: ProviderId,
         model: &str,
         reasoning_effort: Option<String>,
-        service_tier: Option<String>,
         context_window: Option<String>,
     ) {
         let existing = self
             .remembered_model_traits
             .iter()
             .position(|traits| traits.provider == provider && traits.model == model);
-        if reasoning_effort.is_none() && service_tier.is_none() && context_window.is_none() {
+        if reasoning_effort.is_none() && context_window.is_none() {
             if let Some(index) = existing {
                 self.remembered_model_traits.remove(index);
             }
@@ -399,14 +378,12 @@ impl PersistedState {
         if let Some(index) = existing {
             let traits = &mut self.remembered_model_traits[index];
             traits.reasoning_effort = reasoning_effort;
-            traits.service_tier = service_tier;
             traits.context_window = context_window;
         } else {
             self.remembered_model_traits.push(RememberedModelTraits {
                 provider,
                 model: model.to_owned(),
                 reasoning_effort,
-                service_tier,
                 context_window,
             });
         }
@@ -414,16 +391,15 @@ impl PersistedState {
 
     pub fn model_traits_for(
         &self,
-        provider: ProviderKind,
+        provider: ProviderId,
         model: &str,
-    ) -> (Option<String>, Option<String>, Option<String>) {
+    ) -> (Option<String>, Option<String>) {
         self.remembered_model_traits
             .iter()
             .find(|traits| traits.provider == provider && traits.model == model)
             .map(|traits| {
                 (
                     traits.reasoning_effort.clone(),
-                    traits.service_tier.clone(),
                     traits.context_window.clone(),
                 )
             })
@@ -441,10 +417,7 @@ impl PersistedState {
 
     pub fn daemon_settings(&self) -> crate::DaemonSettings {
         crate::DaemonSettings {
-            computer_use_enabled: self.computer_use_enabled,
-            computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
-            disabled_providers: self.disabled_providers.clone(),
-            provider_binary_overrides: self.provider_binary_overrides.clone(),
+            external_providers: self.external_providers.clone(),
             extra: self.daemon_settings_extra.clone(),
         }
     }
@@ -455,10 +428,10 @@ impl PersistedState {
             analytics_id: self.analytics_id,
             selected_project: self.selected_project,
             selected_session: self.persistable_selected_session(),
-            last_provider: self.last_provider,
+            last_provider: self.last_provider.clone(),
             last_model: self.last_model.clone(),
             last_reasoning_effort: self.last_reasoning_effort.clone(),
-            last_service_tier: self.last_service_tier.clone(),
+            last_service_tier: self.last_service_tier,
             last_context_window: self.last_context_window.clone(),
             remembered_model_traits: self.remembered_model_traits.clone(),
             sidebar_visible: self.sidebar_visible,
@@ -476,10 +449,7 @@ impl PersistedState {
     }
 
     pub fn apply_daemon_settings(&mut self, settings: crate::DaemonSettings) {
-        self.computer_use_enabled = settings.computer_use_enabled;
-        self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
-        self.disabled_providers = settings.disabled_providers;
-        self.provider_binary_overrides = settings.provider_binary_overrides;
+        self.external_providers = settings.external_providers;
         self.daemon_settings_extra = settings.extra;
     }
 
@@ -526,7 +496,7 @@ impl PersistedState {
         }) else {
             return;
         };
-        let session = self.new_session(project_id, self.last_provider);
+        let session = self.new_session(project_id, self.last_provider.clone());
         self.selected_session = Some(session.id);
         self.sessions.push(session);
     }
@@ -538,27 +508,16 @@ impl PersistedState {
                     .as_ref()
                     .is_none_or(crate::model::Checkpoint::totals_are_current)
             });
-            let before = (
-                session.turns.len(),
-                session.last_reply_at,
-                session.provider_cursor.is_some(),
-            );
+            let before = (session.turns.len(), session.last_reply_at);
             session.migrate_legacy_state();
             session.backfill_last_reply_at();
             // Migration rewrote this session, so the stored row is stale.
-            if !checkpoint_totals_current
-                || before
-                    != (
-                        session.turns.len(),
-                        session.last_reply_at,
-                        session.provider_cursor.is_some(),
-                    )
+            if !checkpoint_totals_current || before != (session.turns.len(), session.last_reply_at)
             {
                 self.dirty_sessions.insert(session.id);
             }
         }
         self.version = STATE_VERSION;
-        normalize_computer_app_grants(&mut self.computer_use_allowed_apps);
         self.backfill_remembered_selection();
     }
 
@@ -858,6 +817,7 @@ pub struct StateStore {
     storage: Mutex<Option<Storage>>,
     blobs: Arc<BlobStore>,
     desktop_files: bool,
+    harness_snapshots: Mutex<std::collections::HashMap<uuid::Uuid, waku_harness::SessionSnapshot>>,
 }
 
 impl StateStore {
@@ -926,6 +886,7 @@ impl StateStore {
             storage: Mutex::new(None),
             blobs,
             desktop_files: true,
+            harness_snapshots: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -940,6 +901,129 @@ impl StateStore {
     ) -> impl FnOnce() -> io::Result<Vec<SessionMessageMatch>> + Send + 'static {
         let path = self.path.clone();
         move || search_session_messages(&path, &query, limit)
+    }
+
+    pub fn harness_snapshot(&self, id: uuid::Uuid) -> Option<waku_harness::SessionSnapshot> {
+        self.harness_snapshots.lock().get(&id).cloned()
+    }
+
+    pub fn set_harness_snapshot(&self, id: uuid::Uuid, snapshot: waku_harness::SessionSnapshot) {
+        self.harness_snapshots.lock().insert(id, snapshot);
+    }
+
+    /// Insert a billed usage event. `INSERT OR IGNORE` so journal replay and
+    /// duplicate driver delivery do not double-count.
+    pub fn insert_usage_event(&self, event: &crate::usage_history::UsageEvent) -> io::Result<bool> {
+        if event.token_total() == 0 {
+            return Ok(false);
+        }
+        self.with_connection(|connection| {
+            let changed = connection
+                .execute(
+                    "INSERT OR IGNORE INTO usage_events (
+                         event_id, session_id, project_path, provider, model,
+                         timestamp_ms, input, output, cache_read, cache_write, reasoning
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    rusqlite::params![
+                        event.event_id.to_string(),
+                        event.session_id.to_string(),
+                        event.project_path,
+                        event.provider.as_str(),
+                        event.model,
+                        event.timestamp_ms,
+                        event.input as i64,
+                        event.output as i64,
+                        event.cache_read as i64,
+                        event.cache_write as i64,
+                        event.reasoning.map(|value| value as i64),
+                    ],
+                )
+                .map_err(to_io_error)?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// Indexed window read of the append-only usage ledger.
+    pub fn usage_events_between(
+        &self,
+        since_ms: i64,
+        until_ms: i64,
+    ) -> io::Result<Vec<crate::usage_history::UsageEvent>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT event_id, session_id, project_path, provider, model,
+                            timestamp_ms, input, output, cache_read, cache_write, reasoning
+                     FROM usage_events
+                     WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
+                     ORDER BY timestamp_ms, event_id",
+                )
+                .map_err(to_io_error)?;
+            let rows = statement
+                .query_map(params![since_ms, until_ms], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
+                    ))
+                })
+                .map_err(to_io_error)?;
+            Ok(rows
+                .filter_map(Result::ok)
+                .filter_map(
+                    |(
+                        event_id,
+                        session_id,
+                        project_path,
+                        provider,
+                        model,
+                        timestamp_ms,
+                        input,
+                        output,
+                        cache_read,
+                        cache_write,
+                        reasoning,
+                    )| {
+                        Some(crate::usage_history::UsageEvent {
+                            event_id: Uuid::parse_str(&event_id).ok()?,
+                            session_id: Uuid::parse_str(&session_id).ok()?,
+                            project_path,
+                            provider: ProviderId::new(provider),
+                            model,
+                            timestamp_ms,
+                            input: input as u64,
+                            output: output as u64,
+                            cache_read: cache_read as u64,
+                            cache_write: cache_write as u64,
+                            reasoning: reasoning.map(|value| value as u64),
+                        })
+                    },
+                )
+                .collect())
+        })
+    }
+
+    fn with_connection<T>(&self, f: impl FnOnce(&Connection) -> io::Result<T>) -> io::Result<T> {
+        let mut guard = self.storage.lock();
+        if guard.is_none() {
+            *guard = Some(Storage {
+                connection: self.open()?,
+                persisted_sessions: HashSet::new(),
+                written_messages: HashMap::new(),
+                saved_projects: 0,
+                saved_app_settings: 0,
+                saved_app_state: 0,
+            });
+        }
+        f(&guard.as_ref().expect("storage opened above").connection)
     }
 
     pub fn blobs(&self) -> Arc<BlobStore> {
@@ -1208,12 +1292,21 @@ impl StateStore {
             session.detail_loaded = true;
             return Ok(());
         };
-        let stored = serde_json::from_str::<AgentSession>(&data).map_err(to_io_error)?;
+        let mut document: serde_json::Value = serde_json::from_str(&data).map_err(to_io_error)?;
+        waku_protocol::model::migrate_legacy_session_fields(&mut document);
+        if let Some(snapshot) = document
+            .as_object_mut()
+            .and_then(|object| object.remove("harnessSnapshot"))
+        {
+            let snapshot = serde_json::from_value::<waku_harness::SessionSnapshot>(snapshot)
+                .map_err(to_io_error)?;
+            self.harness_snapshots.lock().insert(session.id, snapshot);
+        }
+        let stored = serde_json::from_value::<AgentSession>(document).map_err(to_io_error)?;
         session.transcript_blocks = stored.transcript_blocks;
         session.turns = stored.turns;
         session.queued_messages = stored.queued_messages;
         session.workspace = stored.workspace;
-        session.provider_cursor = stored.provider_cursor;
         session.runtime_mode = stored.runtime_mode;
         session.interaction_mode = stored.interaction_mode;
         session.reasoning_effort = stored.reasoning_effort;
@@ -1358,7 +1451,18 @@ impl StateStore {
             {
                 continue;
             }
-            let data = session_data(session)?;
+            let snapshot = self.harness_snapshots.lock().get(&session.id).cloned();
+            let snapshot = match snapshot {
+                Some(snapshot) => Some(snapshot),
+                None => {
+                    let snapshot = existing_harness_snapshot(&transaction, session.id)?;
+                    if let Some(snapshot) = snapshot.clone() {
+                        self.harness_snapshots.lock().insert(session.id, snapshot);
+                    }
+                    snapshot
+                }
+            };
+            let data = session_data(session, snapshot.as_ref())?;
             transaction
                 .execute(
                     UPSERT_SESSION,
@@ -1400,6 +1504,7 @@ impl StateStore {
                 .execute("DELETE FROM messages WHERE session_id = ?1", params![key])
                 .map_err(to_io_error)?;
             storage.persisted_sessions.remove(&id);
+            self.harness_snapshots.lock().remove(&id);
             storage.written_messages.remove(&id);
         }
 
@@ -1503,16 +1608,12 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         reasoning_effort: None,
         service_tier: None,
         context_window: None,
-        agent_preset: None,
         status: serde_json::from_value(serde_json::Value::String(status)).ok()?,
         created_at: created_at as u64,
         updated_at: updated_at as u64,
         last_reply_at: last_reply_at.map(|at| at as u64),
-        provider_cursor: None,
-        available_commands: Vec::new(),
         context_usage: None,
         runtime_event_cursor: None,
-        provider_session_id: None,
         messages: Vec::new(),
         transcript_blocks: Vec::new(),
         turns: Vec::new(),
@@ -1551,10 +1652,46 @@ fn message_from_row(row: MessageColumns) -> Option<Message> {
 ///
 /// They are rows in `messages` instead, so there is no copy in `data` that
 /// could go stale.
-fn session_data(session: &AgentSession) -> io::Result<String> {
+fn existing_harness_snapshot(
+    connection: &rusqlite::Connection,
+    session_id: Uuid,
+) -> io::Result<Option<waku_harness::SessionSnapshot>> {
+    let data: Option<String> = connection
+        .query_row(
+            "SELECT data FROM session_details WHERE session_id = ?1",
+            params![session_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(to_io_error)?;
+    let Some(data) = data else {
+        return Ok(None);
+    };
+    let mut document: serde_json::Value = serde_json::from_str(&data).map_err(to_io_error)?;
+    let Some(snapshot) = document
+        .as_object_mut()
+        .and_then(|object| object.remove("harnessSnapshot"))
+    else {
+        return Ok(None);
+    };
+    serde_json::from_value(snapshot)
+        .map(Some)
+        .map_err(to_io_error)
+}
+
+fn session_data(
+    session: &AgentSession,
+    harness: Option<&waku_harness::SessionSnapshot>,
+) -> io::Result<String> {
     let mut value = serde_json::to_value(session).map_err(to_io_error)?;
     if let Some(object) = value.as_object_mut() {
         object.remove("messages");
+        if let Some(harness) = harness {
+            object.insert(
+                "harnessSnapshot".into(),
+                serde_json::to_value(harness).map_err(to_io_error)?,
+            );
+        }
     }
     serde_json::to_string(&value).map_err(to_io_error)
 }
@@ -1757,7 +1894,7 @@ fn session_params(session: &AgentSession) -> Vec<rusqlite::types::Value> {
         Value::Text(session.project_id.to_string()),
         Value::Text(session.title.clone()),
         session.auto_title.clone().map_or(Value::Null, Value::Text),
-        Value::Text(tag_of(session.provider)),
+        Value::Text(tag_of(session.provider.clone())),
         session.model.clone().map_or(Value::Null, Value::Text),
         Value::Text(tag_of(session.status)),
         Value::Integer(session.created_at as i64),
@@ -1766,13 +1903,6 @@ fn session_params(session: &AgentSession) -> Vec<rusqlite::types::Value> {
             .last_reply_at
             .map_or(Value::Null, |at| Value::Integer(at as i64)),
     ]
-}
-
-fn normalize_computer_app_grants(grants: &mut Vec<ComputerAppGrant>) {
-    let mut seen_bundle_ids = HashSet::new();
-    grants.retain(|grant| {
-        !grant.bundle_id.trim().is_empty() && seen_bundle_ids.insert(grant.bundle_id.clone())
-    });
 }
 
 #[cfg(test)]
@@ -1898,21 +2028,6 @@ mod tests {
     }
 
     #[test]
-    fn computer_use_defaults_to_disabled() {
-        let state = PersistedState::empty();
-        assert!(!state.computer_use_enabled);
-
-        let mut settings = serde_json::to_value(state.daemon_settings()).unwrap();
-        settings
-            .as_object_mut()
-            .unwrap()
-            .remove("computer_use_enabled");
-        let restored: crate::DaemonSettings = serde_json::from_value(settings).unwrap();
-
-        assert!(!restored.computer_use_enabled);
-    }
-
-    #[test]
     fn settings_accept_a_partial_user_authored_document() {
         let settings: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
 
@@ -1944,8 +2059,10 @@ mod tests {
     #[test]
     fn new_session_drafts_follow_the_project_across_runtime_session_ids() {
         let project_id = Uuid::new_v4();
-        let first_runtime_session = AgentSession::new(project_id, ProviderKind::Codex);
-        let relaunched_runtime_session = AgentSession::new(project_id, ProviderKind::Codex);
+        let first_runtime_session =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
+        let relaunched_runtime_session =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
         assert_ne!(first_runtime_session.id, relaunched_runtime_session.id);
 
         let mut drafts = ComposerDrafts::default();
@@ -1964,8 +2081,10 @@ mod tests {
     #[test]
     fn existing_session_drafts_are_isolated_by_session_id() {
         let project_id = Uuid::new_v4();
-        let mut first = AgentSession::new(project_id, ProviderKind::Codex);
-        let mut second = AgentSession::new(project_id, ProviderKind::Codex);
+        let mut first =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
+        let mut second =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
         first.begin_turn("first task");
         second.begin_turn("second task");
 
@@ -2443,20 +2562,17 @@ mod tests {
         state.last_model = Some("gpt-5.6-luna".into());
         state.sessions[0].reasoning_effort = Some("xhigh".into());
         state.last_reasoning_effort = Some("xhigh".into());
-        state.sessions[0].service_tier = Some("fast".into());
-        state.last_service_tier = Some("fast".into());
         state.sessions[0].context_window = Some("1m".into());
         state.last_context_window = Some("1m".into());
         state.remember_model_traits(
-            ProviderKind::Codex,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
             "gpt-5.6-luna",
             Some("xhigh".into()),
-            Some("fast".into()),
             Some("1m".into()),
         );
-        state.sessions[0].runtime_mode = crate::model::RuntimeMode::Auto;
+        state.sessions[0].runtime_mode = crate::model::RuntimeMode::FullAccess;
         state.favorite_models.push(FavoriteModel {
-            provider: ProviderKind::Codex,
+            provider: ProviderId::new(ProviderId::OPENAI_RESPONSES),
             model: "gpt-5.6-luna".into(),
         });
         state.theme = ThemePreference::Light;
@@ -2465,11 +2581,6 @@ mod tests {
         state.right_panel_visible = false;
         state.sidebar_width = 318.0;
         state.right_panel_width = 612.0;
-        state.computer_use_enabled = false;
-        state.computer_use_allowed_apps.push(ComputerAppGrant {
-            bundle_id: "com.apple.Safari".into(),
-            app_name: "Safari".into(),
-        });
         state.sessions[0].begin_turn("Persist this session");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
         state.sessions[0].transcript_blocks.push(TranscriptBlock {
@@ -2503,25 +2614,22 @@ mod tests {
         assert_eq!(restored.sessions[0].model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(restored.last_model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(restored.last_reasoning_effort.as_deref(), Some("xhigh"));
-        assert_eq!(restored.last_service_tier.as_deref(), Some("fast"));
         assert_eq!(
             restored.sessions[0].reasoning_effort.as_deref(),
             Some("xhigh")
         );
-        assert_eq!(restored.sessions[0].service_tier.as_deref(), Some("fast"));
         assert_eq!(restored.last_context_window.as_deref(), Some("1m"));
         assert_eq!(restored.sessions[0].context_window.as_deref(), Some("1m"));
         assert_eq!(
-            restored.model_traits_for(ProviderKind::Codex, "gpt-5.6-luna"),
-            (
-                Some("xhigh".into()),
-                Some("fast".into()),
-                Some("1m".into())
-            )
+            restored.model_traits_for(
+                ProviderId::new(ProviderId::OPENAI_RESPONSES),
+                "gpt-5.6-luna"
+            ),
+            (Some("xhigh".into()), Some("1m".into()))
         );
         assert_eq!(
             restored.sessions[0].runtime_mode,
-            crate::model::RuntimeMode::Auto
+            crate::model::RuntimeMode::FullAccess
         );
         assert_eq!(restored.favorite_models, state.favorite_models);
         assert_eq!(restored.theme, ThemePreference::Light);
@@ -2530,11 +2638,6 @@ mod tests {
         assert!(!restored.right_panel_visible);
         assert_eq!(restored.sidebar_width, 318.0);
         assert_eq!(restored.right_panel_width, 612.0);
-        assert!(!restored.computer_use_enabled);
-        assert_eq!(
-            restored.computer_use_allowed_apps,
-            state.computer_use_allowed_apps
-        );
         assert_eq!(restored.sessions[0].transcript_blocks.len(), 1);
         assert_eq!(
             restored.sessions[0].transcript_blocks[0].activities.len(),
@@ -2558,7 +2661,10 @@ mod tests {
         state.sessions[0].begin_turn("First");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
         let quiet = {
-            let mut session = state.new_session(state.projects[0].id, ProviderKind::Codex);
+            let mut session = state.new_session(
+                state.projects[0].id,
+                ProviderId::new(ProviderId::OPENAI_RESPONSES),
+            );
             session.begin_turn("Quiet");
             session.finish_active_turn(crate::model::TurnStatus::Completed);
             session
@@ -2716,7 +2822,6 @@ mod tests {
             "last_provider",
             "last_model",
             "last_reasoning_effort",
-            "last_service_tier",
             "last_context_window",
             "remembered_model_traits",
             "sidebar_visible",
@@ -2950,7 +3055,8 @@ mod tests {
         state.sessions[0].push_message(MessageRole::Assistant, "Newer assistant needle");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
 
-        let mut assistant_match = AgentSession::new(project_id, ProviderKind::Codex);
+        let mut assistant_match =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
         let assistant_match_id = assistant_match.id;
         assistant_match.begin_turn("Ordinary prompt");
         assistant_match.push_message(MessageRole::System, "System needle is private");
@@ -3053,7 +3159,10 @@ mod tests {
         state.sessions[0].begin_turn("Keep");
         state.sessions[0].push_message(MessageRole::User, "keep me");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
-        let mut extra = state.new_session(state.projects[0].id, ProviderKind::Codex);
+        let mut extra = state.new_session(
+            state.projects[0].id,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
         extra.begin_turn("Remove");
         extra.push_message(MessageRole::User, "delete me");
         extra.finish_active_turn(crate::model::TurnStatus::Completed);
@@ -3151,7 +3260,10 @@ mod tests {
 
     #[test]
     fn last_reply_at_tracks_turn_activity_not_every_edit() {
-        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let mut session = AgentSession::new(
+            Uuid::new_v4(),
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
         assert!(session.last_reply_at.is_none(), "no turn yet");
 
         session.begin_turn("Ask");
@@ -3175,7 +3287,10 @@ mod tests {
 
     #[test]
     fn last_reply_at_is_derived_for_sessions_stored_without_it() {
-        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let mut session = AgentSession::new(
+            Uuid::new_v4(),
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
         session.begin_turn("Ask");
         session.finish_active_turn(crate::model::TurnStatus::Completed);
         let completed_at = session.turns.last().unwrap().completed_at.unwrap();
@@ -3186,7 +3301,10 @@ mod tests {
         assert_eq!(session.last_reply_at, Some(completed_at));
 
         // A session that never ran has nothing to derive.
-        let mut fresh = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let mut fresh = AgentSession::new(
+            Uuid::new_v4(),
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
         fresh.backfill_last_reply_at();
         assert!(fresh.last_reply_at.is_none());
 
@@ -3205,7 +3323,10 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].begin_turn("First");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
-        let mut second = state.new_session(state.projects[0].id, ProviderKind::Codex);
+        let mut second = state.new_session(
+            state.projects[0].id,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
         second.title = "Newer".into();
         second.begin_turn("Second");
         second.finish_active_turn(crate::model::TurnStatus::Completed);
@@ -3302,39 +3423,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_signed_computer_grants_migrate_to_bundle_ids() {
-        let legacy = serde_json::json!({
-            "bundleId": "net.imput.helium",
-            "teamId": "S4Q33XPHB4",
-            "appName": "Helium"
-        });
-        let grant: ComputerAppGrant = serde_json::from_value(legacy).unwrap();
-        assert_eq!(grant.key(), "net.imput.helium");
-
-        let mut grants = vec![
-            grant,
-            ComputerAppGrant {
-                bundle_id: "net.imput.helium".into(),
-                app_name: "Helium Preview".into(),
-            },
-            ComputerAppGrant {
-                bundle_id: String::new(),
-                app_name: "Missing identity".into(),
-            },
-        ];
-        normalize_computer_app_grants(&mut grants);
-        assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].app_name, "Helium");
-
-        let saved = serde_json::to_value(&grants[0]).unwrap();
-        assert_eq!(
-            saved.get("bundleId").and_then(|value| value.as_str()),
-            Some("net.imput.helium")
-        );
-        assert!(saved.get("teamId").is_none());
-    }
-
-    #[test]
     fn blank_sessions_stay_runtime_only() {
         let directory = temporary_directory();
         let store = store_in(&directory);
@@ -3357,7 +3445,10 @@ mod tests {
         let started_id = state.sessions[0].id;
         state.sessions[0].begin_turn("Persist this session");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
-        let draft = state.new_session(state.projects[0].id, ProviderKind::Codex);
+        let draft = state.new_session(
+            state.projects[0].id,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
         state.selected_session = Some(draft.id);
         state.sessions.push(draft);
 
@@ -3390,7 +3481,10 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].begin_turn("Keep");
         state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
-        let mut extra = state.new_session(state.projects[0].id, ProviderKind::Codex);
+        let mut extra = state.new_session(
+            state.projects[0].id,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
         extra.begin_turn("Remove");
         extra.finish_active_turn(crate::model::TurnStatus::Completed);
         let removed_id = extra.id;
@@ -3408,7 +3502,7 @@ mod tests {
 
     #[test]
     fn sessions_without_transcript_blocks_remain_compatible() {
-        let session = AgentSession::new(Uuid::new_v4(), ProviderKind::Grok);
+        let session = AgentSession::new(Uuid::new_v4(), ProviderId::new("grok"));
         let mut value = serde_json::to_value(session).unwrap();
         value.as_object_mut().unwrap().remove("transcript_blocks");
 
@@ -3419,47 +3513,49 @@ mod tests {
     #[test]
     fn selected_model_and_traits_are_used_for_new_sessions() {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
-        state.last_provider = ProviderKind::Grok;
+        state.last_provider = ProviderId::new("grok");
         state.last_model = Some("grok-code-fast-1".into());
         state.last_reasoning_effort = Some("high".into());
-        state.last_service_tier = Some("fast".into());
 
-        let remembered = state.new_session(state.projects[0].id, ProviderKind::Grok);
-        let other_provider = state.new_session(state.projects[0].id, ProviderKind::Codex);
+        let remembered = state.new_session(state.projects[0].id, ProviderId::new("grok"));
+        let other_provider = state.new_session(
+            state.projects[0].id,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
 
         assert_eq!(remembered.model.as_deref(), Some("grok-code-fast-1"));
         assert_eq!(remembered.reasoning_effort.as_deref(), Some("high"));
-        assert_eq!(remembered.service_tier.as_deref(), Some("fast"));
         assert!(other_provider.model.is_none());
         assert!(other_provider.reasoning_effort.is_none());
-        assert!(other_provider.service_tier.is_none());
     }
 
     #[test]
     fn model_traits_are_remembered_by_provider_and_model() {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.remember_model_traits(
-            ProviderKind::Codex,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
             "gpt-5.6-sol",
             Some("max".into()),
-            Some("fast".into()),
             None,
         );
 
         assert_eq!(
-            state.model_traits_for(ProviderKind::Claude, "claude-opus-5"),
-            (None, None, None),
+            state.model_traits_for(ProviderId::new("anthropic"), "claude-opus-5"),
+            (None, None),
             "a different provider starts from its own defaults"
         );
         assert_eq!(
-            state.model_traits_for(ProviderKind::Codex, "gpt-5.6-terra"),
-            (None, None, None),
+            state.model_traits_for(
+                ProviderId::new(ProviderId::OPENAI_RESPONSES),
+                "gpt-5.6-terra"
+            ),
+            (None, None),
             "a different model starts from its own defaults"
         );
         assert_eq!(
-            state.model_traits_for(ProviderKind::Codex, "gpt-5.6-sol"),
-            (Some("max".into()), Some("fast".into()), None),
-            "switching back restores both explicit choices"
+            state.model_traits_for(ProviderId::new(ProviderId::OPENAI_RESPONSES), "gpt-5.6-sol"),
+            (Some("max".into()), None),
+            "switching back restores the explicit choice"
         );
     }
 
@@ -3474,7 +3570,6 @@ mod tests {
         let session = state.session_mut(id).unwrap();
         session.model = Some("gpt-5.6-luna".into());
         session.reasoning_effort = Some("xhigh".into());
-        session.service_tier = Some("fast".into());
         store.save(&mut state).unwrap();
 
         // Drop the remembered selection from app state, as a file written
@@ -3482,7 +3577,7 @@ mod tests {
         let app_state_path = directory.join("state.json");
         let mut app_state: serde_json::Value =
             serde_json::from_slice(&fs::read(&app_state_path).unwrap()).unwrap();
-        for key in ["last_model", "last_reasoning_effort", "last_service_tier"] {
+        for key in ["last_model", "last_reasoning_effort"] {
             app_state.as_object_mut().unwrap().remove(key);
         }
         fs::write(&app_state_path, serde_json::to_vec(&app_state).unwrap()).unwrap();
@@ -3494,7 +3589,235 @@ mod tests {
 
         assert_eq!(restored.last_model.as_deref(), Some("gpt-5.6-luna"));
         assert_eq!(restored.last_reasoning_effort.as_deref(), Some("xhigh"));
-        assert_eq!(restored.last_service_tier.as_deref(), Some("fast"));
+        fs::remove_dir_all(directory).ok();
+    }
+
+    fn identity_snapshot() -> waku_harness::SessionSnapshot {
+        use std::sync::Arc;
+        use waku_harness::{
+            AssistantMessage, ContentBlock, Message, QueueMode, StopReason, TextBlock,
+            ThinkingBlock, ToolCall, ToolResult, ToolResultPart, Usage, UserMessage,
+        };
+        let assistant = AssistantMessage {
+            content: vec![
+                ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "plan".into(),
+                    signature: Some("sig-think".into()),
+                    redacted: false,
+                }),
+                ContentBlock::Text(TextBlock {
+                    text: "calling".into(),
+                    signature: Some("sig-text".into()),
+                }),
+                ContentBlock::ToolCall(Arc::new(ToolCall {
+                    id: "call-1|item-9".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path":"src/lib.rs"}),
+                    thought_signature: Some("sig-tool".into()),
+                })),
+            ],
+            model: "claude-opus".into(),
+            provider: "anthropic".into(),
+            response_id: Some("resp-abc".into()),
+            usage: Usage {
+                input: 11,
+                output: 7,
+                cache_read: 3,
+                cache_write: 1,
+                reasoning: Some(2),
+                total_tokens: 22,
+            },
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+        };
+        waku_harness::Session::with_history(
+            Some("system".into()),
+            vec![
+                Message::User(UserMessage::text("inspect")),
+                Message::Assistant(assistant),
+                Message::ToolResult(Arc::new(ToolResult {
+                    tool_call_id: "call-1|item-9".into(),
+                    tool_name: "read".into(),
+                    content: vec![ToolResultPart::Text("contents".into())],
+                    is_error: false,
+                    details: None,
+                })),
+            ],
+            vec![3],
+            QueueMode::OneAtATime,
+            waku_harness::Budget::default(),
+        )
+        .unwrap()
+        .snapshot()
+    }
+
+    fn assert_identity(snapshot: &waku_harness::SessionSnapshot) {
+        let assistant = snapshot
+            .messages
+            .iter()
+            .find_map(waku_harness::Message::as_assistant)
+            .expect("assistant");
+        assert_eq!(assistant.response_id.as_deref(), Some("resp-abc"));
+        assert_eq!(assistant.usage.input, 11);
+        assert_eq!(assistant.usage.total_tokens, 22);
+        match &assistant.content[..] {
+            [
+                waku_harness::ContentBlock::Thinking(thinking),
+                waku_harness::ContentBlock::Text(text),
+                waku_harness::ContentBlock::ToolCall(call),
+            ] => {
+                assert_eq!(thinking.signature.as_deref(), Some("sig-think"));
+                assert_eq!(text.signature.as_deref(), Some("sig-text"));
+                assert_eq!(call.id, "call-1|item-9");
+                assert_eq!(call.thought_signature.as_deref(), Some("sig-tool"));
+            }
+            other => panic!("unexpected content: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restart_hydrate_preserves_harness_response_usage_and_signatures() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let session_id = state.sessions[0].id;
+        state.sessions[0].begin_turn("inspect");
+        state.sessions[0].push_message(MessageRole::Assistant, "calling");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        let snapshot = identity_snapshot();
+        store.set_harness_snapshot(session_id, snapshot);
+        store.save(&mut state).unwrap();
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        reopened.hydrate(&mut restored.sessions[0]).unwrap();
+        let loaded = reopened
+            .harness_snapshot(session_id)
+            .expect("stored snapshot");
+        assert_identity(&loaded);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_save_without_an_in_memory_snapshot_does_not_wipe_the_stored_one() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let session_id = state.sessions[0].id;
+        state.sessions[0].begin_turn("inspect");
+        state.sessions[0].push_message(MessageRole::Assistant, "calling");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store.set_harness_snapshot(session_id, identity_snapshot());
+        store.save(&mut state).unwrap();
+
+        let reader = store_in(&directory);
+        let mut hydrated = reader.load().unwrap();
+        reader.hydrate(&mut hydrated.sessions[0]).unwrap();
+
+        let writer = store_in(&directory);
+        let mut other = writer.load().unwrap();
+        other.sessions[0] = hydrated.sessions[0].clone();
+        other.mark_session_dirty(session_id);
+        writer.save(&mut other).unwrap();
+
+        let checked = store_in(&directory);
+        let mut restored = checked.load().unwrap();
+        checked.hydrate(&mut restored.sessions[0]).unwrap();
+        assert_identity(&checked.harness_snapshot(session_id).unwrap());
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn usage_events_insert_once_and_skip_zero_tokens() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let event = crate::usage_history::UsageEvent {
+            event_id: Uuid::from_u128(7),
+            session_id: Uuid::from_u128(8),
+            project_path: "/tmp/project".into(),
+            provider: ProviderId::new("anthropic"),
+            model: "claude-fable-5".into(),
+            timestamp_ms: 1_700_000_000_000,
+            input: 3,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: None,
+        };
+        assert!(store.insert_usage_event(&event).unwrap());
+        assert!(!store.insert_usage_event(&event).unwrap());
+        let zero = crate::usage_history::UsageEvent {
+            input: 0,
+            output: 0,
+            event_id: Uuid::from_u128(9),
+            ..event.clone()
+        };
+        assert!(!store.insert_usage_event(&zero).unwrap());
+        let rows = store
+            .usage_events_between(1_700_000_000_000, 1_700_000_000_000)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id, event.event_id);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn usage_events_survive_session_removal_and_store_reopen() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let session_id = state.sessions[0].id;
+        let event = crate::usage_history::UsageEvent {
+            event_id: Uuid::from_u128(11),
+            session_id,
+            project_path: "/tmp/project".into(),
+            provider: ProviderId::new("openai-responses"),
+            model: "gpt-5.3".into(),
+            timestamp_ms: 1_700_000_000_100,
+            input: 2,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: None,
+        };
+        store.save(&mut state).unwrap();
+        assert!(store.insert_usage_event(&event).unwrap());
+        state.sessions.clear();
+        store.save(&mut state).unwrap();
+        let reader = store_in(&directory);
+        let rows = reader.usage_events_between(0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id, event.event_id);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn usage_events_keep_independent_provider_rows() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        for (index, provider) in ["anthropic", "openai-responses", "xai"]
+            .into_iter()
+            .enumerate()
+        {
+            let event = crate::usage_history::UsageEvent {
+                event_id: Uuid::from_u128(20 + index as u128),
+                session_id: Uuid::from_u128(30),
+                project_path: "/tmp/project".into(),
+                provider: ProviderId::new(provider),
+                model: "model".into(),
+                timestamp_ms: 1_700_000_000_200 + index as i64,
+                input: 1,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: None,
+            };
+            assert!(store.insert_usage_event(&event).unwrap());
+        }
+        let rows = store.usage_events_between(0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 3);
         fs::remove_dir_all(directory).ok();
     }
 
@@ -3505,5 +3828,30 @@ mod tests {
         assert!(state.projects.is_empty());
         assert!(state.selected_session.is_none());
         fs::remove_dir_all(directory).ok();
+    }
+    #[test]
+    fn legacy_runtime_mode_json_migrates_plan_and_auto() {
+        let mut plan = serde_json::json!({"runtimeMode":"plan","interactionMode":"build"});
+        waku_protocol::model::migrate_legacy_session_fields(&mut plan);
+        assert_eq!(plan["runtimeMode"], "ask");
+        assert_eq!(plan["interactionMode"], "plan");
+
+        let mut auto = serde_json::json!({"runtimeMode":"auto"});
+        waku_protocol::model::migrate_legacy_session_fields(&mut auto);
+        assert_eq!(auto["runtimeMode"], "ask");
+
+        let mut missing = serde_json::json!({"title":"t"});
+        waku_protocol::model::migrate_legacy_session_fields(&mut missing);
+        assert_eq!(missing["runtimeMode"], "ask");
+
+        assert!(
+            serde_json::from_value::<waku_protocol::model::RuntimeMode>(serde_json::json!("plan"))
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_value::<waku_protocol::model::RuntimeMode>(serde_json::json!("ask"))
+                .unwrap(),
+            waku_protocol::model::RuntimeMode::Ask
+        );
     }
 }

@@ -212,21 +212,17 @@ describe('desktop transcript language', () => {
     expect(assistantResponseFooters(session).size).toBe(0)
   })
 
-  test('offers prior-message rewind only from a daemon checkpoint and resumable provider', () => {
+  test('offers prior-message rewind when the daemon has a checkpoint', () => {
     const session = transcriptSession()
-    session.provider_cursor = { provider: 'codex', threadId: 'thread' }
     const firstMessage = session.messages[0]!
 
     expect(userMessageRewindTurnCount(session, firstMessage, new Set([0]))).toBe(1)
     expect(userMessageRewindTurnCount(session, firstMessage, new Set())).toBeNull()
 
-    session.provider_cursor = null
-    expect(userMessageRewindTurnCount(session, firstMessage, new Set([0]))).toBeNull()
-
-    session.provider_cursor = { provider: 'codex', threadId: 'thread' }
     session.status = 'working'
     expect(userMessageRewindTurnCount(session, firstMessage, new Set([0]))).toBeNull()
   })
+
 })
 
 function transcriptSession(): AgentSession {
@@ -240,7 +236,6 @@ function transcriptSession(): AgentSession {
     status: 'idle',
     created_at: 10,
     updated_at: 200,
-    provider_cursor: null,
     turns: [turn('completed', 100, 200)],
     queued_messages: [],
     transcript_blocks: [{

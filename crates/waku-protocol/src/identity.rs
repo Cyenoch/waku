@@ -14,3 +14,6 @@ pub const APP_ID: &str = "sh.waku";
 pub const DATA_DIRECTORY_NAME: &str = "Waku Debug";
 #[cfg(not(debug_assertions))]
 pub const DATA_DIRECTORY_NAME: &str = "Waku";
+
+/// Workspace crate version used for Codex client_version/version headers.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

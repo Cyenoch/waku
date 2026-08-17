@@ -118,14 +118,12 @@ settings.usage:
   en: Usage
 settings.daemon:
   en: Daemon
-settings.computer_use:
-  en: Computer Use
 settings.general_keywords:
   en: general local projects conversations privacy analytics telemetry anonymous sharing updates automatic sparkle version
 settings.appearance_keywords:
   en: appearance theme system light dark language english chinese simplified
 settings.providers_keywords:
-  en: providers agents models cli version install detect claude codex cursor opencode amp grok pi
+  en: providers endpoint model api format headers
 settings.skills:
   en: Skills
 settings.skills_keywords:
@@ -134,8 +132,6 @@ settings.usage_keywords:
   en: usage tokens cost spend cache daily chart model breakdown history claude codex
 settings.daemon_keywords:
   en: daemon server remote web network expose origin token port websocket
-settings.computer_use_keywords:
-  en: computer use screen recording accessibility apps control codex
 settings.back:
   en: Back
 settings.search:
@@ -333,9 +329,27 @@ settings.share_anonymous_usage_data_description:
 providers.coding_agents:
   en: Coding agents
 providers.description:
-  en: Waku drives agent CLIs installed on this Mac. Install or sign in with each agent's own CLI, then refresh
+  en: Configure model endpoints directly. API key values are never displayed or stored by Waku.
 providers.web_description:
-  en: Waku drives agent CLIs installed on the daemon host. Install or sign in with each agent's own CLI, then refresh
+  en: Configure model endpoints directly on the daemon host. API key values are never displayed or stored by Waku.
+providers.catalog_models:
+  en: Models from live catalog
+providers.not_authenticated:
+  en: Not connected
+providers.api_key_placeholder:
+  en: Enter API key (cleared after submission)
+providers.connect:
+  en: Connect
+providers.sign_in:
+  en: Sign in
+providers.logout:
+  en: Log out
+providers.browser_waiting:
+  en: Finish sign-in in your system browser
+providers.open_browser:
+  en: Open browser
+providers.use_device_code:
+  en: Use device code instead
 providers.check_failed:
   en: "Could not check %{command}: %{error}"
 providers.show_settings:
@@ -352,58 +366,6 @@ providers.model_count_one:
   en: "%{count} model"
 providers.model_count_many:
   en: "%{count} models"
-providers.not_detected_as:
-  en: Not detected on PATH as %{command}
-providers.using_override:
-  en: Using %{path} instead of PATH detection
-providers.invalid_override:
-  en: Nothing runnable at this path. Clear it to detect from PATH
-providers.detected_at:
-  en: Detected at %{path}
-providers.detected_as:
-  en: Detected as %{command}
-providers.searches_path:
-  en: Waku did not detect %{command} in PATH
-providers.binary_path:
-  en: Binary path
-providers.binary_path_description:
-  en: The executable Waku launches for %{provider}. Press Return to apply; leave empty to detect from PATH
-providers.checked_just_now:
-  en: Checked just now
-providers.checked_minutes_ago:
-  en: Checked %{count}m ago
-providers.checked_hours_ago:
-  en: Checked %{count}h ago
-
-computer_use.allow_apps:
-  en: Let Waku use apps
-computer_use.availability:
-  en: Computer Use is available with Codex, OpenCode, Grok, and Pi
-computer_use.macos_access:
-  en: macOS access
-computer_use.helper_access:
-  en: Grant access to %{helper}, Waku's isolated control helper
-computer_use.screen_recording:
-  en: Screen Recording
-computer_use.screen_recording_description:
-  en: Captures only the approved app window
-computer_use.accessibility:
-  en: Accessibility
-computer_use.accessibility_description:
-  en: Posts pointer and keyboard events after approval
-computer_use.always_allowed_apps:
-  en: Always allowed apps
-computer_use.always_allowed_apps_description:
-  en: Waku pins these grants to the app's bundle ID and signing team
-computer_use.no_always_allowed_apps:
-  en: No apps are always allowed. Task-scoped grants stay in memory only
-computer_use.access_granted:
-  en: Access Granted
-computer_use.grant_access:
-  en: Grant Access
-computer_use.permission_check_failed:
-  en: Could not check Computer Use permissions
-
 common.settings:
   en: Settings
 common.copy:
@@ -765,8 +727,6 @@ mode.supervised:
   en: Supervised
 mode.auto_accept_edits:
   en: Auto-accept edits
-mode.auto:
-  en: Auto
 mode.full_access:
   en: Full access
 mode.plan_description:
@@ -775,61 +735,10 @@ mode.supervised_description:
   en: Ask before commands and file changes
 mode.auto_accept_edits_description:
   en: Auto-approve edits, ask before other actions
-mode.auto_description:
-  en: An AI reviewer approves routine actions; risky ones still ask
 mode.full_access_description:
   en: Allow commands and edits without prompts
 mode.switch_to:
   en: Switch to %{mode}
-
-agent_preset.standard:
-  en: Standard mode
-agent_preset.code:
-  en: Code mode
-agent_preset.minimal:
-  en: Minimal mode
-agent_preset.creator:
-  en: Creator mode
-agent_preset.standard_description:
-  en: Full coding agent with file editing, shell, file and web search, skills, planning, goals, subagents, and workflows.
-agent_preset.code_description:
-  en: All Standard mode capabilities, with tools exposed through the Code Mode SDK so the model can combine multi-step operations in one TypeScript program.
-agent_preset.minimal_description:
-  en: Two-tool coding agent with persistent bash and str_replace_editor.
-agent_preset.creator_description:
-  en: Built for creating custom agent presets, with all Standard mode capabilities plus runtime inspection, plugin experiments, and preset-authoring guidance.
-agent_preset.custom:
-  en: Custom
-agent_preset.no_description:
-  en: No description.
-agent_preset.minimal_no_plan:
-  en: Minimal mode does not include Plan
-
-computer_use.allow_for_task:
-  en: Allow for task
-computer_use.always_allow_app:
-  en: Always allow app
-computer_use.allow_control:
-  en: Allow Waku to control %{app}?
-computer_use.screenshot_shared:
-  en: A screenshot of this window will be shared with the active Codex model
-computer_use.sensitive_action:
-  en: This action can type text or press keys
-computer_use.bundle_id:
-  en: "Bundle ID: %{id}"
-computer_use.no_bundle_id:
-  en: This app has no bundle identifier, so it cannot be always allowed
-computer_use.stopped:
-  en: Stopped
-computer_use.controlling:
-  en: Controlling
-computer_use.captured:
-  en: Captured
-computer_use.take_control:
-  en: Take Control
-computer_use.preparing_preview:
-  en: Preparing preview…
-
 common.deny:
   en: Deny
 permission.allow_once:
@@ -885,11 +794,25 @@ models.reasoning:
   en: Reasoning
 models.service_tier:
   en: Service Tier
+models.catalog_loading:
+  en: Loading model catalog…
+models.catalog_error:
+  en: Model catalog unavailable
+models.catalog_live:
+  en: live
+models.catalog_cache:
+  en: cached
+models.catalog_seed:
+  en: built-in
+models.unsupported:
+  en: unsupported
 models.context_window:
   en: Context Window
 
 model_option.none:
   en: None
+model_option.none_description:
+  en: Do not send a service-tier override
 model_option.minimal:
   en: Minimal
 model_option.low:
@@ -911,13 +834,21 @@ model_option.context_200k:
 model_option.context_1m:
   en: 1M
 model_option.auto:
-  en: Auto
-model_option.fast:
-  en: Fast
-model_option.amp_fast_description:
-  en: Use Amp's faster serving tier at a higher usage rate
-model_option.fast_description:
-  en: Faster responses at a higher usage rate
+  en: Automatic routing
+model_option.auto_description:
+  en: Let the provider choose the serving tier
+model_option.default:
+  en: Default
+model_option.default_description:
+  en: Use the provider's standard serving tier
+model_option.flex:
+  en: Flex
+model_option.flex_description:
+  en: Trade latency for lower usage cost when available
+model_option.priority:
+  en: Priority
+model_option.priority_description:
+  en: Prefer faster serving at a higher usage rate
 
 command_scope.project:
   en: project
@@ -1278,8 +1209,6 @@ errors.answer_provider_question:
   en: "Could not answer %{provider}'s question: %{error}"
 errors.initialize_codex_app_server:
   en: Failed to initialize Codex app-server
-errors.register_computer_use_skill:
-  en: Failed to register Waku Computer Use skill with Codex
 errors.codex_thread_open_incomplete:
   en: Codex did not finish opening its thread
 errors.provider_receive_prompt:
@@ -1767,8 +1696,6 @@ duration.hours_short:
 duration.two_units:
   en: "%{first} %{second}"
 
-usage.scan_summary:
-  en: Scanned %{scanned} transcripts (%{skipped} outside the window) · %{records} usage records · %{seconds}s
 usage.daily:
   en: Daily
 usage.monthly:
@@ -1776,9 +1703,9 @@ usage.monthly:
 usage.projects:
   en: Projects
 usage.scanning:
-  en: Scanning provider transcripts…
+  en: Loading usage…
 usage.rescan:
-  en: Rescan provider transcripts
+  en: Refresh usage
 usage.range:
   en: "%{start} to %{end}"
 usage.full_api_rate_note:
@@ -1916,7 +1843,7 @@ usage.active_day_many:
 usage.filter_projects:
   en: Filter projects…
 usage.chart_description:
-  en: Daily %{metric} split between Claude Code and Codex.
+  en: Daily %{metric} by provider.
 
 usage.refresh_failed:
   en: "Usage refresh failed: %{error}"
@@ -1965,63 +1892,23 @@ usage.resets_in_hours_minutes:
 usage.resets_date:
   en: Resets %{date}
 
-usage_error.signin_cannot_read:
-  en: "%{provider} sign-in can't read usage (HTTP %{status}). Running a %{provider} turn refreshes it"
-usage_error.rate_limited:
-  en: The usage endpoint is rate limited right now
-usage_error.http_status:
-  en: The usage endpoint answered HTTP %{status}
-usage_error.invalid_json:
-  en: The usage endpoint returned invalid JSON
-usage_error.no_home_directory:
-  en: No home directory
-usage_error.read_file:
-  en: Failed to read %{path}
-usage_error.codex_auth_invalid:
-  en: Codex auth.json is not JSON
-usage_error.codex_access_token_missing:
-  en: Codex auth.json has no access token; run `codex login`
-usage_error.opencode_go_key_rejected:
-  en: OpenCode Go API key can't read usage (HTTP %{status}); reconnect OpenCode Go
-usage_error.no_rate_limit_windows:
-  en: The usage endpoint reported no rate-limit windows
-usage_error.start_grok_probe:
-  en: Failed to start `grok agent stdio`
-usage_error.grok_stdin_unavailable:
-  en: Grok stdin is unavailable
-usage_error.grok_stdout_unavailable:
-  en: Grok stdout is unavailable
-usage_error.start_grok_reader:
-  en: Failed to start the Grok probe reader
-usage_error.grok_billing_timeout:
-  en: Grok did not answer the billing request in time
-usage_error.grok_answered:
-  en: "Grok answered: %{error}"
-usage_error.grok_no_billing_data:
-  en: Grok reported no billing data; run `grok` to sign in
-usage_error.claude_credentials_missing:
-  en: No Claude Code credentials in the keychain or ~/.claude
-usage_error.run_security:
-  en: Failed to run /usr/bin/security
-usage_error.keychain_item_missing:
-  en: The keychain has no %{service} item
-usage_error.claude_credentials_invalid:
-  en: Claude Code credentials are not JSON
-usage_error.claude_oauth_missing:
-  en: Claude Code credentials have no claudeAiOauth entry
-usage_error.claude_access_token_missing:
-  en: Claude Code credentials have no access token
-usage_error.run_curl:
-  en: Failed to run /usr/bin/curl
-usage_error.curl_stdin_unavailable:
-  en: curl stdin is unavailable
-usage_error.configure_curl:
-  en: Failed to pass the configuration to curl
-usage_error.curl_did_not_finish:
-  en: curl did not finish
-usage_error.curl_failed:
-  en: "curl failed: %{error}"
-usage_error.unknown_error:
-  en: unknown error
-usage_error.curl_no_status:
-  en: curl returned no HTTP status line
+
+providers.default_model:
+  en: Default model
+
+providers.duplicate_id:
+  en: Provider ID is already in use
+providers.in_use:
+  en: Provider is referenced by a session or favorite
+
+providers.duplicate_models:
+  en: Duplicate model IDs are not allowed
+
+providers.invalid_context_window:
+  en: Context window must be a positive integer
+providers.invalid_max_output_tokens:
+  en: Maximum output tokens must be a positive integer
+providers.invalid_header_format:
+  en: "Each header must use Name: value"
+providers.invalid_headers:
+  en: "Headers must be non-empty, unique, and cannot use reserved names: Authorization, x-api-key, Host, Content-Length, Content-Type, Anthropic-Version"

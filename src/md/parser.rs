@@ -77,6 +77,7 @@ enum InlinePiece {
 
 /// A markdown block. Containers nest.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 pub enum Block {
     Paragraph {
         runs: Vec<InlineRun>,
@@ -1086,9 +1087,8 @@ mod tests {
         let Block::Paragraph { runs } = &parser.tree().blocks[0].block else {
             panic!("expected a paragraph");
         };
-        assert_eq!(
-            runs.iter().find(|run| run.style.link.is_some()).is_some(),
-            true,
+        assert!(
+            runs.iter().any(|run| run.style.link.is_some()),
             "the definition should resolve the earlier reference"
         );
     }

@@ -2,9 +2,9 @@ use anyhow::{Context as _, anyhow, bail};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::WireDriverEvent;
-use crate::computer_use::{ComputerTarget, ComputerUsePhase, ComputerUseState};
 use crate::model::{ActivityKind, DriverEvent, PermissionOption, UserInputQuestion};
 
 pub fn decode_enum<T: DeserializeOwned>(value: &str) -> anyhow::Result<T> {
@@ -24,16 +24,8 @@ pub fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
         DriverEvent::RuntimeEventCursorAdvanced(_) => {
             bail!("client-only runtime cursors cannot be sent by the daemon")
         }
-        DriverEvent::Connected { provider_cursor } => {
-            ("connected", serde_json::to_value(provider_cursor)?)
-        }
-        DriverEvent::AgentPresetSelected(preset) => {
-            ("agentPresetSelected", serde_json::to_value(preset)?)
-        }
+        DriverEvent::Connected => ("connected", Value::Null),
         DriverEvent::AutoTitleUpdated(title) => ("autoTitleUpdated", serde_json::to_value(title)?),
-        DriverEvent::AvailableCommands(commands) => {
-            ("availableCommands", serde_json::to_value(commands)?)
-        }
         DriverEvent::TurnStarted => ("turnStarted", Value::Null),
         DriverEvent::TextDelta(text) => ("textDelta", Value::String(text)),
         DriverEvent::ReasoningDelta(text) => ("reasoningDelta", Value::String(text)),
@@ -79,31 +71,39 @@ pub fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
                 "questions": questions,
             }),
         ),
-        DriverEvent::ComputerUseUpdated(state) => (
-            "computerUseUpdated",
-            serde_json::to_value(ComputerUseWire {
-                target: state.target,
-                phase: state.phase,
-                visible: state.visible,
-                image_url: state.image_url,
-            })?,
-        ),
         DriverEvent::SteerAccepted { message } => ("steerAccepted", json!({ "message": message })),
         DriverEvent::SteerRejected { message, reason } => (
             "steerRejected",
             json!({ "message": message, "reason": reason }),
         ),
         DriverEvent::UsageUpdated {
+            event_id,
+            provider,
+            model,
+            timestamp_ms,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            reasoning,
             context_tokens,
             context_window,
         } => (
             "usageUpdated",
             json!({
+                "eventId": event_id,
+                "provider": provider,
+                "model": model,
+                "timestampMs": timestamp_ms,
+                "input": input,
+                "output": output,
+                "cacheRead": cache_read,
+                "cacheWrite": cache_write,
+                "reasoning": reasoning,
                 "contextTokens": context_tokens,
                 "contextWindow": context_window,
             }),
         ),
-        DriverEvent::PlanUsageUpdated(usage) => ("planUsageUpdated", serde_json::to_value(usage)?),
         DriverEvent::TurnFinished { success, summary } => (
             "turnFinished",
             json!({ "success": success, "summary": summary }),
@@ -117,12 +117,8 @@ pub fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
 pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
     let payload = event.payload;
     Ok(match event.kind.as_str() {
-        "connected" => DriverEvent::Connected {
-            provider_cursor: serde_json::from_value(payload)?,
-        },
-        "agentPresetSelected" => DriverEvent::AgentPresetSelected(serde_json::from_value(payload)?),
+        "connected" => DriverEvent::Connected,
         "autoTitleUpdated" => DriverEvent::AutoTitleUpdated(serde_json::from_value(payload)?),
-        "availableCommands" => DriverEvent::AvailableCommands(serde_json::from_value(payload)?),
         "turnStarted" => DriverEvent::TurnStarted,
         "textDelta" => DriverEvent::TextDelta(serde_json::from_value(payload)?),
         "reasoningDelta" => DriverEvent::ReasoningDelta(serde_json::from_value(payload)?),
@@ -154,15 +150,6 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
                 questions: request.questions,
             }
         }
-        "computerUseUpdated" => {
-            let state: ComputerUseWire = serde_json::from_value(payload)?;
-            DriverEvent::ComputerUseUpdated(ComputerUseState {
-                target: state.target,
-                phase: state.phase,
-                visible: state.visible,
-                image_url: state.image_url,
-            })
-        }
         "steerAccepted" => {
             let steer: AcceptedSteerWire = serde_json::from_value(payload)?;
             DriverEvent::SteerAccepted {
@@ -179,11 +166,19 @@ pub fn event_from_wire(event: WireDriverEvent) -> anyhow::Result<DriverEvent> {
         "usageUpdated" => {
             let usage: UsageWire = serde_json::from_value(payload)?;
             DriverEvent::UsageUpdated {
+                event_id: usage.event_id,
+                provider: usage.provider,
+                model: usage.model,
+                timestamp_ms: usage.timestamp_ms,
+                input: usage.input,
+                output: usage.output,
+                cache_read: usage.cache_read,
+                cache_write: usage.cache_write,
+                reasoning: usage.reasoning,
                 context_tokens: usage.context_tokens,
                 context_window: usage.context_window,
             }
         }
-        "planUsageUpdated" => DriverEvent::PlanUsageUpdated(serde_json::from_value(payload)?),
         "turnFinished" => {
             let finished: TurnFinishedWire = serde_json::from_value(payload)?;
             DriverEvent::TurnFinished {
@@ -223,15 +218,6 @@ struct UserInputWire {
     questions: Vec<UserInputQuestion>,
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ComputerUseWire {
-    target: Option<ComputerTarget>,
-    phase: ComputerUsePhase,
-    visible: bool,
-    image_url: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct AcceptedSteerWire {
     message: String,
@@ -246,6 +232,15 @@ struct RejectedSteerWire {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UsageWire {
+    event_id: Uuid,
+    provider: crate::ProviderId,
+    model: String,
+    timestamp_ms: i64,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    reasoning: Option<u64>,
     context_tokens: Option<u64>,
     context_window: Option<u64>,
 }
@@ -259,7 +254,9 @@ struct TurnFinishedWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WireDriverEvent;
     use crate::model::{UserInputOption, UserInputQuestion};
+    use serde_json::json;
 
     #[test]
     fn structured_user_input_round_trips_through_the_daemon_wire() {
@@ -289,5 +286,15 @@ mod tests {
         assert_eq!(request_id, "request-1");
         assert_eq!(questions[0].id, "deployment");
         assert_eq!(questions[0].options[0].label, "Preview");
+    }
+
+    #[test]
+    fn plan_usage_updated_is_not_a_driver_event() {
+        let error = event_from_wire(WireDriverEvent::new(
+            "planUsageUpdated",
+            json!({ "planLabel": "plus", "windows": [] }),
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("unsupported"), "{error}");
     }
 }

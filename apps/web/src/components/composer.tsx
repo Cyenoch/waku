@@ -1,14 +1,11 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { Popover } from '@base-ui/react/popover'
 import type {
   AgentSession,
   BranchSnapshot,
   ComposerDraft,
   MessageAttachment,
-  PlanUsage,
   Project,
-  ProviderModel,
-  ProviderProbe,
 } from '@waku/client'
 import {
   useEffect,
@@ -31,14 +28,13 @@ import {
   useComposerCommands,
   useComposerFiles,
   useDaemonSettings,
-  useProviderProbe,
+  useModelCatalog,
   useWorkspaceBranches,
 } from '@/hooks/use-daemon-data'
 import { importDaemonPathAttachment, importFiles, readAttachmentImage } from '@/lib/attachments'
 import {
   checkoutWorkspaceBranch,
   daemonKeys,
-  fetchPlanUsage,
   selectableProjects,
   sessionCwd,
 } from '@/lib/daemon-api'
@@ -48,16 +44,13 @@ import {
   composerAutocompleteRows,
   detectComposerTrigger,
   expandedComposerSubmission,
-  isFastModeToggleSubmission,
   mergeComposerCommands,
   replaceComposerTrigger,
-  toggledFastServiceTier,
   type ComposerAutocompleteRow,
 } from '@/lib/composer-autocomplete'
 import {
   browserComposerPreferenceStorage,
   readComposerPreferences,
-  rememberedModelTraits,
   rememberComposerSession,
   writeComposerPreferences,
 } from '@/lib/composer-preferences'
@@ -67,12 +60,12 @@ import {
   sameEscapeStopArm,
   type EscapeStopArm,
 } from '@/lib/escape-stop'
+import { type PendingUserInput } from '@/lib/event-reducer'
 import { usePrimaryShortcut } from '@/lib/platform'
-import { agentPresetDescription, agentPresetLabel } from '@/lib/agent-preset-presentation'
 import { isProjectlessProject, projectDisplayName } from '@/lib/project-presentation'
-import type { PendingUserInput } from '@/lib/event-reducer'
 import { useRuntime } from '@/lib/runtime-context'
 import { sessionHasStarted } from '@/lib/sidebar-presentation'
+import { SERVICE_TIER_OPTIONS, serviceTierForModel } from '@/lib/service-tier'
 import { cn } from '@/lib/utils'
 
 type Translator = (key: string, params?: Record<string, string | number>) => string
@@ -166,11 +159,12 @@ export function Composer({
     userInputs,
     runtimes,
   } = useRuntime()
-  const probe = useProviderProbe(session.provider)
   const cwd = sessionCwd(session, project)
   const branches = useWorkspaceBranches(cwd)
   const composerFiles = useComposerFiles(cwd)
   const composerCommands = useComposerCommands(session.provider, cwd)
+  const modelCatalog = useModelCatalog(session.provider)
+  const daemonSettings = useDaemonSettings()
   const [prompt, setPrompt] = useState(initialComposerDraft?.text ?? '')
   const [attachments, setAttachments] = useState<MessageAttachment[]>(
     () => initialComposerDraft?.attachments ?? [],
@@ -198,9 +192,6 @@ export function Composer({
   const permission = permissions[session.id]
   const userInput = userInputs[session.id]
   const runtime = runtimes[session.id]
-  const selectedModel = probe.data?.models.find((model) => model.id === session.model)
-    ?? probe.data?.models.find((model) => model.is_default)
-    ?? probe.data?.models[0]
   const hasDraft = Boolean(prompt.trim() || attachments.length)
   const canSteer = busy && session.status !== 'connecting' && runtime?.supportsSteer
   const workspace = session.workspace ?? { kind: 'local' as const }
@@ -215,7 +206,7 @@ export function Composer({
       : t('workspace.local')
   const availableCommands = mergeComposerCommands(
     composerCommands.data ?? [],
-    session.available_commands ?? [],
+    [],
   )
   const autocompleteTrigger = inputFocused ? detectComposerTrigger(prompt, cursor) : null
   const autocompleteKey = autocompleteTrigger
@@ -349,26 +340,8 @@ export function Composer({
     ].filter(Boolean).join(' ')
   }
 
-  function executeLocalComposerCommand(submittedPrompt = prompt): boolean {
-    if (!isFastModeToggleSubmission(session.provider, submittedPrompt, availableCommands)) return false
-    const nextTier = toggledFastServiceTier(
-      session.service_tier,
-      selectedModel?.service_tiers ?? [],
-    )
-    if (!nextTier) return false
-    const enabled = nextTier !== 'default'
-    setPrompt('')
-    setCursor(0)
-    setDismissedAutocomplete(null)
-    setAutocompleteSelection({ key: '', index: 0 })
-    savePatch({ service_tier: nextTier })
-    toast.success(t(enabled ? 'commands.fast_enabled' : 'commands.fast_disabled'))
-    return true
-  }
-
   async function submit() {
     if (submitting || (!prompt.trim() && attachments.length === 0)) return
-    if (executeLocalComposerCommand()) return
     const submittedPrompt = prompt
     const submittedAttachments = attachments
     let cleared = false
@@ -407,7 +380,6 @@ export function Composer({
 
   async function steer() {
     if (!hasDraft || !canSteer) return
-    if (executeLocalComposerCommand()) return
     const submittedPrompt = prompt
     const submittedAttachments = attachments
     let cleared = false
@@ -469,9 +441,16 @@ export function Composer({
       setUploading(false)
     }
   }
-
   function savePatch(patch: Partial<AgentSession>) {
-    const next = { ...session, ...patch, updated_at: Math.floor(Date.now() / 1_000) }
+    const candidate = { ...session, ...patch }
+    const next = {
+      ...candidate,
+      service_tier: serviceTierForModel(
+        modelCatalog.data?.models.find((model) => model.id === candidate.model),
+        candidate.service_tier,
+      ),
+      updated_at: Math.floor(Date.now() / 1_000),
+    }
     if (config && next.model) {
       const storage = browserComposerPreferenceStorage()
       const preferences = rememberComposerSession(
@@ -489,7 +468,6 @@ export function Composer({
     const row = autocompleteRows[index]
     if (!row) return
     const replacement = replaceComposerTrigger(prompt, autocompleteTrigger, row)
-    if (row.kind === 'command' && executeLocalComposerCommand(replacement.text)) return
     pendingCursor.current = replacement.cursor
     setPrompt(replacement.text)
     setDismissedAutocomplete(null)
@@ -686,42 +664,16 @@ export function Composer({
             onMouseDown={preserveComposerFocusOnMouseDown}
           >
             <ModelPicker
-              currentProbe={probe.data}
               openSignal={modelPickerSignal}
               onOpenSignalHandled={onModelPickerSignalHandled}
               returnFocus={composerInput}
               session={session}
               onChange={(provider, model) => {
-                const preferences = config
-                  ? readComposerPreferences(browserComposerPreferenceStorage(), config.address)
-                  : null
-                const remembered = preferences
-                  ? rememberedModelTraits(preferences, provider, model.id)
-                  : undefined
-                savePatch({
-                  provider,
-                  model: model.id,
-                  reasoning_effort: remembered?.reasoningEffort
-                    ?? model.default_reasoning_effort
-                    ?? null,
-                  service_tier: remembered?.serviceTier
-                    ?? model.default_service_tier
-                    ?? null,
-                  agent_preset: provider === session.provider ? session.agent_preset : null,
-                })
+                savePatch({ provider, model: model.id })
               }}
             />
-            {selectedModel && (
-              <ModelTraitsControl
-                model={selectedModel}
-                returnFocus={composerInput}
-                session={session}
-                onPatch={savePatch}
-              />
-            )}
-            <AgentPresetControl
-              probe={probe.data}
-              returnFocus={composerInput}
+            <ServiceTierControl
+              model={modelCatalog.data?.models.find((candidate) => candidate.id === session.model)}
               session={session}
               onPatch={savePatch}
             />
@@ -858,7 +810,6 @@ export function Composer({
           {runtime?.starting && <span>{t('composer.starting_agent')}</span>}
           <UsageMeter
             openSignal={usagePanelSignal}
-            providerVersion={probe.data?.version ?? null}
             returnFocus={composerInput}
             session={session}
             onOpenSignalHandled={onUsagePanelSignalHandled}
@@ -1200,146 +1151,14 @@ function ComposerAttachmentTile({
   )
 }
 
-function ModelTraitsControl({
-  session,
-  model,
-  onPatch,
-  returnFocus,
-}: {
-  session: AgentSession
-  model: ProviderModel
-  onPatch: (patch: Partial<AgentSession>) => void
-  returnFocus: RefObject<HTMLElement | null>
-}) {
-  const { t } = useI18n()
-  if (!model.reasoning_efforts.length && !model.service_tiers.length && !model.context_windows.length) {
-    return null
-  }
-  const effort = session.reasoning_effort
-    && model.reasoning_efforts.some((option) => option.id === session.reasoning_effort)
-    ? session.reasoning_effort
-    : model.default_reasoning_effort ?? model.reasoning_efforts[0]?.id ?? null
-  const effortOption = model.reasoning_efforts.find((option) => option.id === effort)
-  const effortLabel = effortOption && modelOptionLabel(effortOption.id, effortOption.label, t)
-  const tier = session.service_tier
-    && (session.service_tier === 'default' || model.service_tiers.some((option) => option.id === session.service_tier))
-    ? session.service_tier
-    : model.default_service_tier ?? 'default'
-  const tierLabel = tier === 'default'
-    ? t('models.standard')
-    : modelOptionLabel(tier, model.service_tiers.find((option) => option.id === tier)?.label ?? tier, t)
-  const fast = tier === 'fast' || tierLabel.toLowerCase() === 'fast'
-  const contextWindow = session.context_window
-    && model.context_windows.some((option) => option.id === session.context_window)
-    ? session.context_window
-    : model.default_context_window ?? model.context_windows[0]?.id ?? null
-  // A non-default window changes cost and capacity, so it reads on the trigger.
-  const windowOption = contextWindow && contextWindow !== model.default_context_window
-    ? model.context_windows.find((option) => option.id === contextWindow)
-    : undefined
-  const windowLabel = windowOption && modelOptionLabel(windowOption.id, windowOption.label, t)
-  const items: ControlMenuItem[] = [
-    ...model.reasoning_efforts.map((option) => ({
-      id: `effort-${option.id}`,
-      section: t('models.reasoning'),
-      label: modelOptionLabel(option.id, option.label, t),
-      description: option.description ?? undefined,
-      suffix: model.default_reasoning_effort === option.id ? t('common.default') : undefined,
-      selected: effort === option.id,
-      onSelect: () => onPatch({ reasoning_effort: option.id }),
-    })),
-    ...(model.service_tiers.length ? [
-      {
-        id: 'tier-default',
-        section: t('models.service_tier'),
-        label: t('models.standard'),
-        suffix: (model.default_service_tier ?? 'default') === 'default' ? t('common.default') : undefined,
-        selected: tier === 'default',
-        onSelect: () => onPatch({ service_tier: 'default' }),
-      },
-      ...model.service_tiers.map((option) => ({
-        id: `tier-${option.id}`,
-        section: t('models.service_tier'),
-        label: modelOptionLabel(option.id, option.label, t),
-        description: option.description ?? undefined,
-        suffix: model.default_service_tier === option.id ? t('common.default') : undefined,
-        selected: tier === option.id,
-        onSelect: () => onPatch({ service_tier: option.id }),
-      })),
-    ] : []),
-    ...model.context_windows.map((option) => ({
-      id: `context-${option.id}`,
-      section: t('models.context_window'),
-      label: modelOptionLabel(option.id, option.label, t),
-      description: option.description ?? undefined,
-      suffix: model.default_context_window === option.id ? t('common.default') : undefined,
-      selected: contextWindow === option.id,
-      onSelect: () => onPatch({ context_window: option.id }),
-    })),
-  ]
-  return (
-    <ControlMenu
-      caret={false}
-      icon={fast ? 'zap' : undefined}
-      items={items}
-      label={windowLabel ? `${effortLabel ?? tierLabel} · ${windowLabel}` : effortLabel ?? tierLabel}
-      menuClassName="w-56"
-      returnFocus={returnFocus}
-    />
-  )
-}
-
-function AgentPresetControl({
-  session,
-  probe,
-  onPatch,
-  returnFocus,
-}: {
-  session: AgentSession
-  probe?: ProviderProbe
-  onPatch: (patch: Partial<AgentSession>) => void
-  returnFocus: RefObject<HTMLElement | null>
-}) {
-  const { t } = useI18n()
-  if (
-    session.provider !== 'deepSeek'
-      || sessionHasStarted(session)
-      || session.status !== 'idle'
-      || !probe?.agent_presets.length
-  ) return null
-  const selected = probe.agent_presets.find((preset) => preset.id === session.agent_preset)
-    ?? probe.agent_presets.find((preset) => preset.is_default)
-    ?? probe.agent_presets[0]
-  return (
-    <ControlMenu
-      caret={false}
-      icon="bot"
-      items={probe.agent_presets.map((preset) => ({
-        id: preset.id,
-        label: `${agentPresetLabel(preset, t)}${preset.is_custom ? ` · ${t('agent_preset.custom')}` : ''}`,
-        description: agentPresetDescription(preset, t) ?? t('agent_preset.no_description'),
-        selected: preset.id === selected?.id,
-        onSelect: () => onPatch({
-          agent_preset: preset.id,
-          ...(preset.id === 'minimal' ? { interaction_mode: 'build' as const } : {}),
-        }),
-      }))}
-      label={selected ? agentPresetLabel(selected, t) : t('agent_preset.standard')}
-      menuClassName="w-80"
-      returnFocus={returnFocus}
-    />
-  )
-}
-
 const ACCESS_MODES: Array<{
-  id: Exclude<AgentSession['runtime_mode'], 'plan'>
+  id: AgentSession['runtime_mode']
   labelKey: string
   descriptionKey: string
-  icon: 'lock' | 'pencil' | 'sparkle' | 'lockOpen'
+  icon: 'lock' | 'pencil' | 'lockOpen'
 }> = [
   { id: 'ask', labelKey: 'mode.supervised', descriptionKey: 'mode.supervised_description', icon: 'lock' },
   { id: 'autoAcceptEdits', labelKey: 'mode.auto_accept_edits', descriptionKey: 'mode.auto_accept_edits_description', icon: 'pencil' },
-  { id: 'auto', labelKey: 'mode.auto', descriptionKey: 'mode.auto_description', icon: 'sparkle' },
   { id: 'fullAccess', labelKey: 'mode.full_access', descriptionKey: 'mode.full_access_description', icon: 'lockOpen' },
 ]
 
@@ -1353,8 +1172,7 @@ function AccessControl({
   returnFocus: RefObject<HTMLElement | null>
 }) {
   const { t } = useI18n()
-  const selectedId = session.runtime_mode === 'plan' ? 'ask' : session.runtime_mode
-  const selected = ACCESS_MODES.find((mode) => mode.id === selectedId) ?? ACCESS_MODES[3]!
+  const selected = ACCESS_MODES.find((mode) => mode.id === session.runtime_mode) ?? ACCESS_MODES[0]!
   return (
     <ControlMenu
       caret={false}
@@ -1383,24 +1201,62 @@ function InteractionModeControl({
 }) {
   const { t } = useI18n()
   const plan = session.interaction_mode === 'plan'
-  const minimal = session.provider === 'deepSeek' && session.agent_preset === 'minimal'
-  const interactive = plan || !minimal
   return (
     <button
       aria-label={t('mode.switch_to', { mode: t(plan ? 'mode.build' : 'mode.plan') })}
       className={cn(
         'flex h-6 shrink-0 items-center gap-1.5 rounded-md px-[7px] text-[11.5px] text-[var(--text-secondary)] outline-none focus-visible:ring-1 focus-visible:ring-ring',
         plan && 'text-ring',
-        interactive ? 'hover:bg-accent' : 'opacity-50',
+        'hover:bg-accent',
       )}
-      disabled={!interactive}
-      title={minimal && !plan ? t('agent_preset.minimal_no_plan') : undefined}
       type="button"
       onClick={() => onPatch({ interaction_mode: plan ? 'build' : 'plan' })}
     >
       <WakuIcon className={cn('size-[10.5px] text-[var(--text-tertiary)]', plan && 'text-ring')} name={plan ? 'list' : 'wrench'} />
       {t(plan ? 'mode.plan' : 'mode.build')}
     </button>
+  )
+}
+
+function ServiceTierControl({
+  model,
+  session,
+  onPatch,
+}: {
+  model: Parameters<typeof serviceTierForModel>[0]
+  session: AgentSession
+  onPatch: (patch: Partial<AgentSession>) => void
+}) {
+  const { t } = useI18n()
+  const selected = serviceTierForModel(model, session.service_tier)
+  const selectedOption = SERVICE_TIER_OPTIONS.find((option) => option.value === selected) ?? null
+  if (!model?.capabilities.serviceTier) return null
+  return (
+    <ControlMenu
+      caret={false}
+      icon="gauge"
+      items={[
+        {
+          id: 'none',
+          label: t('model_option.none'),
+          description: t('model_option.none_description'),
+          selected: selected === null,
+          onSelect: () => onPatch({ service_tier: null }),
+        },
+        ...SERVICE_TIER_OPTIONS.map((option) => ({
+          id: option.value,
+          label: t(option.labelKey),
+          description: t(option.descriptionKey),
+          selected: option.value === selected,
+          onSelect: () => onPatch({ service_tier: option.value }),
+        })),
+      ]}
+      label={t('models.service_tier')}
+      menuClassName="w-[260px]"
+      selectionMode="choice"
+    >
+      <span className="truncate">{t('models.service_tier')}: {selectedOption ? t(selectedOption.labelKey) : t('model_option.none')}</span>
+    </ControlMenu>
   )
 }
 
@@ -1720,42 +1576,24 @@ function BranchPicker({
   )
 }
 
-const PLAN_USAGE_PROVIDERS: AgentSession['provider'][] = [
-  'claude',
-  'codex',
-  'openCode',
-  'grok',
-]
-
 function UsageMeter({
   session,
-  providerVersion,
   openSignal,
   onOpenSignalHandled,
   returnFocus,
 }: {
   session: AgentSession
-  providerVersion: string | null
   openSignal?: number
   onOpenSignalHandled?: () => void
   returnFocus: RefObject<HTMLElement | null>
 }) {
-  const { locale, t } = useI18n()
-  const { client, config } = useDaemon()
-  const settings = useDaemonSettings()
+  const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const usageShortcut = usePrimaryShortcut('⌘U', 'Ctrl+U')
   const context = session.context_usage
   const contextPercent = context?.window
     ? context.tokens * 100 / context.window
     : null
-  const supportsPlanUsage = PLAN_USAGE_PROVIDERS.includes(session.provider)
-  const plan = useQuery({
-    queryKey: daemonKeys.planUsage(config?.address ?? 'disconnected', session.provider),
-    queryFn: () => fetchPlanUsage(client!, session.provider, settings.data!, providerVersion),
-    enabled: open && Boolean(client && config && settings.data && supportsPlanUsage),
-    staleTime: 30_000,
-  })
 
   useEffect(() => {
     if (!openSignal) return
@@ -1763,10 +1601,7 @@ function UsageMeter({
     onOpenSignalHandled?.()
   }, [openSignal, onOpenSignalHandled])
 
-  const error = plan.error ? errorMessage(plan.error) : null
-  const tooltip = error
-    ? t('usage.refresh_failed', { error })
-    : contextPercent == null
+  const tooltip = contextPercent == null
       ? t('usage.shortcut', { shortcut: usageShortcut })
       : t('usage.context_used', { percent: contextPercent.toFixed(0), shortcut: usageShortcut })
 
@@ -1804,15 +1639,6 @@ function UsageMeter({
                 ? `${formatTokens(context.tokens)} / ${formatTokens(context.window)} (${contextPercent.toFixed(0)}%)`
                 : formatTokens(context?.tokens ?? 0)}
             />
-            {(plan.data || plan.isFetching || error) && <div className="h-px bg-border" />}
-            {plan.data && <PlanUsageLanes locale={locale} plan={plan.data} provider={session.provider} t={t} />}
-            {plan.isFetching && supportsPlanUsage && <UsageSkeleton t={t} />}
-            {error && (
-              <div className="space-y-1 text-[11px]">
-                <div className="text-[var(--text-tertiary)]">{t('usage.plan_limits')}</div>
-                <div className="break-words text-[var(--text-secondary)]">{t('usage.unavailable', { error })}</div>
-              </div>
-            )}
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>
@@ -1857,53 +1683,6 @@ function ContextGauge({ percent }: { percent: number | null }) {
   )
 }
 
-function PlanUsageLanes({
-  plan,
-  provider,
-  locale,
-  t,
-}: {
-  plan: PlanUsage
-  provider: AgentSession['provider']
-  locale: string
-  t: Translator
-}) {
-  const usageUrl = provider === 'claude'
-    ? 'https://claude.ai/settings/usage'
-    : provider === 'codex'
-      ? 'https://chatgpt.com/codex/settings/usage'
-      : null
-  const header = plan.planLabel
-    ? t('usage.plan_limits_named', { plan: plan.planLabel })
-    : t('usage.plan_limits')
-  return (
-    <>
-      {usageUrl ? (
-        <a
-          className="flex min-w-0 items-center gap-1 text-[11px] text-[var(--text-tertiary)] outline-none hover:text-[var(--text-secondary)] focus-visible:ring-1 focus-visible:ring-ring"
-          href={usageUrl}
-          rel="noreferrer"
-          target="_blank"
-        >
-          <span className="min-w-0 flex-1 truncate">{header}</span>
-          <WakuIcon className="size-2.5" name="arrowRight" />
-        </a>
-      ) : (
-        <div className="truncate text-[11px] text-[var(--text-tertiary)]">{header}</div>
-      )}
-      {plan.windows.map((window) => (
-        <UsageLane
-          key={`${window.label}-${window.resetsAt ?? 'none'}`}
-          label={window.label}
-          percent={window.percent}
-          reset={window.resetsAt == null ? undefined : resetLabel(window.resetsAt, locale, t)}
-          value={`${window.percent.toFixed(0)}%`}
-        />
-      ))}
-    </>
-  )
-}
-
 function UsageLane({
   label,
   percent,
@@ -1936,47 +1715,13 @@ function UsageLane({
   )
 }
 
-function UsageSkeleton({ t }: { t: Translator }) {
-  return (
-    <div aria-label={t('usage.plan_limits')} className="space-y-3" role="status">
-      <div className="h-2.5 w-24 rounded bg-accent motion-safe:animate-pulse" />
-      {[0, 1].map((row) => (
-        <div className="space-y-2" key={row}>
-          <div className="flex justify-between">
-            <div className="h-2.5 w-20 rounded bg-accent motion-safe:animate-pulse" />
-            <div className="h-2.5 w-10 rounded bg-accent motion-safe:animate-pulse" />
-          </div>
-          <div className="h-[3px] rounded-full bg-accent motion-safe:animate-pulse" />
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function resetLabel(resetsAt: number, locale: string, t: Translator) {
-  const seconds = resetsAt - Math.floor(Date.now() / 1_000)
-  if (seconds <= 0) return t('usage.resets_soon')
-  const minutes = Math.ceil(seconds / 60)
-  if (minutes < 60) return t('usage.resets_in_minutes', { count: minutes })
-  if (minutes < 24 * 60) {
-    const hours = Math.floor(minutes / 60)
-    const remainder = minutes % 60
-    return remainder
-      ? t('usage.resets_in_hours_minutes', { hours, minutes: remainder })
-      : t('usage.resets_in_hours', { count: hours })
-  }
-  return t('usage.resets_date', { date: new Intl.DateTimeFormat(locale, {
-    weekday: 'short',
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(new Date(resetsAt * 1_000)) })
-}
-
-function formatTokens(tokens: number) {
-  if (tokens >= 999_500) return `${(tokens / 1_000_000).toFixed(1)}M`
-  return tokens >= 1_000 ? `${(tokens / 1_000).toFixed(1)}k` : `${tokens}`
-}
-
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
+}
+
+function formatTokens(value: number) {
+  return new Intl.NumberFormat(undefined, {
+    notation: value >= 10_000 ? 'compact' : 'standard',
+    maximumFractionDigits: 1,
+  }).format(value)
 }

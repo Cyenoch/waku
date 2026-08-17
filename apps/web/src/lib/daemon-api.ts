@@ -7,12 +7,15 @@ import type {
   ComposerDraftChange,
   ComposerDrafts,
   DaemonSettings,
+  ProviderId,
+  AuthPhase,
+  LoginMethod,
+  ModelCatalog,
+  ProviderAuthStatus,
+  SecretString,
   FileEntry,
   MessageAttachment,
-  PlanUsage,
   Project,
-  ProviderKind,
-  ProviderProbe,
   ReviewDiffData,
   ReviewDiffSource,
   ResponsePayload,
@@ -37,12 +40,9 @@ export const daemonKeys = {
     ['daemon', address, 'session', sessionId] as const,
   settings: (address: string) => ['daemon', address, 'settings'] as const,
   providers: (address: string) => ['daemon', address, 'providers'] as const,
-  provider: (address: string, provider: ProviderKind, binaryOverride: string | null = null) =>
-    [...daemonKeys.providers(address), 'catalog', provider, binaryOverride] as const,
-  providerDetection: (address: string, provider: ProviderKind) =>
-    [...daemonKeys.providers(address), 'detection', provider] as const,
-  planUsage: (address: string, provider: ProviderKind) =>
-    ['daemon', address, 'plan-usage', provider] as const,
+  auth: (address: string, provider?: ProviderId) => ['daemon', address, 'auth', provider ?? 'all'] as const,
+  models: (address: string, provider: ProviderId) => ['daemon', address, 'models', provider] as const,
+
   skills: (address: string) => ['daemon', address, 'skills'] as const,
   usage: (address: string, window: UsageWindow) =>
     ['daemon', address, 'usage', JSON.stringify(window)] as const,
@@ -55,7 +55,7 @@ export const daemonKeys = {
   composerSources: (address: string) => ['daemon', address, 'composer-sources'] as const,
   composerFiles: (address: string, cwd: string) =>
     [...daemonKeys.composerSources(address), 'files', cwd] as const,
-  slashCommands: (address: string, provider: ProviderKind, cwd: string) =>
+  slashCommands: (address: string, provider: ProviderId, cwd: string) =>
     [...daemonKeys.composerSources(address), 'commands', provider, cwd] as const,
   workspaceTree: (address: string, cwd: string, expanded: string[]) =>
     ['daemon', address, 'workspace-tree', cwd, ...[...expanded].sort()] as const,
@@ -127,10 +127,7 @@ export async function loadDaemonSettings(
   client: WakuClient,
 ): Promise<DaemonSettings> {
   const response = expectResponse(await client.request({ type: 'getSettings' }), 'settings')
-  return {
-    ...response.settings,
-    provider_binary_overrides: response.settings.provider_binary_overrides ?? {},
-  }
+  return response.settings
 }
 
 export async function updateDaemonSettings(
@@ -140,24 +137,59 @@ export async function updateDaemonSettings(
   expectResponse(await client.request({ type: 'updateSettings', settings }), 'ack')
 }
 
-export async function probeProvider(
+export interface AuthSnapshot {
+  statuses: ProviderAuthStatus[]
+  phases: AuthPhase[]
+}
+
+export async function loadAuthStatus(
   client: WakuClient,
-  provider: ProviderKind,
-  settings: DaemonSettings,
-  options: { discoverModels?: boolean; probeVersion?: boolean } = {},
-): Promise<ProviderProbe & { version: string | null }> {
-  const { discoverModels = true, probeVersion = true } = options
+  provider?: ProviderId,
+): Promise<AuthSnapshot> {
   const response = expectResponse(
-    await client.request({
-      type: 'probeProvider',
-      provider,
-      binaryOverride: settings.provider_binary_overrides?.[provider] ?? null,
-      discoverModels,
-      probeVersion,
-    }),
-    'providerProbe',
+    await client.request({ type: 'getAuthStatus', provider: provider ?? null }),
+    'authStatus',
   )
-  return { ...response.probe, version: response.version }
+  return { statuses: response.statuses, phases: response.phases }
+}
+
+export async function startLogin(
+  client: WakuClient,
+  provider: ProviderId,
+  method: LoginMethod,
+): Promise<AuthPhase> {
+  return expectResponse(
+    await client.request({ type: 'startLogin', provider, method }),
+    'login',
+  ).phase
+}
+
+export async function completeApiKeyLogin(
+  client: WakuClient,
+  loginId: string,
+  provider: ProviderId,
+  key: SecretString,
+): Promise<AuthPhase> {
+  return expectResponse(
+    await client.request({ type: 'completeApiKeyLogin', loginId, provider, key }),
+    'login',
+  ).phase
+}
+
+export async function cancelLogin(client: WakuClient, loginId: string): Promise<void> {
+  expectResponse(await client.request({ type: 'cancelLogin', loginId }), 'ack')
+}
+
+export async function logoutProvider(client: WakuClient, provider: ProviderId): Promise<void> {
+  expectResponse(await client.request({ type: 'logout', provider }), 'ack')
+}
+
+export async function listModels(client: WakuClient, provider: ProviderId): Promise<ModelCatalog> {
+  return expectResponse(await client.request({ type: 'listModels', provider }), 'models').catalog
+}
+
+export async function refreshModels(client: WakuClient, provider: ProviderId): Promise<ModelCatalog> {
+  return expectResponse(await client.request({ type: 'refreshModels', provider }), 'models').catalog
 }
 
 export async function loadSkills(
@@ -189,35 +221,15 @@ export async function trashSkills(client: WakuClient, dirs: string[]): Promise<v
 export async function loadUsageHistory(
   client: WakuClient,
   window: UsageWindow,
-  projects: Project[],
 ): Promise<UsageHistory> {
   const response = expectResponse(
     await client.request({
       type: 'loadUsageHistory',
       window,
-      projectRoots: projects.map((project) => project.path),
     }),
     'usageHistory',
   )
   return response.history
-}
-
-export async function fetchPlanUsage(
-  client: WakuClient,
-  provider: ProviderKind,
-  settings: DaemonSettings,
-  version: string | null,
-): Promise<PlanUsage | null> {
-  const response = expectResponse(
-    await client.request({
-      type: 'fetchPlanUsage',
-      provider,
-      binaryOverride: settings.provider_binary_overrides?.[provider] ?? null,
-      cliVersion: version,
-    }),
-    'planUsage',
-  )
-  return response.usage
 }
 
 export async function persistSession(
@@ -382,7 +394,7 @@ export async function listComposerFiles(
 
 export async function discoverComposerCommands(
   client: WakuClient,
-  provider: ProviderKind,
+  provider: ProviderId,
   projectRoot: string,
 ): Promise<SlashCommand[]> {
   const result = await workspaceRequest(client, {
@@ -593,7 +605,7 @@ export function selectableProjects(projects: Project[], selected?: Project): Pro
 
 export function createSession(
   projectId: string,
-  provider: ProviderKind,
+  provider: ProviderId,
   isolated: boolean,
 ): AgentSession {
   const now = unixTime()
@@ -608,17 +620,12 @@ export function createSession(
     runtime_mode: 'fullAccess',
     interaction_mode: 'build',
     reasoning_effort: null,
-    service_tier: null,
     context_window: null,
-    agent_preset: null,
     status: 'idle',
     created_at: now,
     updated_at: now,
     last_reply_at: null,
-    provider_cursor: null,
-    available_commands: [],
     context_usage: null,
-    provider_session_id: null,
     messages: [],
     transcript_blocks: [],
     turns: [],
@@ -666,7 +673,6 @@ export function beginTurn(
         turn_count: session.turns.length + 1,
         status: 'running',
         provider_turn_started: false,
-        provider_resume_at: null,
         started_at: now,
         completed_at: null,
         checkpoint: null,

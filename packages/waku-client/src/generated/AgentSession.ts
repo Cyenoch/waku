@@ -3,12 +3,11 @@ import type { AgentTurn } from "./AgentTurn";
 import type { ContextUsage } from "./ContextUsage";
 import type { InteractionMode } from "./InteractionMode";
 import type { Message } from "./Message";
-import type { ProviderKind } from "./ProviderKind";
-import type { ProviderResumeCursor } from "./ProviderResumeCursor";
+import type { ProviderId } from "./ProviderId";
 import type { QueuedMessage } from "./QueuedMessage";
-import type { ReportedCommand } from "./ReportedCommand";
 import type { RuntimeEventCursor } from "./RuntimeEventCursor";
 import type { RuntimeMode } from "./RuntimeMode";
+import type { ServiceTier } from "./ServiceTier";
 import type { SessionStatus } from "./SessionStatus";
 import type { SessionWorkspace } from "./SessionWorkspace";
 import type { TranscriptBlock } from "./TranscriptBlock";
@@ -27,17 +26,15 @@ auto_title?: string | null, project_id: string,
 /**
  * Local project checkout or an isolated Git worktree for this task.
  */
-workspace?: SessionWorkspace, provider: ProviderKind, model?: string | null, runtime_mode: RuntimeMode, interaction_mode: InteractionMode, reasoning_effort?: string | null, service_tier?: string | null,
+workspace?: SessionWorkspace, provider: ProviderId, model?: string | null, runtime_mode: RuntimeMode, interaction_mode: InteractionMode, reasoning_effort?: string | null,
+/**
+ * OpenAI request service tier. Omitted for providers that do not support it.
+ */
+service_tier?: ServiceTier | null,
 /**
  * Selected context window, when the provider exposes more than one.
  */
-context_window?: string | null,
-/**
- * Provider-owned agent composition selected before the first turn.
- * Currently populated by DeepSeek Harness; unlike Build/Plan, Harness
- * locks this value once conversation history exists.
- */
-agent_preset?: string | null, status: SessionStatus, created_at: number,
+context_window?: string | null, status: SessionStatus, created_at: number,
 /**
  * Any mutation, including title edits and truncation. Use
  * [`Self::last_reply_at`] for conversation recency.
@@ -47,22 +44,12 @@ updated_at: number,
  * Activity time of the newest turn. Set as soon as the user submits it,
  * then refreshed when the turn settles, whatever its outcome.
  */
-last_reply_at?: number | null, provider_cursor: ProviderResumeCursor | null,
-/**
- * Slash commands the provider reported for this session's live process,
- * kept so a resumed session still completes them before its next
- * handshake.
- */
-available_commands?: Array<ReportedCommand>,
+last_reply_at?: number | null,
 /**
  * Context-window occupancy from the live stream, kept so a resumed
  * session's meter starts where the conversation left off.
  */
 context_usage?: ContextUsage | null, runtime_event_cursor?: RuntimeEventCursor | null,
-/**
- * Read-only compatibility field for v1 state files. New saves omit it.
- */
-provider_session_id?: string | null,
 /**
  * Not stored in the session JSON — these are rows in the `messages`
  * table, reattached when the session is hydrated.

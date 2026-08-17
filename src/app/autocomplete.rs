@@ -118,19 +118,12 @@ impl Waku {
         };
         let provider = self
             .selected_session()
-            .map(|session| session.provider)
-            .unwrap_or(self.state.last_provider);
-        let reported = self
-            .selected_session()
-            .map(|session| session.available_commands.clone())
-            .unwrap_or_default();
-
-        let command_key = (provider, project_path.clone());
+            .map(|session| session.provider.clone())
+            .unwrap_or_else(|| self.state.last_provider.clone());
+        let command_key = (provider.clone(), project_path.clone());
         match self.slash_commands.read(&command_key) {
             Query::Ready(commands) => {
-                self.slash_command_index = Rc::new(composer_complete::merge_reported_commands(
-                    &commands, &reported,
-                ));
+                self.slash_command_index = Rc::new(commands.as_ref().clone());
                 self.slash_command_index_key = Some(command_key);
             }
             Query::Pending => {
@@ -154,7 +147,7 @@ impl Waku {
                         .spawn(async move {
                             match workspace.request(
                                 waku_client::WorkspaceOperation::DiscoverSlashCommands {
-                                    provider,
+                                    provider: provider.clone(),
                                     project_root: path,
                                 },
                             ) {
@@ -233,8 +226,8 @@ impl Waku {
         {
             let provider = self
                 .selected_session()
-                .map(|session| session.provider)
-                .unwrap_or(self.state.last_provider);
+                .map(|session| session.provider.clone())
+                .unwrap_or_else(|| self.state.last_provider.clone());
             self.slash_commands.invalidate(&(provider, path.clone()));
             self.mention_files.invalidate(&path);
         }

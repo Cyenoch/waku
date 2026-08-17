@@ -2,4 +2,4 @@
 import type { Checkpoint } from "./Checkpoint";
 import type { TurnStatus } from "./TurnStatus";
 
-export type AgentTurn = { id: string, turn_count: number, status: TurnStatus, provider_turn_started: boolean, provider_resume_at?: string | null, started_at: number, completed_at: number | null, checkpoint: Checkpoint | null, };
+export type AgentTurn = { id: string, turn_count: number, status: TurnStatus, provider_turn_started: boolean, started_at: number, completed_at: number | null, checkpoint: Checkpoint | null, };

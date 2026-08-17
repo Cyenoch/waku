@@ -61,15 +61,13 @@ settings.appearance: 外観
 settings.providers: プロバイダー
 settings.usage: 使用状況
 settings.daemon: デーモン
-settings.computer_use: コンピュータ操作
 settings.general_keywords: 一般 ローカル プロジェクト 会話 プライバシー 分析 テレメトリ 匿名 共有 アップデート 自動 バージョン
 settings.appearance_keywords: 外観 テーマ システム ライト ダーク 言語 英語 中国語 簡体字 日本語
-settings.providers_keywords: プロバイダー エージェント モデル CLI バージョン インストール 検出 claude codex cursor opencode amp grok pi
+settings.providers_keywords: プロバイダー エージェント モデル claude codex cursor opencode amp grok pi
 settings.skills: スキル
 settings.skills_keywords: スキル ライブラリ エージェント 無効 有効 削除 claude codex cursor opencode pi amp 共有
 settings.usage_keywords: 使用状況 トークン コスト 支出 キャッシュ 日別 グラフ モデル 内訳 履歴 claude codex
 settings.daemon_keywords: デーモン サーバー リモート ウェブ ネットワーク 公開 オリジン トークン ポート websocket
-settings.computer_use_keywords: コンピュータ 操作 画面収録 アクセシビリティ アプリ 制御 codex
 settings.back: 戻る
 settings.search: 設定を検索
 daemon.expose_title: 管理対象デーモンを公開
@@ -170,9 +168,18 @@ settings.share_anonymous_usage_data: 匿名の使用状況データを共有
 settings.share_anonymous_usage_data_description: 機能の利用状況と信頼性に関するデータを共有して、Waku の改善にご協力ください。プロンプト、回答、プロジェクト名、ファイルパスなどの個人データは一切含まれません
 
 providers.coding_agents: コーディングエージェント
-providers.description: Waku はこの Mac にインストールされたエージェントの CLI を使用します。各エージェントの CLI をインストールするかログインしてから、更新してください
-providers.web_description: Waku はデーモンホストにインストールされたエージェント CLI を使用します。各エージェントの CLI をインストールするかログインしてから、更新してください
+providers.description: モデルエンドポイントを直接設定します。API キーの値を Waku が表示・保存することはありません
+providers.web_description: デーモンホスト上のモデルエンドポイントを直接設定します。API キーの値を Waku が表示・保存することはありません
 providers.check_failed: "%{command} を確認できませんでした：%{error}"
+providers.catalog_models: ライブカタログのモデル
+providers.not_authenticated: 未接続
+providers.api_key_placeholder: API キーを入力（送信後に消去）
+providers.connect: 接続
+providers.sign_in: サインイン
+providers.logout: ログアウト
+providers.browser_waiting: システムブラウザでサインインを完了してください
+providers.open_browser: ブラウザを開く
+providers.use_device_code: デバイスコードを使う
 providers.show_settings: "%{provider} の設定を表示"
 providers.hide_settings: "%{provider} の設定を隠す"
 providers.enable: "%{provider} を有効にする"
@@ -180,33 +187,6 @@ providers.disable: "%{provider} を無効にする"
 providers.disabled_for_new_tasks: 新規タスクでは無効
 providers.model_count_one: "%{count} 個のモデル"
 providers.model_count_many: "%{count} 個のモデル"
-providers.not_detected_as: PATH 上に %{command} が見つかりません
-providers.using_override: PATH の自動検出ではなく %{path} を使用しています
-providers.invalid_override: このパスには実行可能なファイルがありません。空欄にすると PATH から自動検出します
-providers.detected_at: "%{path} で検出されました"
-providers.detected_as: "%{command} として検出されました"
-providers.searches_path: Waku は PATH で %{command} を検出できませんでした
-providers.binary_path: 実行ファイルのパス
-providers.binary_path_description: Waku が %{provider} の起動に使用する実行ファイルです。Return キーで適用します。空欄にすると PATH から自動検出します
-providers.checked_just_now: たった今確認済み
-providers.checked_minutes_ago: "%{count} 分前に確認済み"
-providers.checked_hours_ago: "%{count} 時間前に確認済み"
-
-computer_use.allow_apps: Waku にアプリの操作を許可
-computer_use.availability: コンピュータ操作は Codex、OpenCode、Grok、Pi で利用できます
-computer_use.macos_access: macOS のアクセス権
-computer_use.helper_access: Waku の分離された操作ヘルパー %{helper} にアクセスを許可してください
-computer_use.screen_recording: 画面収録
-computer_use.screen_recording_description: 許可されたアプリのウインドウのみを取り込みます
-computer_use.accessibility: アクセシビリティ
-computer_use.accessibility_description: 承認後にポインタとキーボードのイベントを送信します
-computer_use.always_allowed_apps: 常に許可するアプリ
-computer_use.always_allowed_apps_description: Waku はこれらの許可をアプリの Bundle ID と署名チームに紐付けます
-computer_use.no_always_allowed_apps: 常に許可されているアプリはありません。タスクごとの許可はメモリにのみ保持されます
-computer_use.access_granted: アクセス許可済み
-computer_use.grant_access: アクセスを許可
-computer_use.permission_check_failed: コンピュータ操作の権限を確認できませんでした
-
 common.settings: 設定
 common.copy: コピー
 common.remove: 削除
@@ -392,40 +372,12 @@ mode.build: 実装
 mode.plan: プラン
 mode.supervised: 監督モード
 mode.auto_accept_edits: 編集を自動承認
-mode.auto: 自動
 mode.full_access: フルアクセス
 mode.plan_description: 変更を加えずに調査してプランを作成します
 mode.supervised_description: コマンドの実行とファイル変更の前に確認します
 mode.auto_accept_edits_description: 編集は自動承認し、その他の操作は事前に確認します
-mode.auto_description: 通常の操作は AI レビュアーが承認し、リスクのある操作は事前に確認します
 mode.full_access_description: 確認なしでコマンドの実行と編集を許可します
 mode.switch_to: "%{mode}に切り替える"
-
-agent_preset.standard: 標準モード
-agent_preset.code: コードモード
-agent_preset.minimal: ミニマルモード
-agent_preset.creator: クリエイターモード
-agent_preset.standard_description: ファイル編集、シェル、ファイルと Web の検索、スキル、プランニング、ゴール、サブエージェント、ワークフローを備えた完全なコーディングエージェントです。
-agent_preset.code_description: 標準モードの全機能に加え、Code Mode SDK を通じてツールを提供し、モデルが複数の操作を一つの TypeScript プログラムにまとめられます。
-agent_preset.minimal_description: 永続 bash と str_replace_editor の二つだけを使うコーディングエージェントです。
-agent_preset.creator_description: カスタムエージェントプリセットの作成向けです。標準モードの全機能に加え、ランタイム検査、プラグイン実験、プリセット作成ガイドを備えます。
-agent_preset.custom: カスタム
-agent_preset.no_description: 説明はありません。
-agent_preset.minimal_no_plan: ミニマルモードにはプラン機能がありません
-
-computer_use.allow_for_task: このタスクで許可
-computer_use.always_allow_app: このアプリを常に許可
-computer_use.allow_control: Waku に「%{app}」の操作を許可しますか？
-computer_use.screenshot_shared: このウインドウのスクリーンショットが、使用中の Codex モデルと共有されます
-computer_use.sensitive_action: この操作ではテキストの入力やキー操作が行われる可能性があります
-computer_use.bundle_id: "Bundle ID：%{id}"
-computer_use.no_bundle_id: このアプリには Bundle ID がないため、常に許可することはできません
-computer_use.stopped: 停止しました
-computer_use.controlling: 操作中
-computer_use.captured: キャプチャ済み
-computer_use.take_control: 操作を引き継ぐ
-computer_use.preparing_preview: プレビューを準備中…
-
 common.deny: 拒否
 
 permission.allow_once: 1 回だけ許可
@@ -457,8 +409,15 @@ models.standard: 標準
 models.reasoning: 推論レベル
 models.service_tier: サービスティア
 models.context_window: コンテキストウィンドウ
+models.catalog_loading: モデルカタログを読み込み中…
+models.catalog_error: モデルカタログを利用できません
+models.catalog_live: ライブ
+models.catalog_cache: キャッシュ
+models.catalog_seed: 組み込み
+models.unsupported: 非対応
 
 model_option.none: なし
+model_option.none_description: サービスティアを指定しない
 model_option.minimal: 最小
 model_option.low: 低
 model_option.medium: 中
@@ -469,10 +428,14 @@ model_option.ultra: 超高
 model_option.ultracode: Ultracode
 model_option.context_200k: 200K
 model_option.context_1m: 1M
-model_option.auto: 自動
-model_option.fast: 高速
-model_option.amp_fast_description: 使用量が増える代わりに、Amp の高速な処理階層を使用します
-model_option.fast_description: 使用量が増える代わりに、応答を高速化します
+model_option.auto: 自動ルーティング
+model_option.auto_description: サービスティアをプロバイダーに選択させる
+model_option.default: デフォルト
+model_option.default_description: プロバイダー標準のサービスティアを使用
+model_option.flex: Flex
+model_option.flex_description: 利用可能な場合、コストを下げる代わりに待ち時間を許容
+model_option.priority: 優先
+model_option.priority_description: 使用量が増える代わりに高速処理を優先
 
 command_scope.project: プロジェクト
 command_scope.user: ユーザー
@@ -607,8 +570,8 @@ errors.provider_native_thread_unavailable: "%{provider} のネイティブスレ
 errors.provider_native_cursor_unavailable: "%{provider} のネイティブセッションカーソルは利用できません"
 errors.provider_native_thread_cursor_unavailable: "%{provider} のネイティブスレッドカーソルは利用できません"
 errors.provider_waku_task_unavailable: "%{provider} の Waku タスクは利用できません"
-errors.provider_not_installed: "%{provider} はインストールされていません"
-errors.provider_not_found: "%{provider} はインストールされていないか、見つかりませんでした"
+errors.provider_not_installed: "%{provider} は設定されていません"
+errors.provider_not_found: "%{provider} が見つかりません"
 errors.claude_fork_checkpoint_missing: Claude からフォーク用チェックポイントが返されませんでした
 errors.claude_turn_checkpoint_unavailable: "そのターンの Claude ネイティブチェックポイントは利用できません：%{error}"
 errors.pi_session_file_unavailable: Pi のネイティブセッションファイルは利用できません
@@ -658,7 +621,6 @@ errors.read_provider_event_stream: "%{provider} のイベントストリーム�
 errors.answer_provider_permission: "%{provider} の権限リクエストに回答できませんでした：%{error}"
 errors.answer_provider_question: "%{provider} の質問に回答できませんでした：%{error}"
 errors.initialize_codex_app_server: Codex app-server を初期化できませんでした
-errors.register_computer_use_skill: Waku のコンピュータ操作スキルを Codex に登録できませんでした
 errors.codex_thread_open_incomplete: Codex はスレッドを開く処理を完了しませんでした
 errors.provider_receive_prompt: "%{provider} はプロンプトを受信できませんでした"
 errors.provider_start_turn: "%{provider} はターンを開始できませんでした"
@@ -908,12 +870,11 @@ duration.minutes_short: "%{count}分"
 duration.hours_short: "%{count}時間"
 duration.two_units: "%{first} %{second}"
 
-usage.scan_summary: "%{scanned} 件の会話記録をスキャン（対象期間外 %{skipped} 件）· 使用量レコード %{records} 件 · %{seconds} 秒"
 usage.daily: 日別
 usage.monthly: 月別
 usage.projects: プロジェクト
-usage.scanning: プロバイダーの会話記録をスキャン中…
-usage.rescan: プロバイダーの会話記録を再スキャン
+usage.scanning: 使用量を読み込み中…
+usage.rescan: 使用量を再読み込み
 usage.range: "%{start}〜%{end}"
 usage.full_api_rate_note: "* API の通常料金で請求された場合"
 usage.sessions_summary: "%{count} セッションの入力、キャッシュ読み込み、出力の合計"
@@ -982,7 +943,7 @@ usage.model_many: "%{count} 個のモデル"
 usage.active_day_one: "アクティブ %{count} 日"
 usage.active_day_many: "アクティブ %{count} 日"
 usage.filter_projects: プロジェクトを絞り込む…
-usage.chart_description: "Claude Code と Codex の日別 %{metric}。"
+usage.chart_description: プロバイダー別の日次 %{metric}。
 usage.refresh_failed: "使用状況の更新に失敗しました：%{error}"
 usage.context_used: コンテキストウインドウを %{percent}% 使用（%{shortcut}）
 usage.shortcut: 使用状況（%{shortcut}）
@@ -1007,33 +968,14 @@ usage.resets_in_hours: "%{count} 時間後にリセット"
 usage.resets_in_hours_minutes: "%{hours} 時間 %{minutes} 分後にリセット"
 usage.resets_date: "%{date} にリセット"
 
-usage_error.signin_cannot_read: "%{provider} のログイン情報では使用量を取得できません（HTTP %{status}）。%{provider} でタスクを 1 回実行すると更新されます"
-usage_error.rate_limited: 使用量 API は現在レート制限されています
-usage_error.http_status: 使用量 API から HTTP %{status} が返されました
-usage_error.invalid_json: 使用量 API から無効な JSON が返されました
-usage_error.no_home_directory: ホームディレクトリが見つかりません
-usage_error.read_file: "%{path} を読み込めませんでした"
-usage_error.codex_auth_invalid: Codex の auth.json は有効な JSON ではありません
-usage_error.codex_access_token_missing: Codex の auth.json にアクセストークンがありません。`codex login` を実行してください
-usage_error.opencode_go_key_rejected: OpenCode Go API キーでは使用量を取得できません（HTTP %{status}）。OpenCode Go に再接続してください
-usage_error.no_rate_limit_windows: 使用量 API からレート制限期間が返されませんでした
-usage_error.start_grok_probe: "`grok agent stdio` を起動できませんでした"
-usage_error.grok_stdin_unavailable: Grok の標準入力を利用できません
-usage_error.grok_stdout_unavailable: Grok の標準出力を利用できません
-usage_error.start_grok_reader: Grok のプローブリーダーを起動できませんでした
-usage_error.grok_billing_timeout: Grok は時間内に課金リクエストへ応答しませんでした
-usage_error.grok_answered: "Grok からの応答：%{error}"
-usage_error.grok_no_billing_data: Grok から課金データが返されませんでした。`grok` を実行してログインしてください
-usage_error.claude_credentials_missing: キーチェーンにも ~/.claude にも Claude Code の認証情報がありません
-usage_error.run_security: /usr/bin/security を実行できませんでした
-usage_error.keychain_item_missing: キーチェーンに %{service} の項目がありません
-usage_error.claude_credentials_invalid: Claude Code の認証情報は有効な JSON ではありません
-usage_error.claude_oauth_missing: Claude Code の認証情報に claudeAiOauth の項目がありません
-usage_error.claude_access_token_missing: Claude Code の認証情報にアクセストークンがありません
-usage_error.run_curl: /usr/bin/curl を実行できませんでした
-usage_error.curl_stdin_unavailable: curl の標準入力を利用できません
-usage_error.configure_curl: curl に設定を渡せませんでした
-usage_error.curl_did_not_finish: curl がリクエストを完了しませんでした
-usage_error.curl_failed: "curl に失敗しました：%{error}"
-usage_error.unknown_error: 不明なエラー
-usage_error.curl_no_status: curl から HTTP ステータス行が返されませんでした
+providers.default_model: デフォルトモデル
+
+providers.duplicate_id: プロバイダー ID は既に使用されています
+providers.in_use: セッションまたはお気に入りがこのプロバイダーを参照しています
+
+providers.duplicate_models: モデル ID の重複は許可されません
+
+providers.invalid_context_window: コンテキストウィンドウは正の整数で入力してください
+providers.invalid_max_output_tokens: 最大出力トークンは正の整数で入力してください
+providers.invalid_header_format: "ヘッダーは Name: value 形式で入力してください"
+providers.invalid_headers: ヘッダーは空欄・重複・予約名を使用できません：Authorization、x-api-key、Host、Content-Length、Content-Type、Anthropic-Version

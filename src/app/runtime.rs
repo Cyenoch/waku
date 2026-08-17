@@ -10,27 +10,12 @@ fn workspace_ack(
     }
 }
 
-fn workspace_has_ref(
-    workspace: &waku_client::WorkspaceClient,
-    cwd: &Path,
-    git_ref: &str,
-) -> anyhow::Result<bool> {
-    match workspace.request(waku_client::WorkspaceOperation::HasRef {
-        cwd: cwd.to_path_buf(),
-        git_ref: git_ref.to_owned(),
-    })? {
-        waku_client::WorkspaceResult::Bool { value } => Ok(value),
-        _ => anyhow::bail!("the daemon returned an invalid checkpoint response"),
-    }
-}
-
 fn start_driver(mut request: DriverStartRequest, cwd: PathBuf) -> anyhow::Result<PreparedDriver> {
     request.options.cwd = cwd;
     let (event_tx, events) = driver::event_channel(request.event_wake);
     let handle = driver::start_remote(
         request.daemon_client,
         request.session_id,
-        request.provider,
         request.options,
         event_tx,
     )?;
@@ -204,658 +189,88 @@ fn prepare_submission(
 
 /// Everything a past-message resend needs after the UI accepts it.
 ///
-/// The request owns only thread-safe snapshots. Git, provider RPCs, process
-/// startup, and native transcript reads all happen in
-/// [`perform_message_rewind`] on the background executor.
+/// Rewind is daemon-owned. The daemon has the persisted transcript, Git
+/// checkpoints, and the embedded provider runtime, so the desktop submits one
+/// typed command and applies the returned session snapshot.
 struct MessageRewindRequest {
-    workspace_client: waku_client::WorkspaceClient,
+    daemon_client: waku_client::DaemonClient,
     session_id: Uuid,
-    provider: ProviderKind,
-    provider_cursor: Option<ProviderResumeCursor>,
-    session_title: String,
-    /// Cursor has no native branch API, so its background helper needs the
-    /// retained visible transcript. Other providers avoid cloning a long task
-    /// on the click path entirely.
-    cursor_source: Option<AgentSession>,
-    project_path: PathBuf,
-    retained_turn_count: usize,
-    previous_turn_count: usize,
-    rollback_turns: usize,
-    provider_turn_count: usize,
-    provider_resume_at: Option<String>,
-    binary: Option<PathBuf>,
-    driver: Option<DriverHandle>,
-    driver_start: Option<DriverStartRequest>,
+    turn_count: usize,
 }
 
 struct PreparedMessageRewind {
-    provider_rewind_cursor: Option<ProviderResumeCursor>,
-    claude_fork: Option<waku_client::provider_session::ProviderSessionFork>,
-    prepared_driver: Option<PreparedDriver>,
-    reset_native_session: bool,
+    session: AgentSession,
     cleanup_error: Option<String>,
 }
-
-fn perform_message_rewind(
-    mut request: MessageRewindRequest,
-) -> Result<PreparedMessageRewind, String> {
-    let session_id = request.session_id;
-    let turn_start_ref =
-        checkpoint::turn_start_ref(session_id, request.retained_turn_count.saturating_add(1));
-    let retained_ref = checkpoint::checkpoint_ref(session_id, request.retained_turn_count);
-    let restore_ref = if workspace_has_ref(
-        &request.workspace_client,
-        &request.project_path,
-        &turn_start_ref,
-    )
-    .map_err(|error| error.to_string())?
-    {
-        turn_start_ref
-    } else {
-        retained_ref
-    };
-    if !workspace_has_ref(
-        &request.workspace_client,
-        &request.project_path,
-        &restore_ref,
-    )
-    .map_err(|error| error.to_string())?
-    {
-        return Err(tr!("session.pre_turn_checkpoint_missing"));
-    }
-
-    let safety_ref = format!("refs/waku/revert-backup-{session_id}-{}", Uuid::new_v4());
-    workspace_ack(
-        &request.workspace_client,
-        waku_client::WorkspaceOperation::CaptureRef {
-            cwd: request.project_path.clone(),
-            git_ref: safety_ref.clone(),
-        },
-    )
-    .map_err(|error| tr!("errors.create_rewind_snapshot", error = error))?;
-    if let Err(error) = workspace_ack(
-        &request.workspace_client,
-        waku_client::WorkspaceOperation::RestoreRef {
-            cwd: request.project_path.clone(),
-            git_ref: restore_ref.clone(),
-        },
-    ) {
-        return Err(
-            match workspace_ack(
-                &request.workspace_client,
-                waku_client::WorkspaceOperation::RestoreRef {
-                    cwd: request.project_path.clone(),
-                    git_ref: safety_ref.clone(),
-                },
-            ) {
-                Ok(()) => {
-                    let _ = workspace_ack(
-                        &request.workspace_client,
-                        waku_client::WorkspaceOperation::DeleteRef {
-                            cwd: request.project_path.clone(),
-                            git_ref: safety_ref.clone(),
-                        },
-                    );
-                    tr!("errors.restore_checkpoint", error = error)
-                }
-                Err(restore_error) => tr!(
-                    "errors.restore_checkpoint_and_safety",
-                    error = error,
-                    restore_error = restore_error,
-                    safety_ref = safety_ref
-                ),
-            },
-        );
-    }
-
-    let provider_rewind = perform_provider_rewind(&mut request);
-    let (provider_rewind_cursor, claude_fork, prepared_driver) = match provider_rewind {
-        Ok(rewind) => rewind,
-        Err(error) => {
-            return Err(
-                match workspace_ack(
-                    &request.workspace_client,
-                    waku_client::WorkspaceOperation::RestoreRef {
-                        cwd: request.project_path.clone(),
-                        git_ref: safety_ref.clone(),
-                    },
-                ) {
-                    Ok(()) => {
-                        let _ = workspace_ack(
-                            &request.workspace_client,
-                            waku_client::WorkspaceOperation::DeleteRef {
-                                cwd: request.project_path.clone(),
-                                git_ref: safety_ref.clone(),
-                            },
-                        );
-                        tr!("errors.rollback_rejected_workspace_restored", error = error)
-                    }
-                    Err(restore_error) => tr!(
-                        "errors.rollback_and_safety_failed",
-                        error = error,
-                        restore_error = restore_error,
-                        safety_ref = safety_ref
-                    ),
-                },
-            );
-        }
-    };
-
-    let _ = workspace_ack(
-        &request.workspace_client,
-        waku_client::WorkspaceOperation::DeleteRef {
-            cwd: request.project_path.clone(),
-            git_ref: safety_ref,
-        },
-    );
-    let cleanup_error = workspace_ack(
-        &request.workspace_client,
-        waku_client::WorkspaceOperation::DeleteTurnRefsAfter {
-            cwd: request.project_path.clone(),
-            session_id,
-            retained_turn_count: request.retained_turn_count,
-            previous_turn_count: request.previous_turn_count,
-        },
-    )
-    .err()
-    .map(|error| error.to_string());
-
-    Ok(PreparedMessageRewind {
-        provider_rewind_cursor,
-        claude_fork,
-        prepared_driver,
-        reset_native_session: request.rollback_turns > 0
-            && request.retained_turn_count == 0
-            && matches!(
-                request.provider,
-                ProviderKind::Claude | ProviderKind::Cursor | ProviderKind::Grok
-            ),
-        cleanup_error,
-    })
+struct MessageRewindCompletion {
+    edit: MessageEdit,
+    submission: ComposerSubmission,
+    edited_message_id: Uuid,
+    original_message: Message,
+    previous_status: SessionStatus,
+    result: Result<PreparedMessageRewind, String>,
 }
 
-type ProviderRewindResult = (
-    Option<ProviderResumeCursor>,
-    Option<waku_client::provider_session::ProviderSessionFork>,
-    Option<PreparedDriver>,
-);
-
-fn perform_provider_rewind(
-    request: &mut MessageRewindRequest,
-) -> anyhow::Result<ProviderRewindResult> {
-    let provider = request.provider;
-    let reset_native_session = request.rollback_turns > 0
-        && request.retained_turn_count == 0
-        && matches!(
-            provider,
-            ProviderKind::Claude | ProviderKind::Cursor | ProviderKind::Grok
-        );
-    if request.rollback_turns == 0 || reset_native_session {
-        return Ok((None, None, None));
-    }
-
-    match provider {
-        ProviderKind::Claude => {
-            let Some(ProviderResumeCursor::Claude {
-                session_id: native_session_id,
-                ..
-            }) = request.provider_cursor.as_ref()
-            else {
-                anyhow::bail!(tr!(
-                    "errors.provider_native_cursor_unavailable",
-                    provider = "Claude"
-                ));
-            };
-            let fork = request.workspace_client.fork_provider_session(
-                waku_client::provider_session::ProviderSessionForkRequest::Claude {
-                    session_id: native_session_id.clone(),
-                    resume_at: request.provider_resume_at.clone(),
-                    turn_count: request.provider_turn_count,
-                    title: tr!(
-                        "session.rewind_title",
-                        title = request.session_title.as_str()
-                    ),
-                },
-            )?;
-            Ok((None, Some(fork), None))
-        }
-        ProviderKind::OpenCode => {
-            let cursor = if let Some(driver) = request.driver.as_ref() {
-                driver.rollback(request.rollback_turns)?.ok_or_else(|| {
-                    anyhow::anyhow!("OpenCode returned no cursor for the rewound session")
-                })?
-            } else {
-                let Some(ProviderResumeCursor::OpenCode {
-                    session_id: native_session_id,
-                }) = request.provider_cursor.as_ref()
-                else {
-                    anyhow::bail!(tr!(
-                        "errors.provider_native_cursor_unavailable",
-                        provider = "OpenCode"
-                    ));
-                };
-                let binary = request.binary.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(tr!("errors.provider_not_found", provider = "OpenCode"))
-                })?;
-                request
-                    .workspace_client
-                    .fork_provider_session(
-                        waku_client::provider_session::ProviderSessionForkRequest::OpenCode {
-                            binary: binary.to_owned(),
-                            cwd: request.project_path.clone(),
-                            session_id: native_session_id.clone(),
-                            turn_count: request.provider_turn_count,
-                        },
-                    )?
-                    .cursor
-            };
-            Ok((Some(cursor), None, None))
-        }
-        ProviderKind::Amp => {
-            let Some(ProviderResumeCursor::Amp {
-                thread_id: native_thread_id,
-                fork_context,
-            }) = request.provider_cursor.as_ref()
-            else {
-                anyhow::bail!(tr!(
-                    "errors.provider_native_thread_cursor_unavailable",
-                    provider = "Amp"
-                ));
-            };
-            let binary = request.binary.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(tr!("errors.provider_not_found", provider = "Amp"))
-            })?;
-            let cursor = request
-                .workspace_client
-                .fork_provider_session(
-                    waku_client::provider_session::ProviderSessionForkRequest::Amp {
-                        binary: binary.to_owned(),
-                        cwd: request.project_path.clone(),
-                        thread_id: native_thread_id.clone(),
-                        fork_context: fork_context.clone(),
-                        turn_count: request.provider_turn_count,
-                    },
-                )?
-                .cursor;
-            Ok((Some(cursor), None, None))
-        }
-        ProviderKind::Cursor => {
-            let source = request.cursor_source.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(tr!(
-                    "errors.provider_waku_task_unavailable",
-                    provider = "Cursor"
-                ))
-            })?;
-            Ok((
-                Some(
-                    request
-                        .workspace_client
-                        .fork_provider_session(
-                            waku_client::provider_session::ProviderSessionForkRequest::Cursor {
-                                source: source.clone(),
-                                turn_count: request.retained_turn_count,
-                            },
-                        )?
-                        .cursor,
-                ),
-                None,
-                None,
-            ))
-        }
-        ProviderKind::Grok => {
-            let Some(ProviderResumeCursor::Grok {
-                session_id: native_session_id,
-            }) = request.provider_cursor.as_ref()
-            else {
-                anyhow::bail!(tr!(
-                    "errors.provider_native_cursor_unavailable",
-                    provider = "Grok"
-                ));
-            };
-            let binary = request.binary.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(tr!("errors.provider_not_found", provider = "Grok Build"))
-            })?;
-            let cursor = request
-                .workspace_client
-                .fork_provider_session(
-                    waku_client::provider_session::ProviderSessionForkRequest::Grok {
-                        binary: binary.to_owned(),
-                        cwd: request.project_path.clone(),
-                        session_id: native_session_id.clone(),
-                        turn_count: request.provider_turn_count,
-                    },
-                )?
-                .cursor;
-            Ok((Some(cursor), None, None))
-        }
-        ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::Pi => {
-            let mut prepared_driver = None;
-            let driver = if let Some(driver) = request.driver.as_ref() {
-                driver.clone()
-            } else {
-                let start = request.driver_start.take().ok_or_else(|| {
-                    anyhow::anyhow!(tr!(
-                        "errors.provider_not_found",
-                        provider = provider.display_name()
-                    ))
-                })?;
-                let prepared = start_driver(start, request.project_path.clone())?;
-                let driver = prepared.handle.clone();
-                prepared_driver = Some(prepared);
-                driver
-            };
-            let cursor = driver.rollback(request.rollback_turns)?;
-            Ok((cursor, None, prepared_driver))
-        }
-    }
+fn perform_message_rewind(request: MessageRewindRequest) -> Result<PreparedMessageRewind, String> {
+    let response = request
+        .daemon_client
+        .request(
+            request.session_id,
+            Uuid::nil(),
+            waku_client::Command::RewindSessionToMessage {
+                turn_count: request.turn_count,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let waku_client::ResponsePayload::SessionRewound {
+        session,
+        cleanup_warning,
+    } = response
+    else {
+        return Err("Waku daemon returned an invalid rewind response".to_owned());
+    };
+    Ok(PreparedMessageRewind {
+        session: *session,
+        cleanup_error: cleanup_warning,
+    })
 }
 
 /// Everything a response fork needs after the click has been accepted.
 ///
-/// The session is a point-in-time snapshot: provider branching may take long
-/// enough for the user to navigate elsewhere, but the resulting task must
-/// still end at the response they chose. Provider RPCs, process startup,
-/// native transcript I/O, and Git ref copying are all performed by
-/// [`perform_response_fork`] on the background executor.
+/// Forking is likewise a single daemon operation. Keeping this request free of
+/// provider-specific cursors is important: a `ProviderId` identifies the
+/// configured endpoint, while the daemon owns any runtime conversation state.
 struct ResponseForkRequest {
-    workspace_client: waku_client::WorkspaceClient,
-    source: AgentSession,
-    source_workspace_path: PathBuf,
-    fork_title: String,
+    daemon_client: waku_client::DaemonClient,
+    session_id: Uuid,
     turn_count: usize,
-    provider_turn_count: usize,
-    turns_to_remove: usize,
-    binary: Option<PathBuf>,
-    driver: Option<DriverHandle>,
-    driver_start: Option<DriverStartRequest>,
-}
-
-fn numbered_title_suffix(title: &str) -> Option<(&str, usize)> {
-    let (base, suffix) = title.rsplit_once(" (")?;
-    let number = suffix.strip_suffix(')')?.parse().ok()?;
-    (!base.is_empty() && number >= 2).then_some((base, number))
-}
-
-fn next_response_fork_title<'a>(
-    source_title: &str,
-    existing_titles: impl IntoIterator<Item = &'a str>,
-) -> String {
-    let existing_titles = existing_titles.into_iter().collect::<Vec<_>>();
-    let base = numbered_title_suffix(source_title)
-        .filter(|(base, _)| existing_titles.iter().any(|title| title == base))
-        .map_or(source_title, |(base, _)| base);
-    let highest_number = existing_titles
-        .iter()
-        .filter_map(|title| {
-            if *title == base {
-                Some(1)
-            } else {
-                numbered_title_suffix(title)
-                    .filter(|(candidate_base, _)| *candidate_base == base)
-                    .map(|(_, number)| number)
-            }
-        })
-        .max()
-        .unwrap_or(1);
-    format!("{base} ({})", highest_number.saturating_add(1).max(2))
 }
 
 struct PreparedResponseFork {
-    forked: AgentSession,
-    prepared_driver: Option<PreparedDriver>,
+    session: AgentSession,
     checkpoint_warning: Option<String>,
 }
 
-type ProviderForkResult = (
-    ProviderResumeCursor,
-    Option<HashMap<String, String>>,
-    Option<PreparedDriver>,
-);
-
-fn fork_response_with_driver(
-    request: &mut ResponseForkRequest,
-) -> anyhow::Result<(ProviderResumeCursor, Option<PreparedDriver>)> {
-    let provider = request.source.provider;
-    let mut prepared_driver = None;
-    let driver = if let Some(driver) = request.driver.as_ref() {
-        driver.clone()
-    } else {
-        let start = request.driver_start.take().ok_or_else(|| {
-            anyhow::anyhow!(tr!(
-                "errors.provider_not_found",
-                provider = provider.display_name()
-            ))
-        })?;
-        let prepared = start_driver(start, request.source_workspace_path.clone())?;
-        let driver = prepared.handle.clone();
-        prepared_driver = Some(prepared);
-        driver
-    };
-    Ok((driver.fork(request.turns_to_remove)?, prepared_driver))
-}
-
-fn perform_response_fork(mut request: ResponseForkRequest) -> Result<PreparedResponseFork, String> {
-    let provider = request.source.provider;
-    let native_fork = (|| -> anyhow::Result<ProviderForkResult> {
-        match provider {
-            ProviderKind::Claude => {
-                let ProviderResumeCursor::Claude {
-                    session_id: native_session_id,
-                    ..
-                } = request.source.provider_cursor.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!(tr!(
-                        "errors.provider_native_session_unavailable",
-                        provider = "Claude"
-                    ))
-                })?
-                else {
-                    anyhow::bail!(tr!(
-                        "errors.provider_native_session_unavailable",
-                        provider = "Claude"
-                    ));
-                };
-                let resume_at = request
-                    .source
-                    .turns
-                    .get(request.turn_count.saturating_sub(1))
-                    .and_then(|turn| turn.provider_resume_at.clone());
-                let fork = request.workspace_client.fork_provider_session(
-                    waku_client::provider_session::ProviderSessionForkRequest::Claude {
-                        session_id: native_session_id.clone(),
-                        resume_at,
-                        turn_count: request.provider_turn_count,
-                        title: request.fork_title.clone(),
-                    },
-                )?;
-                Ok((fork.cursor, Some(fork.message_ids), None))
-            }
-            ProviderKind::Codex => {
-                if !matches!(
-                    request.source.provider_cursor.as_ref(),
-                    Some(ProviderResumeCursor::Codex { .. })
-                ) {
-                    anyhow::bail!(tr!(
-                        "errors.provider_native_thread_unavailable",
-                        provider = "Codex"
-                    ));
-                }
-                let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;
-                Ok((cursor, None, prepared_driver))
-            }
-            ProviderKind::DeepSeek => {
-                if !matches!(
-                    request.source.provider_cursor.as_ref(),
-                    Some(ProviderResumeCursor::DeepSeek { .. })
-                ) {
-                    anyhow::bail!(tr!(
-                        "errors.provider_native_session_unavailable",
-                        provider = "DeepSeek Harness"
-                    ));
-                }
-                let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;
-                Ok((cursor, None, prepared_driver))
-            }
-            ProviderKind::Cursor => Ok((
-                request
-                    .workspace_client
-                    .fork_provider_session(
-                        waku_client::provider_session::ProviderSessionForkRequest::Cursor {
-                            source: request.source.clone(),
-                            turn_count: request.turn_count,
-                        },
-                    )?
-                    .cursor,
-                None,
-                None,
-            )),
-            ProviderKind::Amp => {
-                let Some(ProviderResumeCursor::Amp {
-                    thread_id: native_thread_id,
-                    fork_context,
-                }) = request.source.provider_cursor.as_ref()
-                else {
-                    anyhow::bail!(tr!(
-                        "errors.provider_native_thread_unavailable",
-                        provider = "Amp"
-                    ));
-                };
-                let binary = request.binary.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(tr!("errors.provider_not_installed", provider = "Amp"))
-                })?;
-                Ok((
-                    request
-                        .workspace_client
-                        .fork_provider_session(
-                            waku_client::provider_session::ProviderSessionForkRequest::Amp {
-                                binary: binary.to_owned(),
-                                cwd: request.source_workspace_path.clone(),
-                                thread_id: native_thread_id.clone(),
-                                fork_context: fork_context.clone(),
-                                turn_count: request.provider_turn_count,
-                            },
-                        )?
-                        .cursor,
-                    None,
-                    None,
-                ))
-            }
-            ProviderKind::OpenCode => {
-                let Some(ProviderResumeCursor::OpenCode {
-                    session_id: native_session_id,
-                }) = request.source.provider_cursor.as_ref()
-                else {
-                    anyhow::bail!(tr!(
-                        "errors.provider_native_session_unavailable",
-                        provider = "OpenCode"
-                    ));
-                };
-                let binary = request.binary.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(tr!("errors.provider_not_installed", provider = "OpenCode"))
-                })?;
-                Ok((
-                    request
-                        .workspace_client
-                        .fork_provider_session(
-                            waku_client::provider_session::ProviderSessionForkRequest::OpenCode {
-                                binary: binary.to_owned(),
-                                cwd: request.source_workspace_path.clone(),
-                                session_id: native_session_id.clone(),
-                                turn_count: request.provider_turn_count,
-                            },
-                        )?
-                        .cursor,
-                    None,
-                    None,
-                ))
-            }
-            ProviderKind::Grok => {
-                let Some(ProviderResumeCursor::Grok {
-                    session_id: native_session_id,
-                }) = request.source.provider_cursor.as_ref()
-                else {
-                    anyhow::bail!(tr!(
-                        "errors.provider_native_session_unavailable",
-                        provider = "Grok"
-                    ));
-                };
-                let binary = request.binary.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!(tr!(
-                        "errors.provider_not_installed",
-                        provider = "Grok Build"
-                    ))
-                })?;
-                Ok((
-                    request
-                        .workspace_client
-                        .fork_provider_session(
-                            waku_client::provider_session::ProviderSessionForkRequest::Grok {
-                                binary: binary.to_owned(),
-                                cwd: request.source_workspace_path.clone(),
-                                session_id: native_session_id.clone(),
-                                turn_count: request.provider_turn_count,
-                            },
-                        )?
-                        .cursor,
-                    None,
-                    None,
-                ))
-            }
-            ProviderKind::Pi => {
-                if !matches!(
-                    request.source.provider_cursor.as_ref(),
-                    Some(ProviderResumeCursor::Pi {
-                        session_file: Some(_),
-                        ..
-                    })
-                ) {
-                    anyhow::bail!(tr!("errors.pi_session_file_unavailable"));
-                }
-                let (cursor, prepared_driver) = fork_response_with_driver(&mut request)?;
-                Ok((cursor, None, prepared_driver))
-            }
-        }
-    })();
-
-    let (provider_cursor, claude_message_ids, prepared_driver) =
-        native_fork.map_err(|error| tr!("errors.fork_task", error = error))?;
-    let Some(mut forked) =
-        request
-            .source
-            .fork_through_turn(request.turn_count, provider_cursor, &request.fork_title)
+fn perform_response_fork(request: ResponseForkRequest) -> Result<PreparedResponseFork, String> {
+    let response = request
+        .daemon_client
+        .request(
+            request.session_id,
+            Uuid::nil(),
+            waku_client::Command::ForkSessionFromResponse {
+                turn_count: request.turn_count,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let waku_client::ResponsePayload::SessionForked {
+        session,
+        checkpoint_warning,
+    } = response
     else {
-        return Err(tr!("session.response_cannot_copy"));
+        return Err("Waku daemon returned an invalid fork response".to_owned());
     };
-    if let Some(message_ids) = claude_message_ids {
-        for turn in &mut forked.turns {
-            if let Some(message_id) = turn.provider_resume_at.as_mut()
-                && let Some(remapped) = message_ids.get(message_id)
-            {
-                *message_id = remapped.clone();
-            }
-        }
-    }
-
-    let fork_id = forked.id;
-    for turn in &mut forked.turns {
-        if let Some(checkpoint) = turn.checkpoint.as_mut() {
-            checkpoint.git_ref = checkpoint::checkpoint_ref(fork_id, checkpoint.turn_count);
-        }
-    }
-    let checkpoint_warning = workspace_ack(
-        &request.workspace_client,
-        waku_client::WorkspaceOperation::CopySessionRefs {
-            cwd: request.source_workspace_path.clone(),
-            source_session_id: request.source.id,
-            target_session_id: fork_id,
-            through_turn_count: request.turn_count,
-        },
-    )
-    .err()
-    .map(|error| error.to_string());
-
     Ok(PreparedResponseFork {
-        forked,
-        prepared_driver,
+        session: *session,
         checkpoint_warning,
     })
 }
@@ -1011,7 +426,8 @@ impl Waku {
                 .or_else(|| self.state.projects.first().map(|project| project.id))
             {
                 self.state.selected_project = Some(project_id);
-                self.create_session_for(project_id, self.state.last_provider, cx);
+                let provider = self.state.last_provider.clone();
+                self.create_session_for(project_id, provider, cx);
             }
         }
     }
@@ -1193,7 +609,7 @@ impl Waku {
             .last()
             .filter(|turn| turn.status == TurnStatus::Running)?;
         Some(crate::analytics::Event::TurnFinished {
-            provider: session.provider.id(),
+            provider: session.provider.as_str().to_owned(),
             turn_number: turn.turn_count,
             outcome,
             duration_seconds: unix_time().saturating_sub(turn.started_at),
@@ -1259,263 +675,29 @@ impl Waku {
         self.runtimes.get(&self.state.selected_session?)
     }
 
-    pub(super) fn provider_probe(&self, provider: ProviderKind) -> Option<&ProviderProbe> {
-        self.probes.iter().find(|probe| probe.provider == provider)
-    }
-
-    pub(super) fn request_provider_model_discovery(&mut self, provider: ProviderKind) {
-        if !provider.supports_model_discovery()
-            || self.provider_model_discoveries.contains(&provider)
-        {
-            return;
-        }
-        let Some(probe) = self
-            .provider_probe(provider)
-            .filter(|probe| probe.installed)
-            .cloned()
-        else {
-            return;
-        };
-        self.provider_model_discoveries.insert(provider);
-        self.provider_model_discoveries_pending.insert(provider);
-        let provider_probe_tx = self.provider_probe_tx.clone();
-        let event_wake = self.event_wake_tx.clone();
-        let daemon = self.daemon.client();
-        let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
-        if std::thread::Builder::new()
-            .name(format!("waku-{}-model-discovery", provider.id()))
-            .spawn(move || {
-                let discovered = match daemon.request(
-                    Uuid::nil(),
-                    Uuid::nil(),
-                    waku_client::Command::ProbeProvider {
-                        provider,
-                        binary_override,
-                        discover_models: true,
-                        probe_version: false,
-                    },
-                ) {
-                    Ok(waku_client::ResponsePayload::ProviderProbe { probe, .. }) => probe,
-                    _ => probe,
-                };
-                if provider_probe_tx.send(discovered).is_ok() {
-                    signal_event_pump(&event_wake);
-                }
-            })
-            .is_err()
-        {
-            self.provider_model_discoveries.remove(&provider);
-            self.provider_model_discoveries_pending.remove(&provider);
-        }
-    }
-
-    /// Re-run one provider's model-owned catalog discovery, for selectors whose
-    /// contents can change while Waku stays open — models the user just
-    /// authored in a provider's config, or DeepSeek's custom agent presets.
-    /// The stale catalog stays on screen until the fresh probe lands, so an
-    /// open menu never blanks into a loading state while it refreshes.
-    pub(super) fn refresh_provider_model_discovery(&mut self, provider: ProviderKind) {
-        if self.provider_model_discoveries_pending.contains(&provider) {
-            return;
-        }
-        self.provider_model_discoveries.remove(&provider);
-        self.request_provider_model_discovery(provider);
-    }
-
-    /// Ask every installed CLI for its version, one short-lived subprocess per
-    /// provider on its own thread. Answers land in `provider_versions` through
-    /// the drain loop; render reads only that map.
-    pub(super) fn request_provider_version_probes(&mut self) {
-        let targets = self
-            .probes
+    pub(super) fn configured_provider(&self, provider: &ProviderId) -> Option<&ExternalProvider> {
+        self.state
+            .external_providers
             .iter()
-            .filter(|probe| probe.installed)
-            .map(|probe| probe.provider)
-            .collect::<Vec<_>>();
-        for provider in targets {
-            if !self.provider_version_probes_pending.insert(provider) {
-                continue;
-            }
-            let provider_version_tx = self.provider_version_tx.clone();
-            let event_wake = self.event_wake_tx.clone();
-            let daemon = self.daemon.client();
-            let binary_override = self.state.provider_binary_overrides.get(&provider).cloned();
-            if std::thread::Builder::new()
-                .name(format!("waku-{}-version-probe", provider.id()))
-                .spawn(move || {
-                    let version = match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::ProbeProvider {
-                            provider,
-                            binary_override,
-                            discover_models: false,
-                            probe_version: true,
-                        },
-                    ) {
-                        Ok(waku_client::ResponsePayload::ProviderProbe { version, .. }) => version,
-                        _ => None,
-                    };
-                    if provider_version_tx.send((provider, version)).is_ok() {
-                        signal_event_pump(&event_wake);
-                    }
-                })
-                .is_err()
-            {
-                self.provider_version_probes_pending.remove(&provider);
-            }
-        }
-    }
-
-    pub(super) fn drain_provider_version_events(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok((provider, version)) = self.provider_version_events.try_recv() {
-            self.provider_version_probes_pending.remove(&provider);
-            self.provider_versions.insert(provider, version);
-            changed = true;
-        }
-        changed
-    }
-
-    /// Re-detect provider CLIs off-thread — every provider for the Providers
-    /// page's refresh, or one whose binary override just changed. Also re-runs
-    /// model discovery and version probes for whatever the detection finds
-    /// installed.
-    pub(super) fn refresh_provider_detection(&mut self, scope: Option<ProviderKind>) {
-        if self.provider_detection_remaining > 0 {
-            return;
-        }
-        let providers = match scope {
-            Some(provider) => vec![provider],
-            None => ProviderKind::ALL.to_vec(),
-        };
-        self.provider_detection_remaining = providers.len();
-        let overrides = self.state.provider_binary_overrides.clone();
-        let provider_detection_tx = self.provider_detection_tx.clone();
-        let event_wake = self.event_wake_tx.clone();
-        let detect_providers = providers.clone();
-        let daemon = self.daemon.client();
-        if std::thread::Builder::new()
-            .name("waku-provider-detection".into())
-            .spawn(move || {
-                for provider in detect_providers {
-                    let response = daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::ProbeProvider {
-                            provider,
-                            binary_override: overrides.get(&provider).cloned(),
-                            discover_models: false,
-                            probe_version: false,
-                        },
-                    );
-                    let probe = match response {
-                        Ok(waku_client::ResponsePayload::ProviderProbe { probe, .. }) => probe,
-                        _ => ProviderProbe {
-                            provider,
-                            installed: false,
-                            path: None,
-                            models: crate::model_catalog::fallback_models(provider),
-                            agent_presets: crate::model_catalog::fallback_agent_presets(provider),
-                        },
-                    };
-                    if provider_detection_tx.send(probe).is_ok() {
-                        signal_event_pump(&event_wake);
-                    }
-                }
-            })
-            .is_err()
-        {
-            self.provider_detection_remaining = 0;
-            return;
-        }
-        // A refresh means "re-check everything about these providers":
-        // clearing the per-launch guard lets each one's catalog discovery run
-        // again as its detection lands below.
-        for provider in providers {
-            self.provider_model_discoveries.remove(&provider);
-        }
-    }
-
-    pub(super) fn drain_provider_detection_events(&mut self) -> bool {
-        let mut changed = false;
-        let mut installed_providers = Vec::new();
-        while let Ok(probe) = self.provider_detection_events.try_recv() {
-            let provider = probe.provider;
-            let installed = probe.installed;
-            self.provider_detection_remaining = self.provider_detection_remaining.saturating_sub(1);
-            if self.provider_detection_remaining == 0 {
-                self.provider_detection_checked_at = Some(Instant::now());
-            }
-            if let Some(existing) = self
-                .probes
-                .iter_mut()
-                .find(|existing| existing.provider == provider)
-            {
-                if self.provider_model_discoveries_pending.contains(&provider) {
-                    // A manual refresh may overlap an older live discovery.
-                    // Keep that newer catalog while still accepting PATH
-                    // detection from this response.
-                    existing.installed = probe.installed;
-                    existing.path = probe.path;
-                } else {
-                    *existing = probe;
-                }
-            } else {
-                self.probes.push(probe);
-            }
-            if installed {
-                installed_providers.push(provider);
-            } else {
-                self.provider_versions.remove(&provider);
-            }
-            changed = true;
-        }
-        for provider in installed_providers {
-            self.request_provider_model_discovery(provider);
-        }
-        if changed {
-            self.request_provider_version_probes();
-        }
-        changed
-    }
-
-    /// Whether the provider can back a new session: installed and not switched
-    /// off in the Providers settings.
-    pub(super) fn provider_enabled(&self, provider: ProviderKind) -> bool {
-        !self.state.disabled_providers.contains(&provider)
-            && self
-                .provider_probe(provider)
-                .is_some_and(|probe| probe.installed)
+            .find(|candidate| &candidate.id == provider)
     }
 
     pub(super) fn model_for_session<'a>(&'a self, session: &'a AgentSession) -> Option<&'a str> {
         session.model.as_deref().or_else(|| {
-            self.provider_probe(session.provider)
-                .and_then(ProviderProbe::preferred_model)
-                .map(|model| model.id.as_str())
+            self.configured_provider(&session.provider)
+                .map(|provider| provider.default_model.as_str())
         })
     }
 
-    pub(super) fn model_display_name(&self, provider: ProviderKind, model: Option<&str>) -> String {
-        let Some(model) = model else {
-            return provider.short_name().to_owned();
-        };
-        self.provider_probe(provider)
-            .and_then(|probe| probe.models.iter().find(|candidate| candidate.id == model))
-            .map(|candidate| candidate.name.clone())
-            .unwrap_or_else(|| model.to_owned())
-    }
-
-    pub(super) fn model_metadata_for_session(
-        &self,
-        session: &AgentSession,
-    ) -> Option<&ProviderModel> {
-        let model = self.model_for_session(session)?;
-        self.provider_probe(session.provider)?
-            .models
-            .iter()
-            .find(|candidate| candidate.id == model)
+    pub(super) fn model_display_name(&self, provider: &ProviderId, model: Option<&str>) -> String {
+        let endpoint = self
+            .configured_provider(provider)
+            .map(|provider| provider.name.as_str())
+            .unwrap_or_else(|| provider.as_str());
+        match model {
+            Some(model) if !model.trim().is_empty() => format!("{endpoint} · {model}"),
+            _ => endpoint.to_owned(),
+        }
     }
 
     pub(super) fn selected_transcript_blocks(&self) -> &[TranscriptBlock] {
@@ -1749,102 +931,25 @@ impl Waku {
         };
         if self.state.selected_session != Some(session_id)
             || !matches!(source.status, SessionStatus::Idle | SessionStatus::Failed)
-            || !source.provider.supports_conversation_fork()
             || source
                 .turns
                 .get(turn_count.saturating_sub(1))
-                .is_none_or(|turn| turn.turn_count != turn_count || !turn.provider_turn_started)
+                .is_none_or(|turn| turn.turn_count != turn_count)
         {
             self.show_toast(tr!("session.response_cannot_fork"));
             cx.notify();
             return;
         }
-        let Some(source_workspace_path) = self
-            .workspace_path_for_session(&source)
-            .map(std::path::Path::to_path_buf)
-        else {
-            self.show_toast(tr!("errors.task_project_not_found"));
-            cx.notify();
-            return;
-        };
-
-        let provider = source.provider;
-        let project_id = source.project_id;
-        let fork_title = next_response_fork_title(
-            source.display_title(),
-            self.state
-                .sessions
-                .iter()
-                .filter(|session| session.project_id == project_id)
-                .map(AgentSession::display_title),
-        );
-        let provider_turn_count = source
-            .turns
-            .iter()
-            .take(turn_count)
-            .filter(|turn| turn.provider_turn_started)
-            .count();
-        let turns_to_remove = source.provider_turns_after(turn_count);
-        let driver = self
-            .runtimes
-            .get(&session_id)
-            .map(|runtime| runtime.driver.clone());
-        let binary_provider = match provider {
-            ProviderKind::Amp => Some("Amp"),
-            ProviderKind::OpenCode => Some("OpenCode"),
-            ProviderKind::Grok => Some("Grok Build"),
-            _ => None,
-        };
-        let binary = binary_provider.and_then(|_| {
-            self.probes
-                .iter()
-                .find(|probe| probe.provider == provider)
-                .and_then(|probe| probe.path.clone())
-        });
-        if let Some(provider_name) = binary_provider
-            && binary.is_none()
-        {
-            self.show_toast(tr!(
-                "errors.provider_not_installed",
-                provider = provider_name
-            ));
-            cx.notify();
-            return;
-        }
-        let driver_start = if matches!(
-            provider,
-            ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::Pi
-        ) && driver.is_none()
-        {
-            match self.driver_start_request_for_session(&source, source_workspace_path.clone()) {
-                Ok(request) => Some(request),
-                Err(error) => {
-                    self.show_toast(tr!("errors.fork_task", error = error));
-                    cx.notify();
-                    return;
-                }
-            }
-        } else {
-            None
-        };
+        let provider = source.provider.clone();
         let request = ResponseForkRequest {
-            workspace_client: waku_client::WorkspaceClient::new(self.daemon.client()),
-            source,
-            source_workspace_path,
-            fork_title,
+            daemon_client: self.daemon.client(),
+            session_id,
             turn_count,
-            provider_turn_count,
-            turns_to_remove,
-            binary,
-            driver,
-            driver_start,
         };
-
         self.response_fork_preparations
             .insert(session_id, turn_count);
         self.hide_toast();
         cx.notify();
-
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
@@ -1861,7 +966,7 @@ impl Waku {
         &mut self,
         session_id: Uuid,
         turn_count: usize,
-        provider: ProviderKind,
+        provider: ProviderId,
         result: Result<PreparedResponseFork, String>,
         cx: &mut Context<Self>,
     ) {
@@ -1869,45 +974,25 @@ impl Waku {
             return;
         }
         self.response_fork_preparations.remove(&session_id);
-
         let PreparedResponseFork {
-            forked,
-            prepared_driver,
+            session,
             checkpoint_warning,
         } = match result {
             Ok(prepared) => prepared,
             Err(error) => {
-                if provider == ProviderKind::Pi {
-                    // A failed restore after Pi creates a fork can leave the
-                    // resident RPC process on that fork. Recreate it lazily
-                    // from the source cursor on its next prompt.
-                    if let Some(runtime) = self.runtimes.remove(&session_id) {
-                        runtime.driver.close();
-                    }
-                }
-                self.drain_queued_message(session_id, cx);
                 self.show_toast(error);
                 cx.notify();
                 return;
             }
         };
-
-        if let Some(prepared) = prepared_driver
-            && !self.runtimes.contains_key(&session_id)
-        {
-            self.install_prepared_driver(session_id, prepared);
-        }
-        self.invalidate_checkpoint_refs();
-
-        let fork_id = forked.id;
-        self.state.push_session(forked);
+        let fork_id = session.id;
+        self.state.push_session(session);
         self.analytics
             .track(crate::analytics::Event::ResponseForked {
-                provider: provider.id(),
+                provider: provider.as_str().to_owned(),
                 turn_number: turn_count,
             });
         self.select_session(fork_id, cx);
-        self.drain_queued_message(session_id, cx);
         match checkpoint_warning {
             Some(error) => {
                 self.show_toast(tr!("session.forked_with_checkpoint_warning", error = error))
@@ -1957,7 +1042,6 @@ impl Waku {
             .iter()
             .find(|session| {
                 session.id == session_id
-                    && session.provider.supports_conversation_rollback()
                     && matches!(session.status, SessionStatus::Idle | SessionStatus::Failed)
             })
             .and_then(|session| {
@@ -2099,110 +1183,28 @@ impl Waku {
     ) {
         let session_id = edit.session_id;
         let turn_count = edit.turn_count;
-        let retained_turn_count = turn_count.saturating_sub(1);
         let Some(source) = self
             .state
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .filter(|session| {
-                session
-                    .turns
-                    .iter()
-                    .any(|turn| turn.turn_count == turn_count)
-            })
+            .cloned()
         else {
             self.show_toast(tr!("session.message_unavailable"));
             cx.notify();
             return;
         };
-        if self.state.selected_session != Some(session_id) {
+        if self.state.selected_session != Some(session_id)
+            || !matches!(source.status, SessionStatus::Idle | SessionStatus::Failed)
+            || !source
+                .turns
+                .iter()
+                .any(|turn| turn.turn_count == turn_count)
+        {
             self.show_toast(tr!("session.select_before_rewind"));
             cx.notify();
             return;
         }
-        if !matches!(source.status, SessionStatus::Idle | SessionStatus::Failed) {
-            self.show_toast(tr!("session.stop_before_rewind"));
-            cx.notify();
-            return;
-        }
-        let rollback_turns = source.provider_turns_after(retained_turn_count);
-        if !source.provider.supports_conversation_rollback()
-            || (rollback_turns > 0 && source.provider_cursor.is_none())
-        {
-            self.show_toast(tr!(
-                "session.provider_cannot_rewind",
-                provider = source.provider.display_name()
-            ));
-            cx.notify();
-            return;
-        }
-        let Some(project_path) = self
-            .workspace_path_for_session(&source)
-            .map(std::path::Path::to_path_buf)
-        else {
-            self.show_toast(tr!("errors.task_project_not_found"));
-            cx.notify();
-            return;
-        };
-        let provider_turn_count = source
-            .turns
-            .iter()
-            .take(retained_turn_count)
-            .filter(|turn| turn.provider_turn_started)
-            .count();
-        let provider_resume_at = retained_turn_count
-            .checked_sub(1)
-            .and_then(|index| source.turns.get(index))
-            .and_then(|turn| turn.provider_resume_at.clone());
-        let driver = self
-            .runtimes
-            .get(&session_id)
-            .map(|runtime| runtime.driver.clone());
-        let needs_binary = rollback_turns > 0
-            && (matches!(source.provider, ProviderKind::Amp)
-                || (source.provider == ProviderKind::OpenCode && driver.is_none())
-                || (source.provider == ProviderKind::Grok && retained_turn_count > 0));
-        let binary = needs_binary
-            .then(|| {
-                self.probes
-                    .iter()
-                    .find(|probe| probe.provider == source.provider)
-                    .and_then(|probe| probe.path.clone())
-            })
-            .flatten();
-        if needs_binary && binary.is_none() {
-            self.show_toast(tr!(
-                "errors.provider_not_found",
-                provider = source.provider.display_name()
-            ));
-            cx.notify();
-            return;
-        }
-        let driver_start = if rollback_turns > 0
-            && matches!(
-                source.provider,
-                ProviderKind::Codex | ProviderKind::DeepSeek | ProviderKind::Pi
-            )
-            && driver.is_none()
-        {
-            match self.driver_start_request_for_session(&source, project_path.clone()) {
-                Ok(request) => Some(request),
-                Err(error) => {
-                    self.show_toast(error.to_string());
-                    cx.notify();
-                    return;
-                }
-            }
-        } else {
-            None
-        };
-        let previous_status = source.status;
-        let previous_turn_count = source.turns.len();
-        let provider = source.provider;
-        let provider_cursor = source.provider_cursor.clone();
-        let session_title = source.display_title().to_owned();
-        let cursor_source = (provider == ProviderKind::Cursor).then(|| source.clone());
         let Some((edited_message_index, edited_message_id)) = source
             .turns
             .iter()
@@ -2223,28 +1225,10 @@ impl Waku {
             return;
         };
         let request = MessageRewindRequest {
-            workspace_client: waku_client::WorkspaceClient::new(self.daemon.client()),
+            daemon_client: self.daemon.client(),
             session_id,
-            provider,
-            provider_cursor,
-            session_title,
-            cursor_source,
-            previous_turn_count,
-            project_path,
-            retained_turn_count,
-            rollback_turns,
-            provider_turn_count,
-            provider_resume_at,
-            binary,
-            driver,
-            driver_start,
+            turn_count,
         };
-
-        // Optimistically leave edit mode and show the replacement bubble at
-        // accept time. The main composer switches to its non-cancellable
-        // spinner while every Git, process, native transcript, and provider
-        // operation runs off the UI thread. Failure restores both the original
-        // bubble and this edit input.
         let original_message = self.state.session_mut(session_id).and_then(|session| {
             let message = session
                 .messages
@@ -2263,12 +1247,12 @@ impl Waku {
             cx.notify();
             return;
         };
+        let previous_status = source.status;
         self.message_edit = None;
         self.submission_preparations.insert(session_id);
         self.hide_toast();
         self.remeasure_transcript_message(edited_message_index);
         cx.notify();
-
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
@@ -2276,12 +1260,14 @@ impl Waku {
                 .await;
             let _ = waku.update(cx, move |waku, cx| {
                 waku.finish_message_rewind(
-                    edit,
-                    submission,
-                    edited_message_id,
-                    original_message,
-                    previous_status,
-                    result,
+                    MessageRewindCompletion {
+                        edit,
+                        submission,
+                        edited_message_id,
+                        original_message,
+                        previous_status,
+                        result,
+                    },
                     cx,
                 );
             });
@@ -2291,16 +1277,19 @@ impl Waku {
 
     fn finish_message_rewind(
         &mut self,
-        edit: MessageEdit,
-        submission: ComposerSubmission,
-        edited_message_id: Uuid,
-        original_message: Message,
-        previous_status: SessionStatus,
-        result: Result<PreparedMessageRewind, String>,
+        completion: MessageRewindCompletion,
         cx: &mut Context<Self>,
     ) {
+        let MessageRewindCompletion {
+            edit,
+            submission,
+            edited_message_id,
+            original_message,
+            previous_status,
+            result,
+        } = completion;
+
         let session_id = edit.session_id;
-        let turn_count = edit.turn_count;
         if !self.submission_preparations.remove(&session_id) {
             return;
         }
@@ -2321,218 +1310,67 @@ impl Waku {
                     }
                 }
                 if selected && self.message_edit.is_none() {
-                    self.message_edit = Some(edit.clone());
-                }
-                if selected
-                    && let Some(message_index) = self.selected_session().and_then(|session| {
-                        let turn = session
-                            .turns
-                            .iter()
-                            .find(|turn| turn.turn_count == turn_count)?;
-                        session.messages.iter().position(|message| {
-                            message.turn_id == Some(turn.id) && message.role == MessageRole::User
-                        })
-                    })
-                {
-                    self.remeasure_transcript_message(message_index);
+                    self.message_edit = Some(edit);
                 }
                 self.show_toast(error);
                 cx.notify();
                 return;
             }
         };
-        let PreparedMessageRewind {
-            provider_rewind_cursor,
-            claude_fork,
-            mut prepared_driver,
-            reset_native_session,
-            cleanup_error,
-        } = prepared;
-        let retained_turn_count = turn_count.saturating_sub(1);
-        let provider_and_removed_turns = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .map(|session| {
-                (
-                    session.provider,
-                    session.turns.len().saturating_sub(retained_turn_count),
-                )
-            });
-        let Some((provider, removed_turns)) = provider_and_removed_turns else {
-            return;
-        };
-        if selected {
-            self.sync_transcript_rows();
+        let provider = prepared.session.provider.clone();
+        if let Some(runtime) = self.runtimes.remove(&session_id) {
+            runtime.driver.close();
         }
-        let previous_kinds = if selected {
-            self.transcript_row_kinds.borrow().clone()
-        } else {
-            Vec::new()
-        };
+        self.mark_background_work_lost(session_id);
         if let Some(session) = self.state.session_mut(session_id) {
-            if let Some(fork) = &claude_fork {
-                for turn in session.turns.iter_mut().take(retained_turn_count) {
-                    if let Some(remapped) = turn
-                        .provider_resume_at
-                        .as_ref()
-                        .and_then(|message_id| fork.message_ids.get(message_id))
-                        .cloned()
-                    {
-                        turn.provider_resume_at = Some(remapped);
-                    }
-                }
-                session.provider_cursor = Some(fork.cursor.clone());
-            } else if reset_native_session {
-                session.provider_cursor = None;
-            } else if let Some(cursor) = provider_rewind_cursor.clone() {
-                session.provider_cursor = Some(cursor);
-            }
-            session.truncate_after_turn(retained_turn_count);
-            session.status = SessionStatus::Idle;
-        }
-
-        if let Some(prepared) = prepared_driver.as_mut() {
-            // Startup announces the source cursor before a cold driver-backed
-            // rollback finishes. It is stale now; do not let it overwrite the
-            // rewound cursor after this driver is installed.
-            while prepared.events.try_recv().is_ok() {}
-        }
-        if let Some(prepared) = prepared_driver {
-            self.install_prepared_driver(session_id, prepared);
-        }
-        if claude_fork.is_some()
-            || reset_native_session
-            || (matches!(
-                provider,
-                ProviderKind::Amp
-                    | ProviderKind::Cursor
-                    | ProviderKind::DeepSeek
-                    | ProviderKind::OpenCode
-                    | ProviderKind::Grok
-            ) && provider_rewind_cursor.is_some())
-        {
-            // Headless drivers retain their original native session ID. Recreate
-            // them lazily so the next prompt resumes the fork instead.
-            if let Some(runtime) = self.runtimes.remove(&session_id) {
-                runtime.driver.close();
-            }
-            self.mark_background_work_lost(session_id);
-        } else if let Some(runtime) = self.runtimes.get_mut(&session_id) {
-            runtime
-                .pending_events
-                .retain(|event| matches!(event, DriverEvent::BackgroundWork(_)));
-            runtime.stream_remeasure_pending = false;
-            runtime.stream_phase = None;
-            runtime.pending_permission = None;
-            runtime.pending_user_input = None;
-            runtime.pending_computer_approval = None;
+            *session = prepared.session;
         }
         self.invalidate_checkpoint_refs();
-        if self
-            .message_edit
-            .as_ref()
-            .is_some_and(|current| current.session_id == session_id)
-        {
-            self.message_edit = None;
-        }
+        self.message_edit = None;
         if selected {
-            self.activities_expanded.clear();
-            self.expanded_activity_items.clear();
-            self.expanded_turns.clear();
-            self.expanded_changed_files.clear();
-            self.transcript_control_focuses.borrow_mut().clear();
-            self.splice_transcript_rows_after_visibility_change(&previous_kinds);
-            self.show_toast(match cleanup_error {
-                None => tr!("session.rewound", turn = turn_count),
+            self.sync_transcript_rows();
+            self.show_toast(match prepared.cleanup_error {
+                None => tr!("session.rewound", turn = edit.turn_count),
                 Some(error) => tr!(
                     "session.rewound_with_stale_refs",
-                    turn = turn_count,
+                    turn = edit.turn_count,
                     error = error
                 ),
             });
         }
         self.analytics
             .track(crate::analytics::Event::ConversationRolledBack {
-                provider: provider.id(),
-                turns: removed_turns,
+                provider: provider.as_str().to_owned(),
+                turns: 1,
             });
         cx.notify();
         self.submit_submission_for_session(session_id, submission, cx);
     }
 
-    /// Resolves the turn options a driver should run with, dropping a reasoning
-    /// effort or service tier the resolved model does not offer. Driver start
-    /// and in-session option changes both go through this so they cannot
-    /// disagree about what the session is currently set to.
-    pub(super) fn session_options(&self, session: &AgentSession) -> SessionOptions {
-        let model = session.model.clone().or_else(|| {
-            self.provider_probe(session.provider)
-                .and_then(ProviderProbe::preferred_model)
-                .map(|model| model.id.clone())
-        });
-        let model_metadata = self.model_metadata_for_session(session);
-        let reasoning_effort = session.reasoning_effort.clone().filter(|effort| {
-            model_metadata.is_some_and(|model| {
-                model
-                    .reasoning_efforts
-                    .iter()
-                    .any(|option| option.id == *effort)
-            })
-        });
-        let service_tier = session.service_tier.clone().filter(|tier| {
-            tier == "default"
-                || model_metadata.is_some_and(|model| {
-                    model.service_tiers.iter().any(|option| option.id == *tier)
-                })
-        });
-        let context_window = session.context_window.clone().filter(|window| {
-            model_metadata.is_some_and(|model| {
-                model
-                    .context_windows
-                    .iter()
-                    .any(|option| option.id == *window)
-            })
-        });
-        SessionOptions {
-            mode: session.runtime_mode,
-            interaction_mode: session.interaction_mode,
-            model,
-            reasoning_effort,
-            service_tier,
-            context_window,
-        }
-    }
-
-    pub(super) fn agent_preset_for_session(&self, session: &AgentSession) -> Option<String> {
-        if session.provider != ProviderKind::DeepSeek {
-            return None;
-        }
-        session.agent_preset.clone().or_else(|| {
-            self.provider_probe(session.provider)
-                .and_then(ProviderProbe::preferred_agent_preset)
-                .map(|preset| preset.id.clone())
-        })
-    }
-
-    pub(super) fn agent_preset_label_for_session(&self, session: &AgentSession) -> Option<String> {
-        let id = self.agent_preset_for_session(session)?;
-        Some(
-            self.provider_probe(session.provider)
-                .and_then(|probe| probe.agent_presets.iter().find(|preset| preset.id == id))
-                .map(|preset| preset.display_name())
-                .unwrap_or(id),
+    /// Resolves the options sent to the daemon-owned endpoint runtime.
+    fn service_tier_for_session(&self, session: &AgentSession) -> Option<waku_client::ServiceTier> {
+        let model = self.model_for_session(session)?;
+        gated_service_tier(
+            session.service_tier,
+            catalog_allows_service_tier(catalog_entry_for(
+                &self.model_catalogs,
+                &session.provider,
+                model,
+            )),
         )
     }
 
-    /// Releases provider processes for sessions nobody has touched in a while.
-    ///
-    /// Codex and Pi keep a process resident between turns, so an abandoned task
-    /// otherwise holds an agent — and, with Computer Use on, a whole process
-    /// tree — for as long as the app runs. Recreating a runtime is exactly the
-    /// work the next prompt already does after Stop, and the resume cursor is
-    /// persisted, so the conversation survives.
+    pub(super) fn session_options(&self, session: &AgentSession) -> SessionOptions {
+        SessionOptions {
+            mode: session.runtime_mode,
+            interaction_mode: session.interaction_mode,
+            model: self.model_for_session(session).map(str::to_owned),
+            reasoning_effort: session.reasoning_effort.clone(),
+            service_tier: self.service_tier_for_session(session),
+            context_window: session.context_window.clone(),
+        }
+    }
+
     pub(super) fn reap_idle_sessions(&mut self) {
         if self.last_idle_session_sweep.elapsed() < IDLE_SESSION_SWEEP_INTERVAL {
             return;
@@ -2556,18 +1394,12 @@ impl Waku {
             .map(|(session_id, _)| *session_id)
             .collect::<Vec<_>>();
         for session_id in idle {
-            // Idle reaping is an explicit daemon-runtime release. Merely
-            // dropping a client attachment must not stop work observed by a
-            // second desktop or browser client.
             if let Some(runtime) = self.runtimes.remove(&session_id) {
                 runtime.driver.close();
             }
         }
     }
 
-    /// Applies a changed model, effort, tier, or mode to a session. Transports
-    /// that carry these per turn absorb the change and keep running; the rest
-    /// are torn down so the next prompt starts with the new options.
     pub(super) fn apply_session_options(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
         let Some(options) = self
             .state
@@ -2608,18 +1440,16 @@ impl Waku {
         session: &AgentSession,
         cwd: PathBuf,
     ) -> anyhow::Result<DriverStartRequest> {
-        let binary = self
-            .probes
-            .iter()
-            .find(|probe| probe.provider == session.provider)
-            .and_then(|probe| probe.path.clone())
-            .ok_or_else(|| {
-                anyhow::anyhow!(tr!(
-                    "errors.provider_not_found",
-                    provider = session.provider.display_name()
-                ))
-            })?;
-        let agent_preset = self.agent_preset_for_session(session);
+        let Some(provider) = self.configured_provider(&session.provider) else {
+            anyhow::bail!(tr!(
+                "errors.provider_not_found",
+                provider = session.provider.as_str()
+            ));
+        };
+        provider.id.validate().map_err(anyhow::Error::msg)?;
+        if provider.default_model.trim().is_empty() {
+            anyhow::bail!("provider {:?} has no default model", provider.id.as_str());
+        }
         let SessionOptions {
             mode,
             interaction_mode,
@@ -2627,12 +1457,11 @@ impl Waku {
             reasoning_effort,
             service_tier,
             context_window,
-        } = self.session_options(&session);
+        } = self.session_options(session);
         Ok(DriverStartRequest {
             session_id: session.id,
-            provider: session.provider,
             options: DriverStartOptions {
-                binary,
+                provider: session.provider.clone(),
                 cwd,
                 mode,
                 interaction_mode,
@@ -2640,9 +1469,6 @@ impl Waku {
                 reasoning_effort,
                 service_tier,
                 context_window,
-                agent_preset,
-                computer_use_enabled: cfg!(target_os = "macos") && self.state.computer_use_enabled,
-                provider_cursor: session.provider_cursor.clone(),
             },
             event_wake: self.event_wake_tx.clone(),
             daemon_client: self.daemon.client(),
@@ -2667,14 +1493,8 @@ impl Waku {
                 stream_remeasure_pending: false,
                 pending_permission: None,
                 pending_user_input: None,
-                pending_computer_approval: None,
-                computer_use_previews: Vec::new(),
-                computer_session_grants: HashSet::new(),
                 last_driver_error: None,
                 last_active_at: Instant::now(),
-                last_background_refresh_at: Instant::now()
-                    .checked_sub(BACKGROUND_WORK_REFRESH_INTERVAL)
-                    .unwrap_or_else(Instant::now),
             },
         );
         // Startup can emit before the background task hands this receiver to
@@ -2732,7 +1552,9 @@ impl Waku {
             return;
         }
         if let Some(runtime) = self.runtimes.get_mut(&session.id) {
-            runtime.driver.steer(submission.prompt.clone());
+            runtime
+                .driver
+                .steer(prompt_input_from_submission(&submission));
             runtime.pending_steers.push_back(submission);
         } else {
             self.enqueue_follow_up_submission(session.id, submission, cx);
@@ -2893,7 +1715,7 @@ impl Waku {
             .trim()
             .is_empty();
         let next_turn_count = session.turns.len() + 1;
-        let provider = session.provider.id();
+        let provider = session.provider.as_str().to_owned();
         let model = self
             .session_options(session)
             .model
@@ -3133,7 +1955,6 @@ impl Waku {
             runtime.stream_phase = None;
             runtime.pending_permission = None;
             runtime.pending_user_input = None;
-            runtime.pending_computer_approval = None;
             runtime.last_active_at = Instant::now();
         }
         // The transcript already shows the turn — the prompt message, its
@@ -3147,13 +1968,16 @@ impl Waku {
         // the same echo the CLIs show — while the provider receives the
         // rendered prompt. Claude's commands pass through untouched; its CLI
         // owns their expansion.
-        let prompt = submission.prompt;
+        let prompt = submission.prompt.clone();
         let driver_prompt =
             crate::composer_complete::expanded_submission(&prompt, &self.slash_command_index)
                 .unwrap_or(prompt);
         let mut failed_to_start = false;
         match driver {
-            Ok(driver) => driver.prompt(driver_prompt),
+            Ok(driver) => driver.prompt(prompt_input_from_submission_with_text(
+                &submission,
+                driver_prompt,
+            )),
             Err(error) => {
                 failed_to_start = true;
                 let message = tr!("errors.start_agent", error = error);
@@ -3196,14 +2020,7 @@ impl Waku {
     pub(super) fn drain_event_pump(&mut self, cx: &mut Context<Self>) -> EventPumpSchedule {
         // `|` on purpose: a busy provider must not starve the other result
         // queues just because its own drain reported a change first.
-        if self.drain_driver_events(cx)
-            | self.drain_provider_probe_events()
-            | self.drain_provider_version_events()
-            | self.drain_provider_detection_events()
-            | self.drain_computer_permission_events()
-            | self.drain_plan_usage_events()
-            | self.drain_task_state_sync_events(cx)
-        {
+        if self.drain_driver_events(cx) | self.drain_task_state_sync_events(cx) {
             cx.notify();
         }
         if std::mem::take(&mut self.workspace_queries_stale) {
@@ -3228,38 +2045,6 @@ impl Waku {
         } else {
             EventPumpSchedule::Idle
         }
-    }
-
-    pub(super) fn drain_provider_probe_events(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(probe) = self.provider_probe_events.try_recv() {
-            self.provider_model_discoveries_pending
-                .remove(&probe.provider);
-            if let Some(existing) = self
-                .probes
-                .iter_mut()
-                .find(|existing| existing.provider == probe.provider)
-            {
-                *existing = probe;
-            } else {
-                self.probes.push(probe);
-            }
-            changed = true;
-        }
-        changed
-    }
-
-    pub(super) fn drain_computer_permission_events(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(result) = self.computer_permission_events.try_recv() {
-            self.computer_permission_request_pending = false;
-            match result {
-                Ok(permissions) => self.computer_permissions = permissions,
-                Err(error) => self.show_toast(error),
-            }
-            changed = true;
-        }
-        changed
     }
 
     pub(super) fn drain_driver_events(&mut self, cx: &mut Context<Self>) -> bool {
@@ -3288,15 +2073,15 @@ impl Waku {
                 let Some(event) = event else {
                     break;
                 };
-                let background_event = matches!(event, DriverEvent::BackgroundWork(_));
+                let background_event = matches!(&event, DriverEvent::BackgroundWork(_));
                 let background_output_delta = matches!(
-                    event,
-                    DriverEvent::BackgroundWork(BackgroundWorkEvent::OutputDelta { .. })
+                    &event,
+                    DriverEvent::BackgroundWork(work)
+                        if matches!(work.as_ref(), BackgroundWorkEvent::OutputDelta { .. })
                 );
                 force_save |= matches!(
                     event,
-                    DriverEvent::Connected { .. }
-                        | DriverEvent::AgentPresetSelected(_)
+                    DriverEvent::Connected
                         | DriverEvent::AutoTitleUpdated(_)
                         | DriverEvent::Permission { .. }
                         | DriverEvent::SteerAccepted { .. }
@@ -3368,68 +2153,113 @@ impl Waku {
         changed || selected_changed
     }
 }
+pub(crate) fn catalog_entry_for<'a>(
+    catalogs: &'a HashMap<ProviderId, waku_client::ModelCatalog>,
+    provider: &ProviderId,
+    model: &str,
+) -> Option<&'a waku_client::ModelCatalogEntry> {
+    catalogs
+        .get(provider)?
+        .models
+        .iter()
+        .find(|entry| entry.id == model)
+}
 
-#[cfg(test)]
-mod response_fork_title_tests {
-    use super::next_response_fork_title;
+pub(crate) fn catalog_allows_service_tier(entry: Option<&waku_client::ModelCatalogEntry>) -> bool {
+    entry.is_some_and(|entry| entry.supported && entry.capabilities.service_tier)
+}
 
-    #[test]
-    fn response_fork_titles_advance_one_numbered_sequence() {
-        assert_eq!(
-            next_response_fork_title("Fix the bug", ["Fix the bug"]),
-            "Fix the bug (2)"
-        );
-        assert_eq!(
-            next_response_fork_title(
-                "Fix the bug",
-                ["Fix the bug", "Fix the bug (2)", "Fix the bug (4)"]
-            ),
-            "Fix the bug (5)"
-        );
-        assert_eq!(
-            next_response_fork_title("Fix the bug (2)", ["Fix the bug", "Fix the bug (2)"]),
-            "Fix the bug (3)"
-        );
-        assert_eq!(
-            next_response_fork_title("Plan (2026)", ["Plan (2026)"]),
-            "Plan (2026) (2)"
-        );
-    }
+pub(crate) fn gated_service_tier(
+    tier: Option<waku_client::ServiceTier>,
+    catalog_allows: bool,
+) -> Option<waku_client::ServiceTier> {
+    tier.filter(|_| catalog_allows)
+}
+fn prompt_input_from_submission(submission: &ComposerSubmission) -> waku_client::PromptInput {
+    prompt_input_from_submission_with_text(submission, submission.prompt.clone())
+}
+fn prompt_input_from_submission_with_text(
+    submission: &ComposerSubmission,
+    text: String,
+) -> waku_client::PromptInput {
+    let attachments = submission
+        .attachments
+        .iter()
+        .filter_map(|attachment| {
+            attachment
+                .blob_reference
+                .as_ref()
+                .map(|reference| waku_client::PromptImageRef::Blob {
+                    reference: reference.clone(),
+                })
+        })
+        .collect();
+    waku_client::PromptInput { text, attachments }
 }
 
 #[cfg(test)]
-mod version_tests {
-    use crate::model::parse_cli_version;
+mod service_tier_tests {
+    use super::{catalog_allows_service_tier, gated_service_tier};
+    use waku_client::{
+        ApiFormat, ModelCapabilities, ModelCatalogEntry, ProviderId, ServiceTier, TransportProfile,
+        UnsupportedReason,
+    };
 
-    #[test]
-    fn parses_common_cli_version_banners() {
-        assert_eq!(
-            parse_cli_version("codex-cli 0.45.0\n"),
-            Some("0.45.0".to_owned())
-        );
-        assert_eq!(
-            parse_cli_version("2.1.24 (Claude Code)\n"),
-            Some("2.1.24".to_owned())
-        );
-        assert_eq!(
-            parse_cli_version("v1.3.0-beta.2"),
-            Some("1.3.0-beta.2".to_owned())
-        );
-        assert_eq!(
-            parse_cli_version("\nAmp CLI version 0.9.12\n"),
-            Some("0.9.12".to_owned())
-        );
-        assert_eq!(parse_cli_version("not a version"), None);
-        assert_eq!(parse_cli_version(""), None);
+    fn entry(service_tier: bool, supported: bool) -> ModelCatalogEntry {
+        ModelCatalogEntry {
+            id: "gpt-5".into(),
+            name: "gpt-5".into(),
+            provider: ProviderId::new("openai"),
+            api_format: ApiFormat::OpenAiResponses,
+            transport: TransportProfile::Standard,
+            base_url: "https://api.openai.com/v1".into(),
+            context_window: 128_000,
+            max_output_tokens: 16_384,
+            reasoning: false,
+            capabilities: if service_tier {
+                ModelCapabilities::openai_api(ApiFormat::OpenAiResponses)
+            } else {
+                ModelCapabilities::openai_compatible(ApiFormat::OpenAiResponses)
+            },
+            supported,
+            unsupported_reason: (!supported).then_some(UnsupportedReason::NonChat),
+        }
     }
 
     #[test]
-    fn version_requires_a_dotted_number_not_a_bare_digit() {
-        // "2024" alone or a hash must not read as a version.
-        assert_eq!(parse_cli_version("build 2024 f3a9c1"), None);
+    fn official_openai_catalog_entry_keeps_the_selected_tier() {
         assert_eq!(
-            parse_cli_version("cursor-agent 2025.09.12-4f8d8e2"),
-            Some("2025.09.12-4f8d8e2".to_owned())
+            gated_service_tier(
+                Some(ServiceTier::Priority),
+                catalog_allows_service_tier(Some(&entry(true, true)))
+            ),
+            Some(ServiceTier::Priority)
+        );
+    }
+
+    #[test]
+    fn openai_compatible_catalog_entry_clears_the_tier() {
+        assert_eq!(
+            gated_service_tier(
+                Some(ServiceTier::Flex),
+                catalog_allows_service_tier(Some(&entry(false, true)))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn missing_or_unsupported_catalog_entry_clears_the_tier() {
+        assert_eq!(
+            gated_service_tier(Some(ServiceTier::Flex), catalog_allows_service_tier(None)),
+            None
+        );
+        assert_eq!(
+            gated_service_tier(
+                Some(ServiceTier::Priority),
+                catalog_allows_service_tier(Some(&entry(true, false)))
+            ),
+            None
         );
     }
 }

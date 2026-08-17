@@ -75,6 +75,9 @@ impl DaemonSettingsStore {
 
     pub fn replace(&self, mut settings: DaemonSettings) -> io::Result<()> {
         settings.discard_legacy_app_keys();
+        settings
+            .validate()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let mut current = self.settings.lock();
         write_atomic(&self.path, &settings)?;
         *current = settings;
@@ -107,8 +110,6 @@ fn to_io_error(error: impl std::error::Error + Send + Sync + 'static) -> io::Err
 mod tests {
     use super::*;
     use serde_json::Value;
-    use uuid::Uuid;
-    use waku_protocol::model::ProviderKind;
 
     #[test]
     fn legacy_combined_settings_keep_only_daemon_fields() {
@@ -121,7 +122,7 @@ mod tests {
 
         let store = DaemonSettingsStore::open(path.clone()).unwrap();
         let settings = store.get();
-        assert!(settings.computer_use_enabled);
+        assert!(!settings.extra.contains_key("computer_use_enabled"));
         assert_eq!(settings.extra.get("future"), Some(&Value::from(42)));
         assert!(!settings.extra.contains_key("theme"));
         store.replace(settings).unwrap();
@@ -134,23 +135,21 @@ mod tests {
     }
 
     #[test]
-    fn imports_daemon_fields_from_a_debug_combined_settings_file() {
+    fn imports_generic_daemon_settings_from_legacy_path() {
         let directory = std::env::temp_dir().join(format!("waku-settings-{}", Uuid::new_v4()));
         let path = directory.join("home/settings.json");
         let legacy = directory.join("checkout/temp/settings.json");
         fs::create_dir_all(legacy.parent().unwrap()).unwrap();
         fs::write(
             &legacy,
-            r#"{"theme":"dark","disabled_providers":["claude"]}"#,
+            r#"{"computer_use_enabled":true,"future":42,"theme":"dark"}"#,
         )
         .unwrap();
 
         let store = DaemonSettingsStore::open_with_legacy(path.clone(), [legacy.clone()]).unwrap();
-
-        assert_eq!(store.get().disabled_providers, vec![ProviderKind::Claude]);
-        let migrated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(migrated["disabled_providers"][0], "claude");
-        assert!(migrated.get("theme").is_none());
+        assert!(!store.get().extra.contains_key("computer_use_enabled"));
+        assert_eq!(store.get().extra.get("future"), Some(&Value::from(42)));
+        assert!(!store.get().extra.contains_key("theme"));
         assert!(legacy.exists());
         fs::remove_dir_all(directory).ok();
     }
@@ -172,6 +171,41 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("settings.json.corrupt-")
         }));
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn replace_rejects_reserved_and_invalid_endpoints() {
+        let directory = std::env::temp_dir().join(format!("waku-settings-{}", Uuid::new_v4()));
+        let path = directory.join("settings.json");
+        fs::create_dir_all(&directory).unwrap();
+        let store = DaemonSettingsStore::open(path).unwrap();
+
+        let reserved = DaemonSettings {
+            external_providers: vec![waku_protocol::ExternalProvider::new(
+                waku_protocol::ProviderId::OPENAI_CHAT,
+                "Nope",
+                "http://127.0.0.1:9/v1",
+                waku_protocol::ApiFormat::OpenAiChat,
+                "gpt-5",
+            )],
+            extra: Default::default(),
+        };
+        let error = store.replace(reserved).unwrap_err();
+        assert!(error.to_string().contains("reserved"), "{error}");
+
+        let bad_url = DaemonSettings {
+            external_providers: vec![waku_protocol::ExternalProvider::new(
+                "corp-chat",
+                "Corp",
+                "not-a-url",
+                waku_protocol::ApiFormat::OpenAiChat,
+                "gpt-5",
+            )],
+            extra: Default::default(),
+        };
+        assert!(store.replace(bad_url).is_err());
+        assert!(store.get().external_providers.is_empty());
         fs::remove_dir_all(directory).ok();
     }
 }

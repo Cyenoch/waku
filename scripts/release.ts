@@ -18,7 +18,6 @@ const appName = "Waku";
 const executableName = "Waku";
 const jsReplExecutableName = "waku_js_repl";
 const daemonExecutableName = "waku-daemon";
-const computerUseHelperName = "Waku Computer Use";
 const packageName = "waku";
 const defaultNotaryProfile = "NOTARY";
 const projectRoot = resolve(import.meta.dir, "..");
@@ -287,24 +286,6 @@ const bundledDaemonExecutable = join(
   "MacOS",
   daemonExecutableName,
 );
-const bundledComputerUseSkill = join(
-  contentsDirectory,
-  "Resources",
-  "skills",
-  "waku-computer-use",
-  "SKILL.md",
-);
-const bundledPiComputerUseExtension = join(
-  contentsDirectory,
-  "Resources",
-  "computer-use",
-  "pi-extension.ts",
-);
-const bundledComputerUseHelper = join(
-  contentsDirectory,
-  "Helpers",
-  `${computerUseHelperName}.app`,
-);
 const bundledSparkleFramework = join(
   contentsDirectory,
   "Frameworks",
@@ -416,9 +397,6 @@ try {
     join(contentsDirectory, "MacOS", executableName),
     bundledDaemonExecutable,
     bundledJsReplExecutable,
-    bundledComputerUseSkill,
-    bundledPiComputerUseExtension,
-    bundledComputerUseHelper,
     join(bundledSparkleFramework, "Sparkle"),
   ]) {
     await access(artifact);
@@ -429,7 +407,6 @@ try {
 
   await $`codesign --verify --strict --verbose=2 ${bundledJsReplExecutable}`;
   await $`codesign --verify --strict --verbose=2 ${bundledDaemonExecutable}`;
-  await $`codesign --verify --deep --strict --verbose=2 ${bundledComputerUseHelper}`;
   await verifyJavaScriptRepl(bundledJsReplExecutable);
   logStep(
     adhoc
@@ -484,11 +461,6 @@ try {
     "MacOS",
     daemonExecutableName,
   );
-  const mountedComputerUseHelper = join(
-    mountedContents,
-    "Helpers",
-    `${computerUseHelperName}.app`,
-  );
   const mountedSparkleFramework = join(
     mountedContents,
     "Frameworks",
@@ -498,20 +470,6 @@ try {
     join(mountedContents, "MacOS", executableName),
     mountedDaemon,
     mountedJsRepl,
-    join(
-      mountedContents,
-      "Resources",
-      "skills",
-      "waku-computer-use",
-      "SKILL.md",
-    ),
-    join(
-      mountedContents,
-      "Resources",
-      "computer-use",
-      "pi-extension.ts",
-    ),
-    mountedComputerUseHelper,
     join(mountedSparkleFramework, "Sparkle"),
   ]) {
     await access(artifact);
@@ -527,7 +485,6 @@ try {
   }
   await $`codesign --verify --strict --verbose=2 ${mountedJsRepl}`;
   await $`codesign --verify --strict --verbose=2 ${mountedDaemon}`;
-  await $`codesign --verify --deep --strict --verbose=2 ${mountedComputerUseHelper}`;
   await $`codesign --verify --strict --verbose=2 ${mountedSparkleFramework}`;
   await $`codesign --verify --deep --strict --verbose=2 ${mountedApp}`;
   await verifyJavaScriptRepl(mountedJsRepl);

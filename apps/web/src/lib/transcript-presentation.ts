@@ -23,7 +23,6 @@ export function userMessageRewindTurnCount(
     .slice(retainedTurnCount)
     .filter((candidate) => candidate.provider_turn_started)
     .length
-  if (rollbackTurns > 0 && !session.provider_cursor) return null
   return turn.turn_count
 }
 

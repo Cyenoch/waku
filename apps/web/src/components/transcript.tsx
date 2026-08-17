@@ -702,8 +702,6 @@ function responseForkTurnCount(
     !footer
     || message.role !== 'assistant'
     || !['idle', 'failed'].includes(session.status)
-    || !session.provider_cursor
-    || session.provider_cursor.provider !== session.provider
     || !turn?.provider_turn_started
   ) return null
   return turn.turn_count

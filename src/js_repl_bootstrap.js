@@ -17,7 +17,6 @@
     }
   };
 
-  const nativeSkyCall = globalThis.__wakuSkyCall;
   const nativeWrite = globalThis.__wakuWrite;
   const nativeEmitImage = globalThis.__wakuEmitImage;
   const nativeSetResponseMeta = globalThis.__wakuSetResponseMeta;
@@ -27,7 +26,6 @@
   const cwd = globalThis.__wakuCwd;
   const homeDir = globalThis.__wakuHomeDir;
   const tmpDir = globalThis.__wakuTmpDir;
-  delete globalThis.__wakuSkyCall;
   delete globalThis.__wakuWrite;
   delete globalThis.__wakuEmitImage;
   delete globalThis.__wakuSetResponseMeta;
@@ -338,50 +336,6 @@
 
   globalThis.global = globalThis;
   globalThis.tmpDir = tmpDir;
-
-  const chromeComputerUseMetaKey = "codex/computerUseChrome";
-  const macChromeAppPathPattern = /(?:^|[\\/])Google Chrome\.app(?:[\\/]|$)/i;
-  const markChromeComputerUse = (arguments_) => {
-    if (typeof arguments_ !== "object" || arguments_ === null) return;
-    const descriptor = Object.getOwnPropertyDescriptor(arguments_, "app");
-    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string") return;
-    const app = descriptor.value.trim();
-    if (
-      ["chrome", "google chrome", "com.google.chrome"].includes(app.toLowerCase()) ||
-      macChromeAppPathPattern.test(app)
-    ) {
-      nativeSetResponseMeta(JSON.stringify({ [chromeComputerUseMetaKey]: true }));
-    }
-  };
-  const nativeCall = (name, arguments_ = {}) => {
-    if (name !== "list_apps") markChromeComputerUse(arguments_);
-    const envelope = JSON.parse(nativeSkyCall(name, JSON.stringify(arguments_ ?? {})));
-    if (!envelope.ok) throw new Error(envelope.error || `Computer Use ${name} failed`);
-    return envelope.value;
-  };
-  const computerUseRuntimeKey = Symbol.for("openai.computer-use.runtime");
-  globalThis.setupComputerUseRuntime = async ({ globals = globalThis } = {}) => {
-    let sky = globalThis[computerUseRuntimeKey];
-    if (!sky) {
-      sky = Object.freeze({
-        target: "mac",
-        list_apps: async () => nativeCall("list_apps"),
-        get_app_state: async (arguments_ = {}) => nativeCall("get_app_state", arguments_),
-        click: async (arguments_) => { nativeCall("click", arguments_); },
-        drag: async (arguments_) => { nativeCall("drag", arguments_); },
-        perform_secondary_action: async (arguments_) => { nativeCall("perform_secondary_action", arguments_); },
-        set_value: async (arguments_) => { nativeCall("set_value", arguments_); },
-        select_text: async (arguments_) => { nativeCall("select_text", arguments_); },
-        scroll: async (arguments_) => { nativeCall("scroll", arguments_); },
-        press_key: async (arguments_) => { nativeCall("press_key", arguments_); },
-        type_text: async (arguments_) => { nativeCall("type_text", arguments_); },
-      });
-      Object.defineProperty(globalThis, computerUseRuntimeKey, { value: sky });
-    }
-    Reflect.set(globalThis, "sky", sky);
-    Reflect.set(globals, "sky", sky);
-    return sky;
-  };
 
   let requestMeta = Object.freeze({});
   globalThis.__wakuSetRequestMeta = (meta) => {

@@ -40,9 +40,8 @@ and relaunch the app normally. Keep that watcher running while you work. Do
 not start a second watcher or manually relaunch the debug app. Press `Ctrl-C`,
 or quit the app, to stop it.
 
-The embedded browser and experimental computer-use integration are currently
-macOS-only. On Linux the browser reports that it is unavailable, while the
-computer-use UI and runtime stay disabled.
+The embedded browser is currently macOS-only. On Linux the browser reports
+that it is unavailable.
 
 ## Linux bundle
 

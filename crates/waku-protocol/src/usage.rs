@@ -1,21 +1,4 @@
 use chrono::Datelike as _;
-use serde::{Deserialize, Serialize};
-use ts_rs::TS;
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanUsage {
-    pub plan_label: Option<String>,
-    pub windows: Vec<PlanWindow>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanWindow {
-    pub label: String,
-    pub percent: f64,
-    pub resets_at: Option<i64>,
-}
 
 pub fn format_tokens(tokens: u64) -> String {
     if tokens >= 999_500 {

@@ -8,16 +8,27 @@ use crate::model::{ActivityItem, ActivityKind};
 
 const MAX_ACTIVITY_CHARS: usize = 16_000;
 
+pub(super) struct ToolActivityView<'a> {
+    pub arguments: Option<&'a Value>,
+    pub output: Option<&'a Value>,
+    pub image_source: Option<&'a Value>,
+    pub failed: bool,
+    pub complete: bool,
+}
+
 pub(super) fn tool_activity(
     source_id: Option<String>,
     kind: ActivityKind,
     title: String,
-    arguments: Option<&Value>,
-    output: Option<&Value>,
-    image_source: Option<&Value>,
-    failed: bool,
-    complete: bool,
+    view: ToolActivityView<'_>,
 ) -> ActivityItem {
+    let ToolActivityView {
+        arguments,
+        output,
+        image_source,
+        failed,
+        complete,
+    } = view;
     let raw_arguments = arguments;
     let arguments = arguments
         .filter(|value| !value.is_null())
@@ -51,6 +62,7 @@ pub(super) fn tool_activity(
         .with_failed(failed)
 }
 
+#[cfg(test)]
 pub(super) fn input_title(value: Option<&Value>) -> Option<String> {
     let value = value?;
     value
@@ -62,35 +74,6 @@ pub(super) fn input_title(value: Option<&Value>) -> Option<String> {
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .map(str::to_owned)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn title_supports_direct_and_provider_wrapped_arguments() {
-        assert_eq!(
-            input_title(Some(&serde_json::json!({"title": "Inspect app"}))).as_deref(),
-            Some("Inspect app")
-        );
-        assert_eq!(
-            input_title(Some(&serde_json::json!({
-                "tool_name": "waku_js_repl__js",
-                "arguments": {"code": "1", "title": "Inspect wrapped app"}
-            })))
-            .as_deref(),
-            Some("Inspect wrapped app")
-        );
-        assert_eq!(
-            input_title(Some(&serde_json::json!({
-                "tool_name": "waku_js_repl__js",
-                "tool_input": {"code": "1", "title": "Verify Grok bridge"}
-            })))
-            .as_deref(),
-            Some("Verify Grok bridge")
-        );
-    }
 }
 
 pub(super) fn format_json(value: &Value) -> Option<String> {
@@ -206,4 +189,33 @@ fn non_empty_text(value: String) -> Option<String> {
     let mut truncated = value.chars().take(MAX_ACTIVITY_CHARS).collect::<String>();
     truncated.push_str(&tr!("activity.output_truncated"));
     Some(truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_supports_direct_and_provider_wrapped_arguments() {
+        assert_eq!(
+            input_title(Some(&serde_json::json!({"title": "Inspect app"}))).as_deref(),
+            Some("Inspect app")
+        );
+        assert_eq!(
+            input_title(Some(&serde_json::json!({
+                "tool_name": "waku_js_repl__js",
+                "arguments": {"code": "1", "title": "Inspect wrapped app"}
+            })))
+            .as_deref(),
+            Some("Inspect wrapped app")
+        );
+        assert_eq!(
+            input_title(Some(&serde_json::json!({
+                "tool_name": "waku_js_repl__js",
+                "tool_input": {"code": "1", "title": "Verify Grok bridge"}
+            })))
+            .as_deref(),
+            Some("Verify Grok bridge")
+        );
+    }
 }

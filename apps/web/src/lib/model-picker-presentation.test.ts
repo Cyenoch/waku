@@ -1,35 +1,26 @@
 import { describe, expect, test } from 'bun:test'
-import type { ProviderModel } from '@waku/client'
-import {
-  nextModelPickerHighlight,
-  selectedModelPickerIndex,
-  type ModelPickerRow,
-} from './model-picker-presentation'
-
-const model = (id: string): ProviderModel => ({
-  id,
-  name: id,
-  is_default: false,
-  reasoning_efforts: [],
-  service_tiers: [],
-  context_windows: [],
-})
+import { nextModelPickerHighlight, selectedModelPickerIndex } from './model-picker-presentation'
+import { serviceTierForModel } from './service-tier'
 
 describe('model picker presentation', () => {
-  test('finds the selected model instead of treating the first row as selected', () => {
-    const rows: ModelPickerRow[] = [
-      { provider: 'claude', model: model('claude-fable-5') },
-      { provider: 'claude', model: model('claude-opus-5') },
-      { provider: 'claude', model: model('claude-opus-4-8') },
-    ]
-
-    expect(selectedModelPickerIndex(rows, 'claude', 'claude-opus-4-8')).toBe(2)
-    expect(selectedModelPickerIndex(rows, 'claude', 'missing')).toBe(-1)
+  test('selects a configured endpoint model', () => {
+    const rows = [{ provider: 'local', model: { id: 'model-a' } }, { provider: 'remote', model: { id: 'model-b' } }]
+    expect(selectedModelPickerIndex(rows, 'remote', 'model-b')).toBe(1)
+    expect(selectedModelPickerIndex(rows, 'remote', 'missing')).toBe(-1)
   })
 
-  test('starts keyboard navigation only after an arrow key', () => {
-    expect(nextModelPickerHighlight(null, 4, 'next')).toBe(0)
-    expect(nextModelPickerHighlight(null, 4, 'previous')).toBe(3)
-    expect(nextModelPickerHighlight(3, 4, 'next')).toBe(0)
+  test('cycles keyboard highlight', () => {
+    expect(nextModelPickerHighlight(null, 3, 'next')).toBe(0)
+    expect(nextModelPickerHighlight(0, 3, 'previous')).toBe(2)
+  })
+})
+
+describe('catalog service tier gating', () => {
+  test('uses only the selected catalog capability', () => {
+    const supported = { apiFormat: 'openAiResponses' as const, capabilities: { serviceTier: true, reasoningEffort: false, reasoningSummary: false, sampling: false } }
+    const unsupported = { apiFormat: 'openAiChat' as const, capabilities: { serviceTier: false, reasoningEffort: false, reasoningSummary: false, sampling: false } }
+    expect(serviceTierForModel(supported, 'priority')).toBe('priority')
+    expect(serviceTierForModel(unsupported, 'priority')).toBeNull()
+    expect(serviceTierForModel(undefined, 'priority')).toBeNull()
   })
 })

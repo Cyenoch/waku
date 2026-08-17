@@ -42,6 +42,11 @@ pub struct SlashCommand {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+pub struct ReportedCommand {
+    pub name: String,
+    pub description: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 pub struct FileEntry {
     pub path: String,
     pub is_dir: bool,

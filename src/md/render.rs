@@ -562,6 +562,7 @@ impl<'a> Ctx<'a> {
 /// it first — underneath the glyphs — while the text's prepaint has already
 /// filled in the shared [`TextLayout`]. That ordering is what lets a pure-paint
 /// pass read real glyph geometry without a second layout pass.
+#[allow(clippy::too_many_arguments)]
 fn text_element_with_selection(
     flat: &FlatText,
     runs: Vec<TextRun>,
@@ -998,8 +999,7 @@ fn markdown_capped<'a>(
         ctx.next_ordinal.set(block_ordinal_base(block_ix));
         children.push(render_block(block, &ctx));
         debug_assert!(
-            ctx.next_ordinal.get() - block_ordinal_base(block_ix)
-                < 1 << BLOCK_ORDINAL_STRIDE_BITS,
+            ctx.next_ordinal.get() - block_ordinal_base(block_ix) < 1 << BLOCK_ORDINAL_STRIDE_BITS,
             "a single block overflowed its ordinal stride"
         );
     }
@@ -1833,7 +1833,7 @@ mod tests {
             highlighted.iter().map(|run| run.len).sum::<usize>(),
             plain.iter().map(|run| run.len).sum::<usize>()
         );
-        assert!(highlighted.iter().all(|run| &run.font == &code_font));
+        assert!(highlighted.iter().all(|run| run.font == code_font));
     }
 
     #[test]

@@ -9,8 +9,6 @@ import {
   daemonKeys,
   generateWorkspaceCommitMessage,
   inspectWorkspaceCommit,
-  loadDaemonSettings,
-  probeProvider,
   pushWorkspace,
   sessionCwd,
 } from '@/lib/daemon-api'
@@ -80,18 +78,12 @@ export function CommitDialog({
         let commitMessage = message.trim()
         if (!commitMessage) {
           if (!session) throw new Error(t('commit.no_task'))
-          const settings = await loadDaemonSettings(client)
-          const probe = await probeProvider(client, session.provider, settings)
-          if (!probe.installed || !probe.path) {
-            throw new Error(t('commit.agent_unavailable'))
-          }
           commitMessage = await generateWorkspaceCommitMessage(
             client,
             cwd,
             includeUnstaged,
             {
               provider: session.provider,
-              binary: probe.path,
               model: session.model ?? null,
               reasoning_effort: session.reasoning_effort ?? null,
             },

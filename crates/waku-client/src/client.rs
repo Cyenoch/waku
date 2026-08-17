@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use waku_protocol::MAX_WIRE_MESSAGE_BYTES;
 use waku_protocol::{
-    ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
+    ClientMessage, Command, PROTOCOL_VERSION, ProviderId, ReplayCursor, Request, ResponseOutcome,
     ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireDriverEvent,
 };
 
@@ -24,7 +24,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_BUFFERED_EVENTS_PER_RUNTIME: usize = 4096;
 
 enum Outgoing {
-    Message(ClientMessage),
+    Message(Box<ClientMessage>),
     Shutdown,
 }
 
@@ -168,7 +168,7 @@ impl DaemonClient {
         if self
             .inner
             .outgoing
-            .send(Outgoing::Message(message))
+            .send(Outgoing::Message(Box::new(message)))
             .is_err()
         {
             self.inner.pending.lock().remove(&request_id);
@@ -195,16 +195,75 @@ impl DaemonClient {
         }
         self.inner
             .outgoing
-            .send(Outgoing::Message(ClientMessage::Request(Request {
-                // The nil request id is reserved for fire-and-forget controls;
-                // the daemon executes them in the runtime mailbox but does
-                // not allocate or send a response.
-                request_id: Uuid::nil(),
-                session_id,
-                runtime_id,
-                command,
-            })))
+            .send(Outgoing::Message(Box::new(ClientMessage::Request(
+                Request {
+                    // The nil request id is reserved for fire-and-forget controls;
+                    // the daemon executes them in the runtime mailbox but does
+                    // not allocate or send a response.
+                    request_id: Uuid::nil(),
+                    session_id,
+                    runtime_id,
+                    command,
+                },
+            ))))
             .map_err(|_| anyhow!("Waku daemon connection is closed"))
+    }
+
+    pub fn get_auth_status(&self, provider: Option<ProviderId>) -> anyhow::Result<ResponsePayload> {
+        self.request(
+            Uuid::nil(),
+            Uuid::nil(),
+            Command::GetAuthStatus { provider },
+        )
+    }
+
+    pub fn start_login(
+        &self,
+        provider: ProviderId,
+        method: crate::LoginMethod,
+    ) -> anyhow::Result<ResponsePayload> {
+        self.request(
+            Uuid::nil(),
+            Uuid::nil(),
+            Command::StartLogin { provider, method },
+        )
+    }
+
+    pub fn complete_api_key_login(
+        &self,
+        login_id: Uuid,
+        provider: ProviderId,
+        key: crate::SecretString,
+    ) -> anyhow::Result<ResponsePayload> {
+        self.request(
+            Uuid::nil(),
+            Uuid::nil(),
+            Command::CompleteApiKeyLogin {
+                login_id,
+                provider,
+                key,
+            },
+        )
+    }
+
+    pub fn cancel_login(&self, login_id: Uuid) -> anyhow::Result<ResponsePayload> {
+        self.request(Uuid::nil(), Uuid::nil(), Command::CancelLogin { login_id })
+    }
+
+    pub fn logout(&self, provider: ProviderId) -> anyhow::Result<ResponsePayload> {
+        self.request(Uuid::nil(), Uuid::nil(), Command::Logout { provider })
+    }
+
+    pub fn list_models(&self, provider: ProviderId) -> anyhow::Result<ResponsePayload> {
+        self.request(Uuid::nil(), Uuid::nil(), Command::ListModels { provider })
+    }
+
+    pub fn refresh_models(&self, provider: ProviderId) -> anyhow::Result<ResponsePayload> {
+        self.request(
+            Uuid::nil(),
+            Uuid::nil(),
+            Command::RefreshModels { provider },
+        )
     }
 
     pub fn last_sequences(&self) -> Vec<ReplayCursor> {
@@ -272,7 +331,7 @@ fn run_client(
                     } => {
                         if let Some(pending) = inner.pending.lock().remove(&request_id) {
                             let result = match outcome {
-                                ResponseOutcome::Ok { payload } => Ok(payload),
+                                ResponseOutcome::Ok { payload } => Ok(*payload),
                                 ResponseOutcome::Error { error } => Err(error),
                             };
                             let _ = pending.send(result);

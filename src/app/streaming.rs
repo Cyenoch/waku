@@ -232,44 +232,17 @@ impl Waku {
                     session.runtime_event_cursor = Some(cursor);
                 }
             }
-            DriverEvent::Connected { provider_cursor } => {
+            DriverEvent::Connected => {
                 runtime.last_driver_error = None;
-                runtime.last_background_refresh_at = Instant::now();
-                runtime.driver.refresh_background_work();
-                if let Some(session) = self.state.session_mut(session_id) {
-                    if let Some(ProviderResumeCursor::Claude {
-                        resume_at: Some(message_id),
-                        ..
-                    }) = &provider_cursor
-                    {
-                        session.mark_active_turn_provider_resume_at(message_id.clone());
-                    }
-                    session.provider_cursor = provider_cursor;
-                    if session.status == SessionStatus::Connecting {
-                        session.status = SessionStatus::Working;
-                    }
-                }
-            }
-            DriverEvent::AgentPresetSelected(agent_preset) => {
-                if let Some(session) = self.state.session_mut(session_id) {
-                    session.agent_preset = agent_preset;
+                if let Some(session) = self.state.session_mut(session_id)
+                    && session.status == SessionStatus::Connecting
+                {
+                    session.status = SessionStatus::Working;
                 }
             }
             DriverEvent::AutoTitleUpdated(title) => {
                 if let Some(session) = self.state.session_mut(session_id) {
                     session.set_auto_title(title);
-                }
-            }
-            DriverEvent::AvailableCommands(names) => {
-                if let Some(session) = self
-                    .state
-                    .session_mut(session_id)
-                    .filter(|session| session.available_commands != names)
-                {
-                    session.available_commands = names;
-                    // The drain has no `Context`; the frame loop rebuilds the
-                    // drawn index when it sees this.
-                    self.composer_sources_stale = true;
                 }
             }
             DriverEvent::TurnStarted => {
@@ -314,8 +287,8 @@ impl Waku {
                     let refresh_branch =
                         should_refresh_branch_after_activity(item.kind, item.complete)
                             && self.state.selected_session == Some(session_id);
-                    self.observe_foreground_command_activity(session_id, &item);
-                    self.update_activity(session_id, runtime, item);
+                    self.observe_foreground_command_activity(session_id, item.as_ref());
+                    self.update_activity(session_id, runtime, *item);
                     if refresh_branch {
                         self.refresh_selected_branch_snapshot(cx);
                     }
@@ -325,7 +298,7 @@ impl Waku {
                 // Background work is session state, not turn output. It must
                 // survive a settled or rewound turn and therefore bypasses
                 // `accepts_turn_output` deliberately.
-                self.handle_background_work_event(session_id, event);
+                self.handle_background_work_event(session_id, *event);
             }
             DriverEvent::Permission {
                 request_id,
@@ -358,11 +331,6 @@ impl Waku {
                     if let Some(session) = self.state.session_mut(session_id) {
                         session.status = SessionStatus::Waiting;
                     }
-                }
-            }
-            DriverEvent::ComputerUseUpdated(state) => {
-                if self.accepts_turn_output(session_id) {
-                    Self::upsert_computer_use_preview(runtime, state);
                 }
             }
             DriverEvent::SteerAccepted { message } => {
@@ -440,20 +408,10 @@ impl Waku {
                     self.enqueue_follow_up_submission(session_id, submission, cx);
                 }
             }
-            DriverEvent::PlanUsageUpdated(usage) => {
-                if let Some(provider) = self
-                    .state
-                    .sessions
-                    .iter()
-                    .find(|session| session.id == session_id)
-                    .map(|session| session.provider)
-                {
-                    self.plan_usage.insert(provider, usage);
-                }
-            }
             DriverEvent::UsageUpdated {
                 context_tokens,
                 context_window,
+                ..
             } => {
                 // Meta about the conversation, not turn output: it applies
                 // even while a rewound or cancelled turn's tail drains.
@@ -479,19 +437,6 @@ impl Waku {
                 );
                 let previous_kinds = self.snapshot_selected_transcript_rows(session_id);
                 runtime.last_driver_error = None;
-                // A settled turn moved the account's rate-limit needles; ask
-                // that provider's plan meter to refresh once its backoff
-                // allows.
-                if let Some(provider) = self
-                    .state
-                    .sessions
-                    .iter()
-                    .find(|session| session.id == session_id)
-                    .map(|session| session.provider)
-                    .filter(|provider| usage_meter::PLAN_USAGE_PROVIDERS.contains(provider))
-                {
-                    self.plan_usage_stale.insert(provider);
-                }
                 if self
                     .state
                     .sessions
@@ -559,16 +504,12 @@ impl Waku {
                 );
                 runtime.pending_permission = None;
                 runtime.pending_user_input = None;
-                runtime.pending_computer_approval = None;
-                runtime.driver.cancel_computer_use();
                 // The agent may have edited files or switched branches, so the
                 // cached view of the workspace is no longer trustworthy. This
                 // handler has no `Context`, so the drain loop acts on the flag.
                 if self.state.selected_session == Some(session_id) {
                     self.workspace_queries_stale = true;
                 }
-                runtime.computer_use_previews.clear();
-                runtime.driver.refresh_background_work();
                 self.capture_latest_turn_checkpoint_for(session_id);
                 if allow_queue_drain && success {
                     // Start the next queued follow-up once the runtime has
@@ -627,9 +568,6 @@ impl Waku {
                 runtime.stream_phase = None;
                 runtime.pending_permission = None;
                 runtime.pending_user_input = None;
-                runtime.pending_computer_approval = None;
-                runtime.driver.cancel_computer_use();
-                runtime.computer_use_previews.clear();
                 let needs_fallback = !self.turn_has_assistant_message(session_id);
                 let failure_message = runtime
                     .last_driver_error
@@ -667,35 +605,6 @@ impl Waku {
             }
         }
         true
-    }
-
-    fn upsert_computer_use_preview(runtime: &mut SessionRuntime, state: ComputerUseState) {
-        if !state.visible {
-            return;
-        }
-        let Some(window_id) = state.target.as_ref().map(|target| target.window_id) else {
-            return;
-        };
-        let mut preview = ComputerUsePreview {
-            target: state.target,
-            phase: state.phase,
-            visible: state.visible,
-            screenshot: state.image_url.as_deref().and_then(|image_url| {
-                crate::computer_use::decode_preview_image_url(image_url).ok()
-            }),
-        };
-        if let Some(index) = runtime.computer_use_previews.iter().position(|preview| {
-            preview
-                .target
-                .as_ref()
-                .is_some_and(|target| target.window_id == window_id)
-        }) {
-            let previous = runtime.computer_use_previews.remove(index);
-            if preview.screenshot.is_none() {
-                preview.screenshot = previous.screenshot;
-            }
-        }
-        runtime.computer_use_previews.push(preview);
     }
 }
 

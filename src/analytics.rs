@@ -88,7 +88,7 @@ pub enum Event {
     ProjectAdded,
     RightPanelOpened,
     TurnSubmitted {
-        provider: &'static str,
+        provider: String,
         model: String,
         turn_number: usize,
         workspace: &'static str,
@@ -97,22 +97,22 @@ pub enum Event {
         has_input: bool,
     },
     TurnFinished {
-        provider: &'static str,
+        provider: String,
         turn_number: usize,
         outcome: TurnOutcome,
         duration_seconds: u64,
     },
     PermissionResponded {
-        provider: &'static str,
+        provider: String,
         kind: &'static str,
         decision: &'static str,
     },
     ConversationRolledBack {
-        provider: &'static str,
+        provider: String,
         turns: usize,
     },
     ResponseForked {
-        provider: &'static str,
+        provider: String,
         turn_number: usize,
     },
 }
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn turn_events_expose_only_coarse_product_metadata() {
         let (name, data) = Event::TurnSubmitted {
-            provider: "codex",
+            provider: "codex".into(),
             model: "gpt-5".into(),
             turn_number: 2,
             workspace: "worktree",

@@ -5,6 +5,7 @@ import type {
   Project,
   ProjectSlice,
   ProviderDay,
+  ProviderId,
   ProviderSlice,
   UsageHistory,
   UsageWindow,
@@ -13,7 +14,7 @@ import { useState, type ReactNode } from 'react'
 import { Virtuoso } from 'react-virtuoso'
 import { ControlMenu } from '@/components/control-menu'
 import { UsageTrendChart, type UsageMetric } from '@/components/usage-chart'
-import { ProviderIcon, WakuIcon } from '@/components/waku-icon'
+import { ProviderIcon, WakuIcon, providerMeta } from '@/components/waku-icon'
 import { useUsageHistory } from '@/hooks/use-daemon-data'
 import { useI18n, type AppLocale } from '@/lib/i18n'
 import type { Translator } from '@/lib/transcript-presentation'
@@ -39,7 +40,7 @@ export function UsageSettings({ projects }: { projects: Project[] }) {
   const [breakdown, setBreakdown] = useState<UsageBreakdown>('model')
   const [projectFilter, setProjectFilter] = useState('')
   const requestedWindow: UsageWindow = view === 'monthly' ? { months: 12 } : window
-  const usage = useUsageHistory(requestedWindow, projects)
+  const usage = useUsageHistory(requestedWindow)
   const history = usage.data && historyMatchesView(usage.data, view) ? usage.data : undefined
   const range = history
     ? formatUsageRange(history.sinceDay, history.untilDay, view === 'monthly', locale, t)
@@ -83,10 +84,9 @@ export function UsageSettings({ projects }: { projects: Project[] }) {
       {usage.error && (
         <UsageNotice>{errorMessage(usage.error)}</UsageNotice>
       )}
-      {history && (history.errors.length > 0 || history.pricing === 'unavailable') && (
+      {history && history.pricing === 'unavailable' && (
         <UsageNotice>
-          {history.errors.map((error) => <div key={error}>{error}</div>)}
-          {history.pricing === 'unavailable' && <div>{t('usage.rates_unavailable')}</div>}
+          <div>{t('usage.rates_unavailable')}</div>
         </UsageNotice>
       )}
 
@@ -101,14 +101,6 @@ export function UsageSettings({ projects }: { projects: Project[] }) {
           {view === 'projects' && (
             <ProjectsUsage history={history} projects={projects} filter={projectFilter} onFilterChange={setProjectFilter} />
           )}
-          <div className="mt-4 text-[9.5px] text-[var(--text-ghost)]">
-            {t('usage.scan_summary', {
-              scanned: formatCount(history.scannedFiles, locale),
-              skipped: formatCount(history.skippedFiles, locale),
-              records: formatCount(history.records, locale),
-              seconds: formatDurationValue(history.scanDuration, locale),
-            })}
-          </div>
         </>
       )}
     </div>
@@ -143,8 +135,9 @@ function DailyUsage({
               value={metric}
               onChange={(next) => onMetricChange(next as UsageMetric)}
             />
-            <ProviderLegend provider="claude" label="Claude Code" />
-            <ProviderLegend provider="codex" label="Codex" />
+            {history.providers.map((provider) => (
+              <ProviderLegend key={provider.provider} provider={provider.provider} label={providerMeta(provider.provider).name} />
+            ))}
           </div>
           <div className="mt-2 min-w-0">
             <UsageTrendChart history={history} metric={metric} />
@@ -165,7 +158,7 @@ function DailyUsage({
             />
           </div>
           <div className="mt-2 min-w-0 overflow-x-auto">
-            {breakdown === 'model' ? <ModelTable models={history.models} /> : <DayTable days={history.daily} />}
+            {breakdown === 'model' ? <ModelTable models={history.models} /> : <DayTable history={history} />}
           </div>
         </div>
         <UsageQuality history={history} />
@@ -219,12 +212,12 @@ function ProviderSummary({ provider, metric }: { provider: ProviderSlice; metric
   return (
     <div>
       <div className="flex items-center gap-2">
-        <ProviderIcon className={cn('size-3.5', provider.provider === 'claude' ? 'text-[#d97757]' : 'text-foreground')} provider={provider.provider} />
-        <div className="min-w-0 flex-1 truncate text-[12.5px]">{provider.provider === 'claude' ? 'Claude Code' : 'Codex'}</div>
+        <ProviderIcon className="size-3.5" provider={provider.provider} />
+        <div className="min-w-0 flex-1 truncate text-[12.5px]">{providerMeta(provider.provider).name}</div>
         <div className="text-[12.5px] tabular-nums">{value}</div>
       </div>
       <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-[var(--inset)]">
-        <div className={cn('h-full rounded-full', provider.provider === 'claude' ? 'bg-[#d97757]' : 'bg-[var(--provider-codex)]')} style={{ width: `${Math.max(0, Math.min(100, share * 100))}%` }} />
+        <div className="h-full rounded-full bg-foreground/80" style={{ width: `${Math.max(0, Math.min(100, share * 100))}%` }} />
       </div>
       <div className="mt-1 text-[10.5px] text-[var(--text-tertiary)]">{detail}</div>
     </div>
@@ -271,7 +264,7 @@ function ModelTable({ models }: { models: ModelSlice[] }) {
       {models.length ? models.map((model) => (
         <div className="flex min-w-[500px] items-center gap-3 border-b py-2 text-[11.5px]" key={`${model.provider}:${model.model}`}>
           <span className="flex min-w-0 flex-1 items-center gap-2">
-            <ProviderIcon className={cn('size-3', model.provider === 'claude' ? 'text-[#d97757]' : 'text-foreground')} provider={model.provider} />
+            <ProviderIcon className="size-3" provider={model.provider} />
             <span className="truncate">{model.model}</span>
           </span>
           <span className="w-20 text-right tabular-nums">{formatMoney(model.costUsd, locale)}</span>
@@ -283,17 +276,33 @@ function ModelTable({ models }: { models: ModelSlice[] }) {
   )
 }
 
-function DayTable({ days }: { days: DaySlice[] }) {
+function DayTable({ history }: { history: UsageHistory }) {
   const { locale, t } = useI18n()
+  const days = history.daily
   return (
     <UsageTable
-      columns={<><span className="flex-1">{t('usage.day')}</span><span className="w-20 text-right">Claude Code</span><span className="w-20 text-right">Codex</span><span className="w-20 text-right">{t('usage.total')}</span><span className="w-20 text-right">{t('usage.tokens')}</span></>}
+      columns={(
+        <>
+          <span className="flex-1">{t('usage.day')}</span>
+          {history.providers.map((provider) => (
+            <span className="w-20 text-right" key={provider.provider}>{providerMeta(provider.provider).name}</span>
+          ))}
+          <span className="w-20 text-right">{t('usage.total')}</span>
+          <span className="w-20 text-right">{t('usage.tokens')}</span>
+        </>
+      )}
     >
       {days.length ? [...days].reverse().slice(0, 8).map((day) => (
         <div className="flex min-w-[600px] items-center gap-3 border-b py-2 text-[11.5px]" key={day.day}>
           <span className="flex-1">{formatDay(day.day, locale)}</span>
-          <span className="w-20 text-right tabular-nums text-[var(--text-tertiary)]">{formatMoney(day.byProvider[0].costUsd, locale)}</span>
-          <span className="w-20 text-right tabular-nums text-[var(--text-tertiary)]">{formatMoney(day.byProvider[1].costUsd, locale)}</span>
+          {history.providers.map((provider) => {
+            const entry = day.byProvider.find((candidate) => candidate.provider === provider.provider)
+            return (
+              <span className="w-20 text-right tabular-nums text-[var(--text-tertiary)]" key={provider.provider}>
+                {formatMoney(entry?.costUsd ?? 0, locale)}
+              </span>
+            )
+          })}
           <span className="w-20 text-right tabular-nums">{formatMoney(day.costUsd, locale)}</span>
           <span className="w-20 text-right tabular-nums text-[var(--text-tertiary)]">{formatNumber(day.totalTokens, locale)}</span>
         </div>
@@ -395,8 +404,9 @@ function MonthUsageRow({
       </div>
       <UsageSplitBar byProvider={month.byProvider} byCost={byCost} length={peak ? usageValue(month, byCost) / peak : 0} />
       <div className="mt-1.5 flex items-center gap-3 text-[9.5px] text-[var(--text-tertiary)]">
-        <ProviderValue provider="claude" value={providerValue(month.byProvider[0], byCost)} byCost={byCost} locale={locale} />
-        <ProviderValue provider="codex" value={providerValue(month.byProvider[1], byCost)} byCost={byCost} locale={locale} />
+        {month.byProvider.map((entry) => (
+          <ProviderValue key={entry.provider} provider={entry.provider} value={providerValue(entry, byCost)} byCost={byCost} locale={locale} />
+        ))}
         <span className="min-w-0 flex-1 truncate text-right">{topModelsLabel(month.topModels)}</span>
       </div>
     </div>
@@ -495,8 +505,9 @@ function ProjectUsageRow({
       <div className="mt-0.5 truncate text-[10.5px] text-[var(--text-tertiary)]">{caption}</div>
       <UsageSplitBar byProvider={project.byProvider} byCost={byCost} length={peak ? usageValue(project, byCost) / peak : 0} />
       <div className="mt-1.5 flex items-center gap-3 text-[9.5px] text-[var(--text-tertiary)]">
-        <ProviderValue provider="claude" value={providerValue(project.byProvider[0], byCost)} byCost={byCost} locale={locale} />
-        <ProviderValue provider="codex" value={providerValue(project.byProvider[1], byCost)} byCost={byCost} locale={locale} />
+        {project.byProvider.map((entry) => (
+          <ProviderValue key={entry.provider} provider={entry.provider} value={providerValue(entry, byCost)} byCost={byCost} locale={locale} />
+        ))}
         <span className="min-w-0 flex-1 truncate text-right">{topModelsLabel(project.topModels)}</span>
       </div>
     </div>
@@ -521,15 +532,21 @@ function UsageListCard({ title, caption, total, action, children }: { title: str
   )
 }
 
-function UsageSplitBar({ byProvider, byCost, length }: { byProvider: [ProviderDay, ProviderDay]; byCost: boolean; length: number }) {
-  const claude = providerValue(byProvider[0], byCost)
-  const codex = providerValue(byProvider[1], byCost)
-  const total = claude + codex
+function UsageSplitBar({ byProvider, byCost, length }: { byProvider: ProviderDay[]; byCost: boolean; length: number }) {
+  const total = byProvider.reduce((sum, entry) => sum + providerValue(entry, byCost), 0)
   return (
     <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--inset)]">
       <div className="flex h-full min-w-px overflow-hidden rounded-full" style={{ width: `${Math.max(0, Math.min(100, length * 100))}%` }}>
-        <div className="h-full bg-[#d97757]" style={{ width: `${total ? claude / total * 100 : 0}%` }} />
-        <div className="h-full bg-[var(--provider-codex)]" style={{ width: `${total ? codex / total * 100 : 0}%` }} />
+        {byProvider.map((entry) => {
+          const value = providerValue(entry, byCost)
+          return (
+            <div
+              className="h-full bg-foreground/70"
+              key={entry.provider}
+              style={{ width: `${total ? value / total * 100 : 0}%` }}
+            />
+          )
+        })}
       </div>
     </div>
   )
@@ -542,12 +559,18 @@ function MonthActivityStrip({ history, month, byCost }: { history: UsageHistory;
     <div className="flex h-5 w-[168px] shrink-0 items-end gap-px" aria-hidden="true">
       {days.map((day) => {
         const value = byCost ? day.costUsd : day.totalTokens
-        const claude = providerValue(day.byProvider[0], byCost)
-        const total = claude + providerValue(day.byProvider[1], byCost)
         return (
           <div className="flex h-full min-w-px flex-1 flex-col-reverse overflow-hidden rounded-t-[1px] bg-[var(--inset)]" key={day.day}>
-            <div className="w-full bg-[var(--provider-codex)]" style={{ height: `${peak ? value / peak * 100 * (total ? 1 - claude / total : 0) : 0}%` }} />
-            <div className="w-full bg-[#d97757]" style={{ height: `${peak ? value / peak * 100 * (total ? claude / total : 0) : 0}%` }} />
+            {day.byProvider.map((entry) => {
+              const part = providerValue(entry, byCost)
+              return (
+                <div
+                  className="w-full bg-foreground/70"
+                  key={entry.provider}
+                  style={{ height: `${peak && value ? value / peak * 100 * (part / value) : 0}%` }}
+                />
+              )
+            })}
           </div>
         )
       })}
@@ -561,23 +584,23 @@ function ProviderValue({
   byCost,
   locale,
 }: {
-  provider: 'claude' | 'codex'
+  provider: ProviderId
   value: number
   byCost: boolean
   locale: AppLocale
 }) {
   return (
     <span className="flex items-center gap-1.5">
-      <ProviderIcon className={cn('size-[11px]', provider === 'claude' ? 'text-[#d97757]' : 'text-foreground')} provider={provider} />
+      <ProviderIcon className="size-[11px]" provider={provider} />
       {byCost ? formatMoney(value, locale) : formatNumber(value, locale)}
     </span>
   )
 }
 
-function ProviderLegend({ provider, label }: { provider: 'claude' | 'codex'; label: string }) {
+function ProviderLegend({ provider, label }: { provider: ProviderId; label: string }) {
   return (
     <span className="flex items-center gap-1.5 text-[10.5px] text-[var(--text-secondary)]">
-      <ProviderIcon className={cn('size-3', provider === 'claude' ? 'text-[#d97757]' : 'text-foreground')} provider={provider} />
+      <ProviderIcon className="size-3" provider={provider} />
       {label}
     </span>
   )
@@ -710,11 +733,6 @@ function formatCount(value: number, locale?: AppLocale) {
   return new Intl.NumberFormat(locale).format(value)
 }
 
-function formatDurationValue(duration: { secs: number; nanos: number }, locale: AppLocale) {
-  return new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(
-    duration.secs + duration.nanos / 1_000_000_000,
-  )
-}
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)

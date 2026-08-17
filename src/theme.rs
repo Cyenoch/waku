@@ -72,7 +72,6 @@ pub struct Theme {
 
     pub warning: Hsla,
     pub success: Hsla,
-    pub favorite: Hsla,
     pub danger: Hsla,
     pub danger_soft: Hsla,
 }
@@ -127,7 +126,6 @@ impl Theme {
 
             warning: rgb(0xE0B36A).into(),
             success: rgb(0x62C987).into(),
-            favorite: rgb(0xEAB308).into(),
             danger: rgb(0xE2726A).into(),
             danger_soft: hsla(4.0 / 360.0, 0.55, 0.63, 0.10),
         }
@@ -174,7 +172,6 @@ impl Theme {
 
             warning: rgb(0xA66B20).into(),
             success: rgb(0x2F8F52).into(),
-            favorite: rgb(0xCA8A04).into(),
             danger: rgb(0xC64A42).into(),
             danger_soft: hsla(4.0 / 360.0, 0.55, 0.52, 0.10),
         }

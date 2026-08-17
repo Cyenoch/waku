@@ -2,8 +2,6 @@ import type {
   ActivityItem,
   ActivityKind,
   AgentSession,
-  ProviderResumeCursor,
-  ReportedCommand,
   SequencedEvent,
   TranscriptBlock,
   TurnStatus,
@@ -70,24 +68,10 @@ export function reduceRuntimeEvent(
 
   switch (kind) {
     case 'connected':
-      session.provider_cursor = (payload as ProviderResumeCursor | null) ?? null
-      if (
-        session.provider_cursor?.provider === 'claude'
-          && session.provider_cursor.resumeAt
-      ) {
-        const turn = activeTurn(session)
-        if (turn) turn.provider_resume_at = session.provider_cursor.resumeAt
-      }
       if (session.status === 'connecting') session.status = 'working'
-      break
-    case 'agentPresetSelected':
-      session.agent_preset = typeof payload === 'string' ? payload : null
       break
     case 'autoTitleUpdated':
       session.auto_title = typeof payload === 'string' && payload.trim() ? payload.trim() : null
-      break
-    case 'availableCommands':
-      if (Array.isArray(payload)) session.available_commands = payload as ReportedCommand[]
       break
     case 'turnStarted': {
       const turn = activeTurn(session)

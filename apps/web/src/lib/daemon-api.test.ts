@@ -1,18 +1,22 @@
+import { activeAuthPhase, isActiveAuthPhase, isAllowedExternalUrl } from '@/components/settings-view'
+import { explicitModelFallback } from '@/components/model-picker'
 import { describe, expect, test } from 'bun:test'
-import type { ComposerDraftChange, DaemonSettings, Project, WakuClient } from '@waku/client'
+import type { ComposerDraftChange, Project, WakuClient } from '@waku/client'
 import {
   applyComposerDraftChanges,
   beginTurn,
   browseDaemonDirectory,
   captureTurnCheckpoint,
   captureTurnStart,
+  completeApiKeyLogin,
   createProject,
   createSession,
+  listModels,
   persistProject,
   persistSession,
-  probeProvider,
   removeSession,
   selectableProjects,
+  startLogin,
   writeWorkspaceTextFile,
   type DaemonDirectory,
 } from './daemon-api'
@@ -33,6 +37,58 @@ describe('applyComposerDraftChanges', () => {
 
     await expect(applyComposerDraftChanges(client, changes)).resolves.toBeUndefined()
     expect(command).toEqual({ type: 'applyComposerDraftChanges', changes })
+  })
+})
+
+describe('provider auth and model catalog commands', () => {
+  test('uses typed login id and clears no wire shape assumptions', async () => {
+    const commands: unknown[] = []
+    const client = { request: async (command: unknown) => { commands.push(command); return commands.length === 1 ? { type: 'login', phase: { type: 'awaitingApiKey', loginId: 'login-1', instructions: 'key' } } : { type: 'login', phase: { type: 'completed', loginId: 'login-1' } } } } as unknown as WakuClient
+    await expect(startLogin(client, 'xai', 'apiKey')).resolves.toMatchObject({ type: 'awaitingApiKey', loginId: 'login-1' })
+    await expect(completeApiKeyLogin(client, 'login-1', 'xai', 'secret')).resolves.toMatchObject({ type: 'completed', loginId: 'login-1' })
+    expect(commands).toEqual([
+      { type: 'startLogin', provider: 'xai', method: 'apiKey' },
+      { type: 'completeApiKeyLogin', loginId: 'login-1', provider: 'xai', key: 'secret' },
+    ])
+  })
+
+  test('returns catalog source and unsupported entries unchanged', async () => {
+    const catalog = { provider: 'opencode-go', source: 'cache' as const, fetchedAtMs: 1, models: [{ id: 'google', name: 'Google', provider: 'opencode-go', apiFormat: 'openAiChat' as const, transport: 'standard' as const, baseUrl: 'https://example.test', contextWindow: 1, maxOutputTokens: 1, reasoning: false, capabilities: { serviceTier: false, reasoningEffort: false, reasoningSummary: false, sampling: false }, supported: false, unsupportedReason: 'googleFormat' as const }] }
+    let command: unknown
+    const client = { request: async (next: unknown) => { command = next; return { type: 'models', catalog } } } as unknown as WakuClient
+    await expect(listModels(client, 'opencode-go')).resolves.toEqual(catalog)
+    expect(command).toEqual({ type: 'listModels', provider: 'opencode-go' })
+  })
+})
+
+describe('web auth and catalog guards', () => {
+  test('ignores completed and failed phases when rendering active login controls', () => {
+    const completed = { type: 'completed', loginId: 'done', provider: 'xai' } as const
+    const failed = { type: 'failed', loginId: 'bad', provider: 'xai', message: 'nope' } as const
+    expect(isActiveAuthPhase(completed)).toBe(false)
+    expect(isActiveAuthPhase(failed)).toBe(false)
+    expect(activeAuthPhase([completed, failed], 'xai')).toBeNull()
+  })
+
+  test('only allows secure external URLs and localhost HTTP fixtures', () => {
+    expect(isAllowedExternalUrl('https://auth.example.test/callback')).toBe(true)
+    expect(isAllowedExternalUrl('http://localhost:3000/callback')).toBe(true)
+    expect(isAllowedExternalUrl('http://127.0.0.1:3000/callback')).toBe(true)
+    expect(isAllowedExternalUrl('http://[::1]:3000/callback')).toBe(true)
+    expect(isAllowedExternalUrl('http://example.test/callback')).toBe(false)
+    expect(isAllowedExternalUrl('https://user:pass@example.test/callback')).toBe(false)
+    expect(isAllowedExternalUrl('file:///tmp/callback')).toBe(false)
+    expect(isAllowedExternalUrl('not a url')).toBe(false)
+  })
+
+  test('uses explicit model fallback only for custom endpoint errors', () => {
+    const provider = {
+      id: 'custom', name: 'Custom', baseUrl: 'https://example.test', apiFormat: 'openAiChat' as const,
+      defaultModel: 'default', contextWindow: 1, maxOutputTokens: 1, models: ['manual-model'],
+    }
+    expect(explicitModelFallback('custom', provider, { isError: true, isFetched: true })).toHaveLength(1)
+    expect(explicitModelFallback('openai-chat', provider, { isError: true, isFetched: true })).toHaveLength(0)
+    expect(explicitModelFallback('custom', provider, { isError: false, isFetched: true, data: { provider: 'custom' } })).toHaveLength(0)
   })
 })
 
@@ -153,43 +209,6 @@ describe('turn checkpoints', () => {
         session_id: 'session',
         turn_count: 2,
       },
-    })
-  })
-})
-
-describe('probeProvider', () => {
-  test('can detect an executable without starting model or version discovery', async () => {
-    let command: unknown
-    const client = {
-      request: async (next: unknown) => {
-        command = next
-        return {
-          type: 'providerProbe',
-          probe: {
-            provider: 'codex',
-            installed: true,
-            path: '/opt/waku/codex',
-            models: [],
-            agent_presets: [],
-          },
-          version: null,
-        }
-      },
-    } as unknown as WakuClient
-    // Empty override maps are omitted by serde even though the generated
-    // TypeScript type currently marks the field as required.
-    const settings = {} as DaemonSettings
-
-    await expect(probeProvider(client, 'codex', settings, {
-      discoverModels: false,
-      probeVersion: false,
-    })).resolves.toMatchObject({ installed: true, path: '/opt/waku/codex' })
-    expect(command).toEqual({
-      type: 'probeProvider',
-      provider: 'codex',
-      binaryOverride: null,
-      discoverModels: false,
-      probeVersion: false,
     })
   })
 })

@@ -30,7 +30,7 @@ const SKILLS_SEARCH_CONTEXT: &str = "SkillsPane > ComposerInput";
 
 const SKILLS_LIST_WIDTH: f32 = 264.0;
 
-fn skill_source_icon(source: SkillSource) -> &'static str {
+fn skill_source_icon(source: &SkillSource) -> &'static str {
     match source {
         SkillSource::Shared => "icons/package.svg",
         SkillSource::Provider(provider) => crate::ui::provider_icon(provider),
@@ -41,7 +41,7 @@ fn skill_icon(skill: &SkillEntry) -> &'static str {
     if skill.installs.len() > 1 {
         "icons/package.svg"
     } else {
-        skill_source_icon(skill.primary().source)
+        skill_source_icon(&skill.primary().source)
     }
 }
 
@@ -533,8 +533,8 @@ impl Waku {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let current = self.skills_source_filter;
-        let chip_label = match current {
+        let current = self.skills_source_filter.clone();
+        let chip_label = match current.as_ref() {
             None => tr!("skills.filter_all"),
             Some(source) => source.label(),
         };
@@ -543,26 +543,24 @@ impl Waku {
             let mut seen = Vec::new();
             for install in &skill.installs {
                 if !seen.contains(&install.source) {
-                    seen.push(install.source);
-                    *counts.entry(install.source).or_default() += 1;
+                    seen.push(install.source.clone());
+                    *counts.entry(install.source.clone()).or_default() += 1;
                 }
             }
         }
         let weak = cx.entity().downgrade();
         let handle = self.menu_handle("skills-source-filter", cx);
-        let sources = [
-            SkillSource::Shared,
-            SkillSource::Provider(ProviderKind::Claude),
-            SkillSource::Provider(ProviderKind::Codex),
-            SkillSource::Provider(ProviderKind::Cursor),
-            SkillSource::Provider(ProviderKind::OpenCode),
-            SkillSource::Provider(ProviderKind::Pi),
-            SkillSource::Provider(ProviderKind::Amp),
-        ];
+        let mut sources = vec![SkillSource::Shared];
+        sources.extend(
+            self.state
+                .external_providers
+                .iter()
+                .map(|provider| SkillSource::Provider(provider.id.clone())),
+        );
         dropdown_menu(
             MenuChip::new("skills-source-filter")
                 .icon(
-                    match current {
+                    match current.as_ref() {
                         None => "icons/package.svg",
                         Some(source) => skill_source_icon(source),
                     },
@@ -593,9 +591,10 @@ impl Waku {
                     );
                 }
                 items.push(MenuItem::Separator);
-                for source in sources {
+                for source in &sources {
                     let weak = weak.clone();
-                    let count = counts.get(&source).copied().unwrap_or(0);
+                    let selected_source = source.clone();
+                    let count = counts.get(source).copied().unwrap_or(0);
                     let label = if count > 0 {
                         format!("{} · {count}", source.label())
                     } else {
@@ -604,12 +603,12 @@ impl Waku {
                     items.push(
                         MenuItem::new(label, move |_, cx| {
                             let _ = weak.update(cx, |this, cx| {
-                                this.skills_source_filter = Some(source);
+                                this.skills_source_filter = Some(selected_source.clone());
                                 cx.notify();
                             });
                         })
                         .icon(skill_source_icon(source))
-                        .selected(current == Some(source)),
+                        .selected(current.as_ref() == Some(source)),
                     );
                 }
                 items
@@ -628,11 +627,11 @@ impl Waku {
             .iter()
             .enumerate()
             .filter(|(_, skill)| {
-                self.skills_source_filter.is_none_or(|filter| {
+                self.skills_source_filter.as_ref().is_none_or(|filter| {
                     skill
                         .installs
                         .iter()
-                        .any(|install| install.source == filter)
+                        .any(|install| &install.source == filter)
                 }) && (query.is_empty() || skill_matches(skill, query))
             })
             .map(|(index, _)| index)

@@ -57,19 +57,13 @@ mod platform {
 
             let shell = crate::command_env::default_terminal_shell();
             let mut options = tty::Options {
-                shell: Some(Shell::new(
-                    shell.to_string_lossy().into_owned(),
-                    vec!["-l".into()],
-                )),
+                shell: Some(Shell::new(shell.to_string(), vec!["-l".into()])),
                 working_directory: Some(cwd.to_owned()),
                 drain_on_exit: false,
                 ..Default::default()
             };
             for (name, value) in crate::command_env::shell_environment() {
-                options.env.insert(
-                    name.to_string_lossy().into_owned(),
-                    value.to_string_lossy().into_owned(),
-                );
+                options.env.insert(name.to_string(), value.to_string());
             }
             options.env.insert("TERM".into(), "xterm-256color".into());
             options.env.insert("COLORTERM".into(), "truecolor".into());
