@@ -118,6 +118,7 @@ fn wait_login_settled(service: &AuthService, login_id: Uuid) -> AuthPhase {
 }
 
 fn serve_http(mut stream: TcpStream, mock: &MockHttp) {
+    stream.set_nonblocking(false).ok();
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
@@ -1275,6 +1276,126 @@ fn expired_oauth_refreshes_before_second_prompt() {
         "second prompt must refresh"
     );
     shutdown.store(true, Ordering::Release);
+}
+
+#[test]
+fn get_auth_status_completes_xai_device_and_seeds_catalog() {
+    let mock = MockHttp::new();
+    let port = mock.bind();
+    mock.push(
+        "/.well-known/openid-configuration",
+        200,
+        json!({ "token_endpoint": format!("http://127.0.0.1:{port}/oauth2/token") }).to_string(),
+    );
+    mock.push(
+        "/oauth2/device/code",
+        200,
+        json!({
+            "device_code": "dc-poll",
+            "user_code": "XAI-P",
+            "verification_uri_complete": "http://127.0.0.1/verify",
+            "expires_in": 600,
+            "interval": 1
+        })
+        .to_string(),
+    );
+    mock.push(
+        "/oauth2/token",
+        400,
+        json!({ "error": "authorization_pending" }).to_string(),
+    );
+    mock.push(
+        "/oauth2/token",
+        200,
+        json!({
+            "access_token": "xai-access-poll",
+            "refresh_token": "xai-refresh-poll",
+            "expires_in": 3600
+        })
+        .to_string(),
+    );
+    mock.push(
+        "/v1/models",
+        401,
+        json!({ "error": "unauthorized" }).to_string(),
+    );
+
+    let directory = std::env::temp_dir().join(format!("waku-xai-status-poll-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let store = Arc::new(MemoryCredentialStore::default());
+    let mut endpoints = injected_codex_endpoints(port);
+    endpoints.xai_discovery = format!("http://127.0.0.1:{port}/.well-known/openid-configuration");
+    endpoints.xai_device_code = format!("http://127.0.0.1:{port}/oauth2/device/code");
+    let mut runtime = AuthRuntime::testing(
+        &directory,
+        Arc::clone(&store) as Arc<dyn CredentialStore>,
+        endpoints,
+    );
+    runtime
+        .model_base_overrides
+        .insert("xai-oauth".into(), format!("http://127.0.0.1:{port}/v1"));
+    let service = AuthService::new(runtime).unwrap();
+    service.set_clock_ms(1_000);
+    let phase = service
+        .start_login(ProviderId::new("xai-oauth"), LoginMethod::OauthDevice)
+        .unwrap();
+    assert!(
+        matches!(phase, AuthPhase::AwaitingDevice { .. }),
+        "{phase:?}"
+    );
+
+    let waiting = service.auth_phases(None);
+    assert!(
+        waiting
+            .iter()
+            .all(|phase| matches!(phase, AuthPhase::AwaitingDevice { .. })),
+        "{waiting:?}"
+    );
+    assert!(!waiting.iter().any(auth_phase_is_terminal));
+
+    service.set_clock_ms(2_000);
+    let still_waiting = service.auth_phases(None);
+    assert!(
+        still_waiting
+            .iter()
+            .all(|phase| matches!(phase, AuthPhase::AwaitingDevice { .. })),
+        "{still_waiting:?}"
+    );
+
+    service.set_clock_ms(3_000);
+    let done = service.auth_phases(None);
+    assert!(
+        done.iter()
+            .any(|phase| matches!(phase, AuthPhase::Completed { .. })),
+        "{done:?}"
+    );
+    assert!(done.iter().any(auth_phase_is_terminal));
+
+    let status = service
+        .status(Some(&ProviderId::new("xai-oauth")))
+        .into_iter()
+        .next()
+        .expect("xai-oauth status");
+    assert_eq!(status.method, AuthMethod::Oauth);
+    assert!(status.is_connected());
+
+    let catalog = service
+        .list_models(&ProviderId::new("xai-oauth"))
+        .expect("seed catalog");
+    assert_eq!(catalog.source, CatalogSource::Seed);
+    assert!(
+        catalog
+            .models
+            .iter()
+            .any(|model| model.id.contains("grok") && model.supported)
+    );
+}
+
+fn auth_phase_is_terminal(phase: &AuthPhase) -> bool {
+    matches!(
+        phase,
+        AuthPhase::Completed { .. } | AuthPhase::Failed { .. }
+    )
 }
 
 fn wait_connected(rx: &crossbeam_channel::Receiver<waku_protocol::model::DriverEvent>) {

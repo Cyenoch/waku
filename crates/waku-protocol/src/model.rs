@@ -13,7 +13,7 @@ pub use crate::provider::{
     SecretString, ServiceTier, TransportProfile,
 };
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeMode {
     #[default]
@@ -47,50 +47,6 @@ impl RuntimeMode {
             Self::AutoAcceptEdits => "icons/pencil.svg",
             Self::FullAccess => "icons/lock-open.svg",
         }
-    }
-}
-
-impl<'de> Deserialize<'de> for RuntimeMode {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        match raw.as_str() {
-            "ask" => Ok(Self::Ask),
-            "autoAcceptEdits" => Ok(Self::AutoAcceptEdits),
-            "fullAccess" => Ok(Self::FullAccess),
-            other => Err(serde::de::Error::unknown_variant(
-                other,
-                &["ask", "autoAcceptEdits", "fullAccess"],
-            )),
-        }
-    }
-}
-
-/// Rewrite durable session JSON before typed deserialize.
-///
-/// Legacy `runtimeMode` values are not enum aliases: `plan` becomes Ask and
-/// forces `interactionMode` to Plan; `auto` and a missing field become Ask.
-pub fn migrate_legacy_session_fields(value: &mut serde_json::Value) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    match object.get("runtimeMode").and_then(|value| value.as_str()) {
-        Some("plan") => {
-            object.insert(
-                "runtimeMode".into(),
-                serde_json::Value::String("ask".into()),
-            );
-            object.insert(
-                "interactionMode".into(),
-                serde_json::Value::String("plan".into()),
-            );
-        }
-        Some("auto") | None => {
-            object.insert(
-                "runtimeMode".into(),
-                serde_json::Value::String("ask".into()),
-            );
-        }
-        _ => {}
     }
 }
 
@@ -150,8 +106,8 @@ pub struct ProviderModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_reasoning_effort: Option<String>,
     /// Context window sizes the provider exposes as a per-session choice.
-    /// Claude Code keeps its 1M window opt-in behind a model-id suffix, so the
-    /// window is a trait of the session rather than of the model.
+    /// Some models keep a larger window opt-in, so the window is a trait of
+    /// the session rather than of the model.
     #[serde(default)]
     pub context_windows: Vec<ProviderModelOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -317,8 +273,7 @@ impl SessionStatus {
 pub struct QueuedMessage {
     pub id: Uuid,
     pub content: String,
-    /// The text typed before Waku appended provider-facing attachment
-    /// mentions. `None` is the legacy/plain-message representation.
+    /// User-visible text before attachment mentions were appended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_content: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -583,20 +538,6 @@ impl AgentSession {
         self.status.is_busy()
     }
 
-    /// Derives [`Self::last_reply_at`] from the turn history when it is not
-    /// already known, so a session stored before the field existed still sorts
-    /// and displays correctly.
-    pub fn backfill_last_reply_at(&mut self) {
-        if self.last_reply_at.is_some() {
-            return;
-        }
-        self.last_reply_at = self
-            .turns
-            .last()
-            .map(|turn| turn.completed_at.unwrap_or(turn.started_at))
-            .filter(|_| self.has_started());
-    }
-
     pub fn has_started(&self) -> bool {
         // A skeleton came from a stored row, and only started sessions are
         // stored, so it has started even though its transcript is not loaded.
@@ -664,112 +605,32 @@ impl AgentSession {
         !self.status.is_busy() && (self.messages.is_empty() || self.provider == provider)
     }
 
-    pub fn migrate_legacy_state(&mut self) {
-        if self.provider.as_str() == "codex" {
-            for message in &mut self.messages {
-                if message.role == MessageRole::Assistant && message.content.contains('\u{e200}') {
-                    message.content = strip_legacy_codex_citations(&message.content);
+    /// Stable Start sync token for daemon-owned provider history.
+    ///
+    /// Only turns the provider has started, and the messages on those turns,
+    /// participate. A newly appended unstarted user turn does not change the
+    /// value, so `updated_at` can stay wall-clock seconds.
+    pub fn transcript_baseline_generation(&self) -> u64 {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x1000_0000_01b3;
+        let mut hash = OFFSET;
+        for turn in &self.turns {
+            if !turn.provider_turn_started {
+                continue;
+            }
+            fnv1a(&mut hash, PRIME, turn.id.as_bytes());
+            fnv1a(&mut hash, PRIME, &turn.turn_count.to_le_bytes());
+            fnv1a(&mut hash, PRIME, &[turn_status_fingerprint(turn.status)]);
+            for message in &self.messages {
+                if message.turn_id != Some(turn.id) {
+                    continue;
                 }
+                fnv1a(&mut hash, PRIME, message.id.as_bytes());
+                fnv1a(&mut hash, PRIME, &[message_role_fingerprint(message.role)]);
+                fnv1a(&mut hash, PRIME, message.content.as_bytes());
             }
         }
-        let mut merged_blocks: Vec<TranscriptBlock> =
-            Vec::with_capacity(self.transcript_blocks.len());
-        for mut block in std::mem::take(&mut self.transcript_blocks) {
-            if let Some(previous) = merged_blocks.last_mut()
-                && previous.after_message == block.after_message
-                && previous.turn_id == block.turn_id
-            {
-                previous.activities.append(&mut block.activities);
-            } else {
-                merged_blocks.push(block);
-            }
-        }
-        self.transcript_blocks = merged_blocks;
-
-        for block in &mut self.transcript_blocks {
-            for activity in &mut block.activities {
-                if activity.kind == ActivityKind::Search && activity.title.trim() == "Search for" {
-                    activity.title = tr!("activity.browsed_web");
-                }
-                let named_kind = ActivityKind::from_tool_name(&activity.title);
-                if named_kind != ActivityKind::Tool
-                    && matches!(
-                        activity.kind,
-                        ActivityKind::Search | ActivityKind::Tool | ActivityKind::FileChange
-                    )
-                {
-                    activity.kind = named_kind;
-                }
-                if activity.arguments.is_none()
-                    && activity.output.is_none()
-                    && !activity.failed
-                    && activity.detail.as_deref().is_some_and(|detail| {
-                        serde_json::from_str::<serde_json::Value>(detail).is_ok()
-                    })
-                {
-                    // Older provider transcripts stored input JSON in
-                    // `detail`. Promote it once so it stays expandable but no
-                    // longer floods the row preview.
-                    activity.arguments = activity.detail.take();
-                }
-                activity.refresh_activity_metadata();
-            }
-        }
-
-        // Checkpoints written before cached totals were added still have the
-        // complete file list. Backfill once on load rather than making every
-        // transcript frame rediscover the same totals.
-        for turn in &mut self.turns {
-            if let Some(checkpoint) = turn.checkpoint.as_mut() {
-                checkpoint.refresh_totals();
-            }
-        }
-
-        if !self.turns.is_empty()
-            || !self
-                .messages
-                .iter()
-                .any(|message| message.role == MessageRole::User)
-        {
-            return;
-        }
-
-        let user_indexes = self
-            .messages
-            .iter()
-            .enumerate()
-            .filter_map(|(index, message)| (message.role == MessageRole::User).then_some(index))
-            .collect::<Vec<_>>();
-        for (offset, start) in user_indexes.iter().copied().enumerate() {
-            let end = user_indexes
-                .get(offset + 1)
-                .copied()
-                .unwrap_or(self.messages.len());
-            let id = Uuid::new_v4();
-            let started_at = self.messages[start].created_at;
-            let completed_at = self.messages[start..end]
-                .iter()
-                .map(|message| message.created_at)
-                .max()
-                .unwrap_or(started_at);
-            for message in &mut self.messages[start..end] {
-                message.turn_id = Some(id);
-            }
-            for block in &mut self.transcript_blocks {
-                if block.after_message > start && block.after_message <= end {
-                    block.turn_id = Some(id);
-                }
-            }
-            self.turns.push(AgentTurn {
-                id,
-                turn_count: offset + 1,
-                status: TurnStatus::Completed,
-                provider_turn_started: true,
-                started_at,
-                completed_at: Some(completed_at),
-                checkpoint: None,
-            });
-        }
+        hash
     }
 
     #[doc(hidden)]
@@ -956,35 +817,6 @@ impl AgentSession {
     }
 }
 
-fn strip_legacy_codex_citations(text: &str) -> String {
-    const START: char = '\u{e200}';
-    const END: char = '\u{e201}';
-    const SEPARATOR: char = '\u{e202}';
-
-    let mut remaining = text;
-    let mut output = String::with_capacity(text.len());
-    while let Some(start) = remaining.find(START) {
-        output.push_str(&remaining[..start]);
-        let marker_start = start + START.len_utf8();
-        let Some(end_offset) = remaining[marker_start..].find(END) else {
-            output.push_str(&remaining[start..]);
-            return output;
-        };
-        let marker_end = marker_start + end_offset;
-        let marker = &remaining[marker_start..marker_end];
-        if marker
-            .split(SEPARATOR)
-            .next()
-            .is_some_and(|prefix| prefix != "cite")
-        {
-            output.push_str(&remaining[start..marker_end + END.len_utf8()]);
-        }
-        remaining = &remaining[marker_end + END.len_utf8()..];
-    }
-    output.push_str(remaining);
-    output
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum MessageRole {
@@ -1006,8 +838,7 @@ pub struct MessageAttachment {
     pub name: String,
     pub is_dir: bool,
     pub is_image: bool,
-    /// Durable daemon-issued blob or attachment reference. The legacy field
-    /// name is retained for storage compatibility.
+    /// Durable daemon-issued blob or attachment reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_reference: Option<String>,
 }
@@ -1019,8 +850,7 @@ pub struct Message {
     pub turn_id: Option<Uuid>,
     pub role: MessageRole,
     pub content: String,
-    /// User-visible text before provider-facing attachment mentions were
-    /// appended. Plain and legacy messages omit it.
+    /// User-visible text before attachment mentions were appended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_content: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1544,9 +1374,8 @@ impl ActivityItem {
         self
     }
 
-    /// Extracts the common tool-input shapes emitted by every provider. This
-    /// runs while handling an event (and once for legacy persisted rows), never
-    /// from a transcript row builder.
+    /// Extracts the common tool-input shapes emitted by every provider.
+    /// Runs while handling an event, never from a transcript row builder.
     pub fn refresh_activity_metadata(&mut self) {
         if self.kind != ActivityKind::FileChange {
             self.file_changes.clear();
@@ -2329,8 +2158,6 @@ pub struct TranscriptBlock {
     pub after_message: usize,
     pub turn_id: Option<Uuid>,
     /// Ordered non-message work emitted at this point in the transcript.
-    /// The persisted field keeps its historical tagged shape so existing
-    /// sessions remain readable while the runtime model stays activity-only.
     #[ts(rename = "content", as = "StoredTranscriptBlockContent")]
     pub activities: Vec<ActivityItem>,
 }
@@ -2344,7 +2171,6 @@ enum StoredTranscriptBlockContentRef<'a> {
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "data")]
 pub enum StoredTranscriptBlockContent {
-    Reasoning(ReasoningBlock),
     Activities(Vec<ActivityItem>),
 }
 
@@ -2383,12 +2209,7 @@ impl<'de> Deserialize<'de> for TranscriptBlock {
         D: serde::Deserializer<'de>,
     {
         let repr = TranscriptBlockRepr::deserialize(deserializer)?;
-        let activities = match repr.content {
-            StoredTranscriptBlockContent::Reasoning(reasoning) => {
-                vec![ActivityItem::from_reasoning(reasoning, true)]
-            }
-            StoredTranscriptBlockContent::Activities(activities) => activities,
-        };
+        let StoredTranscriptBlockContent::Activities(activities) = repr.content;
         Ok(Self {
             after_message: repr.after_message,
             turn_id: repr.turn_id,
@@ -2403,6 +2224,30 @@ pub struct PendingPermission {
     pub title: String,
     pub detail: String,
     pub options: Vec<PermissionOption>,
+}
+
+fn turn_status_fingerprint(status: TurnStatus) -> u8 {
+    match status {
+        TurnStatus::Running => 1,
+        TurnStatus::Completed => 2,
+        TurnStatus::Failed => 3,
+        TurnStatus::Interrupted => 4,
+    }
+}
+
+fn message_role_fingerprint(role: MessageRole) -> u8 {
+    match role {
+        MessageRole::User => 1,
+        MessageRole::Assistant => 2,
+        MessageRole::System => 3,
+    }
+}
+
+fn fnv1a(hash: &mut u64, prime: u64, bytes: &[u8]) {
+    for &byte in bytes {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(prime);
+    }
 }
 
 pub fn unix_time() -> u64 {
@@ -2478,7 +2323,7 @@ mod tests {
     #[test]
     fn attachment_messages_keep_transport_and_visible_content_separate() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
         let attachment = MessageAttachment {
             path: PathBuf::from("/tmp/reference.png"),
             mention: "/tmp/reference.png".to_owned(),
@@ -2498,6 +2343,21 @@ mod tests {
         assert_eq!(message.content, "compare this @/tmp/reference.png");
         assert_eq!(message.visible_content(), "compare this");
         assert_eq!(message.attachments, vec![attachment]);
+    }
+
+    #[test]
+    fn unstarted_user_turn_does_not_change_transcript_baseline() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("openai-responses"));
+        session.begin_turn("inspect");
+        session.mark_active_turn_provider_started();
+        session.push_message(MessageRole::Assistant, "done");
+        session.finish_active_turn(TurnStatus::Completed);
+        let baseline = session.transcript_baseline_generation();
+        session.updated_at = 99;
+        session.begin_turn("follow up");
+        assert_eq!(session.transcript_baseline_generation(), baseline);
+        session.mark_active_turn_provider_started();
+        assert_ne!(session.transcript_baseline_generation(), baseline);
     }
 
     #[test]
@@ -2676,7 +2536,7 @@ mod tests {
     fn file_edit_metadata_is_normalized_for_every_provider_shape() {
         let cases = [
             (
-                ProviderId::new("codex"),
+                ProviderId::new(ProviderId::OPENAI_CODEX),
                 serde_json::json!([{
                     "path": "src/codex.rs",
                     "diff": "@@ -1 +1,2 @@\n-old\n+new\n+next",
@@ -2687,7 +2547,7 @@ mod tests {
                 1,
             ),
             (
-                ProviderId::new("claude"),
+                ProviderId::new(ProviderId::ANTHROPIC),
                 serde_json::json!({
                     "file_path": "src/claude.rs",
                     "old_string": "old\nline",
@@ -2809,16 +2669,14 @@ mod tests {
     }
 
     #[test]
-    fn projectless_projects_use_projects_root_and_recognize_legacy_paths() {
+    fn projectless_projects_use_the_projects_root() {
         let home = dirs::home_dir().expect("test user has a home directory");
         let root = home.join(".waku");
-        let legacy = Project::from_path(root.clone());
-        let legacy_dated = Project::from_path(root.join("2026-08-08/new-chat"));
         let project = Project::from_path(root.join("projects/2026-08-08/new-chat"));
         let ordinary = Project::from_path(home.join("dev/waku"));
 
-        assert!(legacy.is_projectless());
-        assert!(legacy_dated.is_projectless());
+        assert!(!Project::from_path(root.clone()).is_projectless());
+        assert!(!Project::from_path(root.join("2026-08-08/new-chat")).is_projectless());
         assert!(project.is_projectless());
         assert!(!ordinary.is_projectless());
     }
@@ -2826,7 +2684,7 @@ mod tests {
     #[test]
     fn prompt_generates_a_short_session_title() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
         session.set_title_from_prompt("build a really polished local agent interface for rust");
         assert_eq!(
             session.auto_title.as_deref(),
@@ -2858,19 +2716,19 @@ mod tests {
     #[test]
     fn model_selection_keeps_started_sessions_on_their_provider() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
 
-        assert!(session.can_choose_model(ProviderId::new("claude")));
+        assert!(session.can_choose_model(ProviderId::new(ProviderId::ANTHROPIC)));
 
         session.push_message(MessageRole::User, "first turn");
-        assert!(session.can_choose_model(ProviderId::new("codex")));
-        assert!(!session.can_choose_model(ProviderId::new("claude")));
+        assert!(session.can_choose_model(ProviderId::new(ProviderId::OPENAI_CODEX)));
+        assert!(!session.can_choose_model(ProviderId::new(ProviderId::ANTHROPIC)));
     }
 
     #[test]
     fn model_selection_waits_for_the_active_turn_to_finish() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
         session.push_message(MessageRole::User, "first turn");
 
         for status in [
@@ -2879,17 +2737,17 @@ mod tests {
             SessionStatus::Waiting,
         ] {
             session.status = status;
-            assert!(!session.can_choose_model(ProviderId::new("codex")));
+            assert!(!session.can_choose_model(ProviderId::new(ProviderId::OPENAI_CODEX)));
         }
 
         session.status = SessionStatus::Idle;
-        assert!(session.can_choose_model(ProviderId::new("codex")));
+        assert!(session.can_choose_model(ProviderId::new(ProviderId::OPENAI_CODEX)));
     }
 
     #[test]
     fn prompt_title_truncation_is_unicode_safe() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("claude"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::ANTHROPIC));
         let prompt = "界".repeat(70);
         session.set_title_from_prompt(&prompt);
         let title = session.auto_title.as_deref().unwrap();
@@ -2900,7 +2758,7 @@ mod tests {
     #[test]
     fn a_failed_preparation_unwinds_the_turn_it_eagerly_began() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
 
         // A first prompt: the unwind restores the default title because the
         // prompt returns to the composer, but keeps the submission activity.
@@ -2939,7 +2797,7 @@ mod tests {
     #[test]
     fn turn_truncation_removes_owned_messages_and_blocks() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
 
         let first_turn = session.begin_turn("first");
         session.push_message(MessageRole::Assistant, "first answer");
@@ -2978,7 +2836,7 @@ mod tests {
     #[test]
     fn response_fork_is_a_distinct_idle_session_through_the_selected_turn() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
 
         let first_turn = session.begin_turn("first");
         let first_message = session.push_message(MessageRole::Assistant, "first answer");
@@ -3007,7 +2865,7 @@ mod tests {
     #[test]
     fn queued_follow_ups_stay_with_the_source_session_not_the_fork() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
 
         session.begin_turn("first");
         session.push_message(MessageRole::Assistant, "first answer");
@@ -3025,7 +2883,7 @@ mod tests {
     #[test]
     fn follow_up_queue_round_trips_through_serde() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
         session
             .queued_messages
             .push(QueuedMessage::new("first follow-up"));
@@ -3067,7 +2925,7 @@ mod tests {
     #[test]
     fn busy_statuses_cover_connecting_working_and_waiting() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
         for status in [
             SessionStatus::Connecting,
             SessionStatus::Working,
@@ -3085,7 +2943,7 @@ mod tests {
     #[test]
     fn native_rollback_count_ignores_turns_that_never_reached_the_provider() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
 
         session.begin_turn("first");
         session.mark_active_turn_provider_started();
@@ -3102,253 +2960,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_empty_search_titles_are_repaired() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
-        session.transcript_blocks.push(TranscriptBlock {
-            after_message: 0,
-            turn_id: None,
-            activities: vec![ActivityItem::new(
-                Some("search-1".into()),
-                ActivityKind::Search,
-                "Search for ",
-                None,
-                true,
-            )],
-        });
-
-        session.migrate_legacy_state();
-
-        let activities = &session.transcript_blocks[0].activities;
-        assert_eq!(activities[0].title, "Browsed the web");
-    }
-
-    #[test]
-    fn legacy_reasoning_blocks_deserialize_as_reasoning_activities() {
-        let legacy = serde_json::json!({
-            "after_message": 2,
-            "turn_id": null,
-            "content": {
-                "kind": "reasoning",
-                "data": {
-                    "content": "Checking the source",
-                    "started_at_ms": 1_000,
-                    "finished_at_ms": 2_500
-                }
-            }
-        });
-
-        let block: TranscriptBlock = serde_json::from_value(legacy).unwrap();
-        assert_eq!(block.activities.len(), 1);
-        let activity = &block.activities[0];
-        assert_eq!(activity.kind, ActivityKind::Reasoning);
-        assert!(activity.complete);
-        assert_eq!(
-            activity
-                .reasoning
-                .as_ref()
-                .map(|reasoning| reasoning.content.as_str()),
-            Some("Checking the source")
-        );
-
-        let stored = serde_json::to_value(block).unwrap();
-        assert_eq!(stored["content"]["kind"], "activities");
-        assert_eq!(
-            stored["content"]["data"][0]["reasoning"]["content"],
-            "Checking the source"
-        );
-    }
-
-    #[test]
-    fn adjacent_legacy_work_blocks_merge_during_session_migration() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
-        session.transcript_blocks.extend([
-            TranscriptBlock {
-                after_message: 1,
-                turn_id: None,
-                activities: vec![ActivityItem::from_reasoning(
-                    ReasoningBlock {
-                        content: "Looking around".into(),
-                        started_at_ms: 1_000,
-                        finished_at_ms: 2_000,
-                    },
-                    true,
-                )],
-            },
-            TranscriptBlock {
-                after_message: 1,
-                turn_id: None,
-                activities: vec![ActivityItem::new(
-                    None,
-                    ActivityKind::Command,
-                    "Ran tests",
-                    None,
-                    true,
-                )],
-            },
-        ]);
-
-        session.migrate_legacy_state();
-
-        assert_eq!(session.transcript_blocks.len(), 1);
-        assert_eq!(session.transcript_blocks[0].activities.len(), 2);
-        assert_eq!(
-            session.transcript_blocks[0]
-                .activities
-                .iter()
-                .map(|activity| activity.kind)
-                .collect::<Vec<_>>(),
-            [ActivityKind::Reasoning, ActivityKind::Command]
-        );
-    }
-
-    #[test]
-    fn legacy_file_edit_details_are_promoted_to_arguments_and_metadata() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("opencode"));
-        session.transcript_blocks.push(TranscriptBlock {
-            after_message: 0,
-            turn_id: None,
-            activities: vec![ActivityItem::new(
-                None,
-                ActivityKind::FileChange,
-                "edit",
-                Some(
-                    serde_json::json!({
-                        "filePath": "/tmp/waku/README.md",
-                        "oldString": "old",
-                        "newString": "new\nmore"
-                    })
-                    .to_string(),
-                ),
-                true,
-            )],
-        });
-
-        session.migrate_legacy_state();
-
-        let activities = &session.transcript_blocks[0].activities;
-        assert!(activities[0].detail.is_none());
-        assert!(activities[0].arguments.is_some());
-        assert_eq!(activities[0].file_changes[0].path, "/tmp/waku/README.md");
-        assert_eq!(activities[0].file_changes[0].additions, Some(2));
-        assert_eq!(activities[0].file_changes[0].deletions, Some(1));
-    }
-
-    #[test]
-    fn legacy_file_tools_are_reclassified_and_gain_cached_targets() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("opencode"));
-        let mut cached = ActivityItem::new(None, ActivityKind::FileRead, "read", None, true);
-        cached.display_target = Some("/tmp/waku/src/persisted.rs".into());
-        session.transcript_blocks.push(TranscriptBlock {
-            after_message: 0,
-            turn_id: None,
-            activities: vec![
-                ActivityItem::new(
-                    None,
-                    ActivityKind::Search,
-                    "read",
-                    Some(r#"{"filePath":"/tmp/waku/src/model.rs"}"#.into()),
-                    true,
-                ),
-                ActivityItem::new(
-                    None,
-                    ActivityKind::Tool,
-                    "glob",
-                    Some(r#"{"pattern":"src/**/*.rs"}"#.into()),
-                    true,
-                ),
-                cached,
-            ],
-        });
-
-        session.migrate_legacy_state();
-
-        let activities = &session.transcript_blocks[0].activities;
-        assert_eq!(activities[0].kind, ActivityKind::FileRead);
-        assert_eq!(
-            activities[0].display_target.as_deref(),
-            Some("/tmp/waku/src/model.rs")
-        );
-        assert_eq!(activities[1].kind, ActivityKind::FileSearch);
-        assert_eq!(activities[1].display_target.as_deref(), Some("src/**/*.rs"));
-        assert_eq!(
-            activities[2].display_target.as_deref(),
-            Some("/tmp/waku/src/persisted.rs")
-        );
-        assert!(
-            activities[..2]
-                .iter()
-                .all(|activity| activity.detail.is_none())
-        );
-        assert!(
-            activities[..2]
-                .iter()
-                .all(|activity| activity.arguments.is_some())
-        );
-    }
-
-    #[test]
-    fn legacy_codex_citation_markers_are_removed() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
-        session.messages.push(Message::new(
-            MessageRole::Assistant,
-            "Claim.\u{e200}cite\u{e202}turn3view0\u{e202}turn2view2\u{e201}\nNext.",
-        ));
-
-        session.migrate_legacy_state();
-
-        assert_eq!(session.messages[0].content, "Claim.\nNext.");
-    }
-
-    #[test]
-    fn legacy_checkpoint_totals_are_backfilled_from_the_file_summary() {
-        let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
-        session.begin_turn("Build it");
-        session.finish_active_turn(TurnStatus::Completed);
-        let mut serialized = serde_json::to_value(Checkpoint {
-            turn_count: 1,
-            git_ref: "refs/waku/test".into(),
-            status: CheckpointStatus::Ready,
-            files: vec![
-                CheckpointFile {
-                    path: "src/app.rs".into(),
-                    additions: 7,
-                    deletions: 2,
-                },
-                CheckpointFile {
-                    path: "src/model.rs".into(),
-                    additions: 3,
-                    deletions: 5,
-                },
-            ],
-            additions: 10,
-            deletions: 7,
-            created_at: 1,
-        })
-        .unwrap();
-        let object = serialized.as_object_mut().unwrap();
-        object.remove("additions");
-        object.remove("deletions");
-        let checkpoint: Checkpoint = serde_json::from_value(serialized).unwrap();
-        assert_eq!((checkpoint.additions, checkpoint.deletions), (0, 0));
-        session.turns[0].checkpoint = Some(checkpoint);
-
-        session.migrate_legacy_state();
-
-        let checkpoint = session.turns[0].checkpoint.as_ref().unwrap();
-        assert_eq!((checkpoint.additions, checkpoint.deletions), (10, 7));
-        assert!(checkpoint.totals_are_current());
-    }
-
-    #[test]
     fn list_projection_never_copies_session_detail() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
-        let mut session = AgentSession::new(project.id, ProviderId::new("codex"));
+        let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
         session.title = "Visible title".into();
         session.model = Some("gpt-5".into());
         session.status = SessionStatus::Working;

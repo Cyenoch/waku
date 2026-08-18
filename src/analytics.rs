@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn turn_events_expose_only_coarse_product_metadata() {
         let (name, data) = Event::TurnSubmitted {
-            provider: "codex".into(),
+            provider: "openai-codex".into(),
             model: "gpt-5".into(),
             turn_number: 2,
             workspace: "worktree",
@@ -355,7 +355,7 @@ mod tests {
         .into_track();
 
         assert_eq!(name, "provider.turn.sent");
-        assert_eq!(data["provider"], "codex");
+        assert_eq!(data["provider"], "openai-codex");
         assert_eq!(data["model"], "gpt-5");
         assert_eq!(data["workspace"], "worktree");
         assert_eq!(data["clientType"], "desktop");

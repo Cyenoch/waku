@@ -3,6 +3,16 @@ use super::*;
 use anyhow::Context as _;
 use base64::Engine as _;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ModelPickerListRow {
+    provider: ProviderId,
+    model_id: String,
+    label: String,
+    supported: bool,
+    favorite: bool,
+    selected: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ComposerSubmitAction {
     Send,
@@ -408,19 +418,9 @@ impl Waku {
     pub(super) fn render_provider_model_control(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
         let session = self.selected_session();
-        let provider = session
-            .map(|session| session.provider.clone())
-            .or_else(|| {
-                self.state
-                    .external_providers
-                    .first()
-                    .map(|provider| provider.id.clone())
-            })
-            .unwrap_or_else(|| ProviderId::new(""));
-        let selected_model = session.and_then(|session| self.model_for_session(session));
-        let selected_model_name = self.model_display_name(&provider, selected_model);
-        let has_providers = !self.state.external_providers.is_empty();
-        if !has_providers {
+        let providers =
+            picker_provider_endpoints(&self.state.external_providers, &self.auth_statuses);
+        if composer_needs_configure_first(&providers) {
             return div()
                 .h(px(24.0))
                 .px(px(7.0))
@@ -431,8 +431,12 @@ impl Waku {
                 .child(tr!("providers.configure_first"))
                 .into_any_element();
         }
+        let provider = session
+            .map(|session| session.provider.clone())
+            .unwrap_or_else(|| providers[0].id.clone());
+        let selected_model = session.and_then(|session| self.model_for_session(session));
+        let selected_model_name = self.model_display_name(&provider, selected_model);
 
-        let favorites = self.state.favorite_models.clone();
         let query = self
             .model_search
             .read(cx)
@@ -440,164 +444,55 @@ impl Waku {
             .trim()
             .to_ascii_lowercase();
         let searching = !query.is_empty();
-        let selected_tab = self.model_picker_tab.clone();
-        let locked_provider = session
-            .filter(|session| !session.messages.is_empty())
-            .map(|session| session.provider.clone());
-        let available_models = Rc::new(visible_picker_models(
-            &self.state.external_providers,
-            &self.model_catalogs,
-            &favorites,
-            locked_provider.as_ref(),
-            &selected_tab,
-            &query,
-        ));
-        let providers = self.state.external_providers.clone();
-        let catalogs = self.model_catalogs.clone();
+        let catalog_pending = !self.model_catalog_pending.is_empty();
+        let search = self.model_search.clone();
+        let search_focus = search.read(cx).focus_handle(cx);
         let weak = cx.entity().downgrade();
-        let handle = self.menu_handle_with(MODEL_PICKER_MENU_ID, cx, move |open, window, cx| {
-            if open {
-                let _ = weak.update(cx, |this, cx| {
-                    this.model_picker_highlight = None;
+        let handle = {
+            let toggle_weak = weak.clone();
+            let reset_search = search.clone();
+            let picker_focus = search_focus.clone();
+            self.menu_handle_with(MODEL_PICKER_MENU_ID, cx, move |open, window, cx| {
+                let _ = toggle_weak.update(cx, |this, cx| {
+                    if open {
+                        this.model_picker_highlight = None;
+                        reset_search.update(cx, |input, cx| input.clear(cx));
+                        this.reveal_selected_picker_model();
+                    } else {
+                        let focus = this.composer_focus(cx);
+                        window.focus(&focus, cx);
+                    }
                     cx.notify();
                 });
-            } else {
-                let focus = weak
-                    .read_with(cx, |this, cx| this.composer.read(cx).focus())
-                    .ok();
-                if let Some(focus) = focus {
-                    window.focus(&focus, cx);
+                if open {
+                    let picker_focus = picker_focus.clone();
+                    window.on_next_frame(move |window, _| {
+                        window.on_next_frame(move |window, cx| window.focus(&picker_focus, cx));
+                    });
                 }
-            }
-        });
-        let weak = cx.entity().downgrade();
-        let rows_models = available_models.clone();
-        let rows_favorites = favorites.clone();
-        let selected_provider = provider.clone();
-        let selected_model = selected_model.map(str::to_owned);
-        let endpoint_names = providers
-            .iter()
-            .map(|provider| (provider.id.clone(), provider.name.clone()))
-            .collect::<HashMap<_, _>>();
-        let popup = move |popover: &ContextMenuHandle, _window: &mut Window, _cx: &mut App| {
-            let mut rows = div()
-                .id("endpoint-model-list")
-                .w(px(360.0))
-                .p(px(8.0))
-                .flex()
-                .flex_col()
-                .gap(px(3.0));
-            if rows_models.is_empty() {
-                rows = rows.child(div().p(px(12.0)).text_color(theme.text_tertiary).child(
-                    if searching {
-                        tr!("models.none_found")
-                    } else {
-                        tr!("models.favorite_hint")
-                    },
-                ));
-            }
-            for (index, (endpoint, model)) in rows_models.iter().enumerate() {
-                let endpoint_name = endpoint_names
-                    .get(endpoint)
-                    .cloned()
-                    .unwrap_or_else(|| endpoint.to_string());
-                let label = format!("{endpoint_name} · {}", model.id);
-                let selected = *endpoint == selected_provider
-                    && selected_model.as_deref() == Some(model.id.as_str());
-                let favorite = rows_favorites
-                    .iter()
-                    .any(|entry| entry.provider == *endpoint && entry.model == model.id);
-                let catalog_entry = catalogs
-                    .get(endpoint)
-                    .and_then(|catalog| catalog.models.iter().find(|entry| entry.id == model.id));
-                let supported = catalog_entry_selectable(catalog_entry);
-                let unsupported_reason = catalog_entry
-                    .and_then(|entry| entry.unsupported_reason.as_ref())
-                    .map(|reason| format!("{reason:?}"));
-                let choose = weak.clone();
-                let choose_key = weak.clone();
-                let close = popover.clone();
-                let close_key = popover.clone();
-                let endpoint_id = endpoint.clone();
-                let endpoint_key = endpoint.clone();
-                let model_id = model.id.clone();
-                let model_key = model.id.clone();
-                rows = rows.child(
-                    div()
-                        .id(SharedString::from(format!("endpoint-model-{index}")))
-                        .tab_index(0)
-                        .focus_visible(|style| style.border_1().border_color(theme.accent))
-                        .px(px(10.0))
-                        .py(px(8.0))
-                        .rounded(px(7.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .when(selected, |element| element.bg(theme.overlay_strong))
-                        .hover(|element| element.bg(theme.overlay))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_color(if supported {
-                                    theme.text
-                                } else {
-                                    theme.text_tertiary
-                                })
-                                .child(if let Some(reason) = unsupported_reason {
-                                    format!("{label} ({reason})")
-                                } else {
-                                    label
-                                }),
-                        )
-                        .child(icon(
-                            if favorite {
-                                "icons/star-filled.svg"
-                            } else {
-                                "icons/star.svg"
-                            },
-                            13.0,
-                            theme.text_tertiary,
-                        ))
-                        .on_click(move |_, window, cx| {
-                            if !supported {
-                                return;
-                            }
-                            let _ = choose.update(cx, |this, cx| {
-                                this.choose_model(endpoint_id.clone(), model_id.clone(), cx)
-                            });
-                            close.close(window, cx);
-                        })
-                        .on_key_down({
-                            move |event: &KeyDownEvent, window, cx| {
-                                if !supported {
-                                    return;
-                                }
-                                if !event.keystroke.modifiers.modified()
-                                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                                {
-                                    let _ = choose_key.update(cx, |this, cx| {
-                                        this.choose_model(
-                                            endpoint_key.clone(),
-                                            model_key.clone(),
-                                            cx,
-                                        )
-                                    });
-                                    close_key.close(window, cx);
-                                    cx.stop_propagation();
-                                }
-                            }
-                        }),
-                );
-            }
-            div()
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .bg(theme.raised)
-                .shadow_lg()
-                .child(rows)
-                .into_any_element()
+            })
         };
+        let rows = if handle.is_open() {
+            let locked_provider = session
+                .filter(|session| !session.messages.is_empty())
+                .map(|session| session.provider.clone());
+            self.model_picker_rows_cached(
+                &providers,
+                locked_provider.as_ref(),
+                &query,
+                Some((&provider, selected_model)),
+            )
+        } else {
+            Rc::new(Vec::new())
+        };
+        if handle.is_open() {
+            self.sync_model_picker_rows(&rows);
+        }
+        let highlight = self
+            .model_picker_highlight
+            .filter(|index| *index < rows.len());
+        let model_list = self.model_picker_list_state.clone();
+
         popover(
             MenuChip::new("composer-provider-model")
                 .icon(
@@ -609,7 +504,189 @@ impl Waku {
                 .selected(handle.is_open()),
             &handle,
             MenuAlign::AboveLeft,
-            popup,
+            move |popover, _window, _cx| {
+                let popover = popover.clone();
+                let next_rows = rows.clone();
+                let previous_rows = rows.clone();
+                let first_rows = rows.clone();
+                let last_rows = rows.clone();
+                let confirm_rows = rows.clone();
+                let next_weak = weak.clone();
+                let previous_weak = weak.clone();
+                let first_weak = weak.clone();
+                let last_weak = weak.clone();
+                let confirm_weak = weak.clone();
+                let confirm_popover = popover.clone();
+                let list_rows = if rows.is_empty() {
+                    div()
+                        .id("model-picker-list-empty")
+                        .h(px(64.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(11.5))
+                        .text_color(theme.text_ghost)
+                        .child(if searching {
+                            tr!("models.none_found")
+                        } else if catalog_pending {
+                            tr!("models.catalog_loading")
+                        } else {
+                            tr!("models.favorite_hint")
+                        })
+                        .into_any_element()
+                } else {
+                    let list_items = rows.clone();
+                    let list_weak = weak.clone();
+                    let list_popover = popover.clone();
+                    let height = model_picker_list_height(rows.len());
+                    div()
+                        .id("model-picker-list")
+                        .w_full()
+                        .h(px(height))
+                        .flex_none()
+                        .px(px(4.0))
+                        .child(
+                            list(model_list.clone(), move |index, _window, _cx| {
+                                let Some(row) = list_items.get(index) else {
+                                    return div().into_any_element();
+                                };
+                                let highlighted = highlight == Some(index);
+                                let choose = list_weak.clone();
+                                let close = list_popover.clone();
+                                let provider_id = row.provider.clone();
+                                let model_id = row.model_id.clone();
+                                let supported = row.supported;
+                                div()
+                                    .id(SharedString::from(format!("endpoint-model-{index}")))
+                                    .w_full()
+                                    .h(px(MODEL_PICKER_ROW_HEIGHT))
+                                    .px(px(10.0))
+                                    .rounded(px(7.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .cursor_default()
+                                    .when(highlighted, |element| element.bg(theme.overlay_strong))
+                                    .hover(|element| element.bg(theme.overlay))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(11.5))
+                                            .line_height(px(15.0))
+                                            .text_color(if row.supported {
+                                                theme.text
+                                            } else {
+                                                theme.text_tertiary
+                                            })
+                                            .child(SharedString::from(row.label.clone())),
+                                    )
+                                    .when(row.selected, |element| {
+                                        element.child(icon(
+                                            "icons/check.svg",
+                                            11.0,
+                                            theme.text_secondary,
+                                        ))
+                                    })
+                                    .child(icon(
+                                        if row.favorite {
+                                            "icons/star-filled.svg"
+                                        } else {
+                                            "icons/star.svg"
+                                        },
+                                        13.0,
+                                        theme.text_tertiary,
+                                    ))
+                                    .on_click(move |_, window, cx| {
+                                        if !supported {
+                                            return;
+                                        }
+                                        let _ = choose.update(cx, |this, cx| {
+                                            this.choose_model(
+                                                provider_id.clone(),
+                                                model_id.clone(),
+                                                cx,
+                                            )
+                                        });
+                                        close.close(window, cx);
+                                    })
+                                    .into_any_element()
+                            })
+                            .size_full(),
+                        )
+                        .into_any_element()
+                };
+
+                div()
+                    .w(px(360.0))
+                    .max_h(px(390.0))
+                    .rounded(px(13.0))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .bg(theme.raised)
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .on_action(move |_: &SelectNextEntry, _, cx| {
+                        let _ = next_weak.update(cx, |this, cx| {
+                            this.move_model_picker_highlight("down", next_rows.len(), cx);
+                        });
+                    })
+                    .on_action(move |_: &SelectPreviousEntry, _, cx| {
+                        let _ = previous_weak.update(cx, |this, cx| {
+                            this.move_model_picker_highlight("up", previous_rows.len(), cx);
+                        });
+                    })
+                    .on_action(move |_: &SelectFirstEntry, _, cx| {
+                        let _ = first_weak.update(cx, |this, cx| {
+                            this.move_model_picker_highlight("home", first_rows.len(), cx);
+                        });
+                    })
+                    .on_action(move |_: &SelectLastEntry, _, cx| {
+                        let _ = last_weak.update(cx, |this, cx| {
+                            this.move_model_picker_highlight("end", last_rows.len(), cx);
+                        });
+                    })
+                    .on_action(move |_: &ConfirmEntry, window, cx| {
+                        let should_close = confirm_weak
+                            .update(cx, |this, cx| {
+                                this.confirm_model_picker_selection(&confirm_rows, cx)
+                            })
+                            .unwrap_or(false);
+                        if should_close {
+                            confirm_popover.close(window, cx);
+                            window.refresh();
+                        }
+                    })
+                    .child(
+                        div()
+                            .h(px(52.0))
+                            .px(px(12.0))
+                            .pt(px(10.0))
+                            .pb(px(8.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(34.0))
+                                    .px(px(10.0))
+                                    .rounded(px(9.0))
+                                    .bg(theme.surface)
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(icon("icons/search.svg", 15.0, theme.text_secondary))
+                                    .child(div().flex_1().min_w_0().child(search.clone())),
+                            ),
+                    )
+                    .child(list_rows)
+                    .into_any_element()
+            },
         )
         .into_any_element()
     }
@@ -749,18 +826,156 @@ impl Waku {
         let provider = &session.provider;
         let model = self.model_for_session(session);
         let models = visible_picker_models(
-            &self.state.external_providers,
+            &picker_provider_endpoints(&self.state.external_providers, &self.auth_statuses),
             &self.model_catalogs,
             &self.state.favorite_models,
             Some(provider),
-            &self.model_picker_tab,
+            &ModelPickerTab::All,
             "",
         );
         let index = models
             .iter()
             .position(|(candidate, item)| candidate == provider && model == Some(item.id.as_str()))
             .unwrap_or(0);
-        self.model_picker_scroll.scroll_to_item(index);
+        self.model_picker_list_state.scroll_to_reveal_item(index);
+    }
+
+    /// Labeled picker rows, rebuilt only when source generations or the
+    /// open-picker view (query / lock / tab / selection) move. Streaming
+    /// frames keep notifying the composer; walking every catalog entry to
+    /// format labels must not ride that cadence.
+    fn model_picker_rows_cached(
+        &self,
+        providers: &[ExternalProvider],
+        locked_provider: Option<&ProviderId>,
+        query: &str,
+        selected: Option<(&ProviderId, Option<&str>)>,
+    ) -> Rc<Vec<ModelPickerListRow>> {
+        cached_model_picker_rows(
+            &self.model_picker_rows_key,
+            &self.model_picker_rows_snapshot,
+            ModelPickerRowsCacheInputs {
+                catalog_generation: self.model_picker_catalog_generation,
+                auth_generation: self.model_picker_auth_generation,
+                favorite_generation: self.model_picker_favorite_generation,
+                locked_provider,
+                selected_tab: &ModelPickerTab::All,
+                query,
+                selected,
+            },
+            || {
+                labeled_model_picker_rows(
+                    providers,
+                    &self.model_catalogs,
+                    &self.state.favorite_models,
+                    locked_provider,
+                    &ModelPickerTab::All,
+                    query,
+                    selected,
+                )
+            },
+        )
+    }
+
+    pub(super) fn bump_model_picker_catalog_generation(&mut self) {
+        self.model_picker_catalog_generation = self.model_picker_catalog_generation.wrapping_add(1);
+    }
+
+    pub(super) fn bump_model_picker_auth_generation(&mut self) {
+        self.model_picker_auth_generation = self.model_picker_auth_generation.wrapping_add(1);
+    }
+
+    fn sync_model_picker_rows(&self, rows: &[ModelPickerListRow]) {
+        let mut cached = self.model_picker_row_cache.borrow_mut();
+        if cached.len() == rows.len()
+            && cached
+                .iter()
+                .zip(rows)
+                .all(|(cached, row)| cached.0 == row.provider && cached.1 == row.model_id)
+        {
+            return;
+        }
+        *cached = rows
+            .iter()
+            .map(|row| (row.provider.clone(), row.model_id.clone()))
+            .collect();
+        self.model_picker_list_state
+            .reset_with_uniform_height(rows.len(), px(MODEL_PICKER_ROW_HEIGHT));
+    }
+
+    fn move_model_picker_highlight(&mut self, key: &str, len: usize, cx: &mut Context<Self>) {
+        let Some(next) = next_model_picker_highlight(self.model_picker_highlight, len, key) else {
+            return;
+        };
+        self.model_picker_highlight = Some(next);
+        self.model_picker_list_state.scroll_to_reveal_item(next);
+        cx.notify();
+    }
+
+    fn confirm_model_picker_selection(
+        &mut self,
+        rows: &[ModelPickerListRow],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(row) = rows.get(self.model_picker_highlight.unwrap_or(0)) else {
+            return false;
+        };
+        if !row.supported {
+            return false;
+        }
+        self.choose_model(row.provider.clone(), row.model_id.clone(), cx);
+        true
+    }
+
+    pub(super) fn reconcile_composer_provider_selection(&mut self, cx: &mut Context<Self>) {
+        let providers =
+            picker_provider_endpoints(&self.state.external_providers, &self.auth_statuses);
+        if providers.is_empty() {
+            cx.notify();
+            return;
+        }
+        let suggestion = suggested_picker_selection(
+            self.selected_session()
+                .map(|session| (&session.provider, session.model.as_deref())),
+            &self.state.last_provider,
+            self.state.last_model.as_deref(),
+            &providers,
+            &self.model_catalogs,
+        );
+        match suggestion {
+            Some((provider, model)) => {
+                if self.selected_session().is_some() {
+                    self.choose_model(provider, model, cx);
+                    return;
+                }
+                self.state.last_provider = provider.clone();
+                self.state.last_model = Some(model);
+                self.model_picker_tab = ModelPickerTab::Provider(provider);
+                self.save();
+                cx.notify();
+            }
+            None => self.drop_incompatible_session_model(cx),
+        }
+    }
+
+    fn drop_incompatible_session_model(&mut self, cx: &mut Context<Self>) {
+        let Some((provider, model)) = self.selected_session().and_then(|session| {
+            let model = session.model.as_deref()?;
+            (!catalog_supports_model(self.model_catalogs.get(&session.provider), model))
+                .then(|| (session.provider.clone(), model.to_owned()))
+        }) else {
+            return;
+        };
+        if let Some(session) = self.selected_session_mut() {
+            session.model = None;
+        }
+        if self.state.last_provider == provider
+            && self.state.last_model.as_deref() == Some(model.as_str())
+        {
+            self.state.last_model = None;
+        }
+        self.save();
+        cx.notify();
     }
 
     pub(super) fn render_interaction_mode_control(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2513,13 +2728,171 @@ pub(super) fn next_picker_highlight(
     }
 }
 
-/// The sidebar tabs the picker can land on, in rail order: favorites first,
-/// then every installed provider a new session may use.
-///
-/// Shared by the rail's click gating and by `tab`'s cycle handler so the two
-/// agree on which tabs are usable. A locked session keeps its own provider
-/// usable even if it was switched off afterwards — disabling is for new work —
-/// while every other provider drops out for the lock's duration.
+pub(super) fn next_model_picker_highlight(
+    current: Option<usize>,
+    len: usize,
+    key: &str,
+) -> Option<usize> {
+    match key {
+        "home" if len > 0 => Some(0),
+        "end" if len > 0 => Some(len - 1),
+        _ => next_picker_highlight(current, len, key),
+    }
+}
+
+pub(super) fn model_picker_list_height(row_count: usize) -> f32 {
+    (row_count as f32 * MODEL_PICKER_ROW_HEIGHT).min(MODEL_PICKER_MAX_LIST_HEIGHT)
+}
+
+/// Connected built-ins plus user-authored custom endpoints. Auth "connected"
+/// is not catalog availability — callers still have to list/refresh models.
+pub(super) fn picker_provider_endpoints(
+    customs: &[ExternalProvider],
+    statuses: &HashMap<ProviderId, waku_client::ProviderAuthStatus>,
+) -> Vec<ExternalProvider> {
+    let mut providers = Vec::new();
+    for preset in waku_client::ProviderPreset::ALL {
+        let id = preset.provider_id();
+        if statuses
+            .get(&id)
+            .is_some_and(|status| status.is_connected())
+        {
+            providers.push(preset.endpoint());
+        }
+    }
+    for custom in customs {
+        if waku_client::ProviderPreset::parse_id(custom.id.as_str()).is_none() {
+            providers.push(custom.clone());
+        }
+    }
+    providers
+}
+
+pub(super) fn catalog_refresh_providers(
+    customs: &[ExternalProvider],
+    statuses: &HashMap<ProviderId, waku_client::ProviderAuthStatus>,
+) -> Vec<ProviderId> {
+    picker_provider_endpoints(customs, statuses)
+        .into_iter()
+        .map(|provider| provider.id)
+        .collect()
+}
+
+pub(super) fn composer_needs_configure_first(providers: &[ExternalProvider]) -> bool {
+    providers.is_empty()
+}
+
+pub(super) fn suggested_picker_provider(
+    current: Option<&ProviderId>,
+    providers: &[ExternalProvider],
+) -> Option<ProviderId> {
+    if current.is_some_and(|id| providers.iter().any(|provider| &provider.id == id)) {
+        return None;
+    }
+    providers.first().map(|provider| provider.id.clone())
+}
+
+fn preferred_supported_model(
+    provider: &ExternalProvider,
+    catalog: Option<&waku_client::ModelCatalog>,
+) -> Option<String> {
+    let catalog = catalog?;
+    let default = provider.default_model.as_str();
+    if catalog
+        .models
+        .iter()
+        .any(|entry| entry.id == default && entry.supported)
+    {
+        return Some(default.to_owned());
+    }
+    catalog
+        .models
+        .iter()
+        .find(|entry| entry.supported)
+        .map(|entry| entry.id.clone())
+}
+
+fn first_compatible_picker_model(
+    providers: &[ExternalProvider],
+    catalogs: &HashMap<ProviderId, waku_client::ModelCatalog>,
+) -> Option<(ProviderId, String)> {
+    providers.iter().find_map(|provider| {
+        preferred_supported_model(provider, catalogs.get(&provider.id))
+            .map(|model| (provider.id.clone(), model))
+    })
+}
+
+pub(super) fn catalog_supports_model(
+    catalog: Option<&waku_client::ModelCatalog>,
+    model: &str,
+) -> bool {
+    let model = model.trim();
+    !model.is_empty()
+        && catalog.is_some_and(|catalog| {
+            catalog
+                .models
+                .iter()
+                .any(|entry| entry.id == model && entry.supported)
+        })
+}
+
+pub(super) fn send_provider_model(
+    provider: &ProviderId,
+    model: Option<&str>,
+    catalogs: &HashMap<ProviderId, waku_client::ModelCatalog>,
+) -> Option<(ProviderId, String)> {
+    let model = model.map(str::trim).filter(|value| !value.is_empty())?;
+    catalog_supports_model(catalogs.get(provider), model)
+        .then(|| (provider.clone(), model.to_owned()))
+}
+
+pub(super) fn suggested_picker_selection(
+    selected: Option<(&ProviderId, Option<&str>)>,
+    last_provider: &ProviderId,
+    last_model: Option<&str>,
+    providers: &[ExternalProvider],
+    catalogs: &HashMap<ProviderId, waku_client::ModelCatalog>,
+) -> Option<(ProviderId, String)> {
+    let configured = |id: &ProviderId| providers.iter().any(|provider| &provider.id == id);
+    let resolve = |id: &ProviderId, model: Option<&str>| {
+        if !configured(id) {
+            return None;
+        }
+        let endpoint = providers.iter().find(|provider| &provider.id == id)?;
+        let catalog = catalogs.get(id);
+        if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty())
+            && catalog_supports_model(catalog, model)
+        {
+            return Some((id.clone(), model.to_owned()));
+        }
+        preferred_supported_model(endpoint, catalog).map(|model| (id.clone(), model))
+    };
+    if let Some((provider, model)) = selected {
+        if let Some(pair) = resolve(provider, model) {
+            return Some(pair);
+        }
+        if configured(provider) {
+            return None;
+        }
+    }
+    if let Some(pair) = resolve(last_provider, last_model) {
+        return Some(pair);
+    }
+    if let Some(first) = suggested_picker_provider(
+        selected
+            .map(|(provider, _)| provider)
+            .or(Some(last_provider)),
+        providers,
+    ) && let Some(pair) = resolve(&first, None)
+    {
+        return Some(pair);
+    }
+    first_compatible_picker_model(providers, catalogs)
+}
+
+/// Catalog ids for one picker provider. A live/cache/seed catalog is
+/// authoritative even when empty. Missing catalogs fall back to a custom
+/// endpoint's manual list only — never to a built-in default model.
 pub(super) fn catalog_model_ids(
     catalog: Option<&waku_client::ModelCatalog>,
     manual: &[String],
@@ -2556,15 +2929,17 @@ pub(super) fn visible_picker_models(
     let searching = !normalized_query.is_empty();
     let mut models = providers
         .iter()
-        .filter(|provider| locked_provider.is_none_or(|locked| locked == &provider.id))
+        .filter(|provider| searching || locked_provider.is_none_or(|locked| locked == &provider.id))
         .flat_map(|provider| {
-            catalog_model_ids(
-                catalogs.get(&provider.id),
-                &provider.models,
-                &provider.default_model,
-            )
-            .into_iter()
-            .map(move |name| (provider, name))
+            let catalog = catalogs.get(&provider.id);
+            let allow_manual =
+                waku_client::ProviderPreset::parse_id(provider.id.as_str()).is_none();
+            let ids = if catalog.is_some() || allow_manual {
+                catalog_model_ids(catalog, &provider.models, &provider.default_model)
+            } else {
+                Vec::new()
+            };
+            ids.into_iter().map(move |name| (provider, name))
         })
         .filter_map(|(provider, model_name)| {
             let model = ProviderModel::new(model_name.clone(), model_name).default();
@@ -2587,7 +2962,8 @@ pub(super) fn visible_picker_models(
                         return None;
                     }
                     ModelPickerTab::Provider(selected) if selected != &provider.id => return None,
-                    _ => {}
+                    ModelPickerTab::All | ModelPickerTab::Favorites => {}
+                    ModelPickerTab::Provider(_) => {}
                 }
             }
             Some((provider.id.clone(), model))
@@ -2604,17 +2980,155 @@ pub(super) fn visible_picker_models(
     models
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ModelPickerRowsCacheKey {
+    pub catalog_generation: u64,
+    pub auth_generation: u64,
+    pub favorite_generation: u64,
+    query: String,
+    locked: Option<ProviderId>,
+    tab: ModelPickerTab,
+    selected: Option<(ProviderId, Option<String>)>,
+}
+
+#[derive(Clone, Copy)]
+struct ModelPickerRowsCacheInputs<'a> {
+    catalog_generation: u64,
+    auth_generation: u64,
+    favorite_generation: u64,
+    locked_provider: Option<&'a ProviderId>,
+    selected_tab: &'a ModelPickerTab,
+    query: &'a str,
+    selected: Option<(&'a ProviderId, Option<&'a str>)>,
+}
+
+impl ModelPickerRowsCacheKey {
+    fn new(inputs: &ModelPickerRowsCacheInputs<'_>) -> Self {
+        Self {
+            catalog_generation: inputs.catalog_generation,
+            auth_generation: inputs.auth_generation,
+            favorite_generation: inputs.favorite_generation,
+            query: inputs.query.to_owned(),
+            locked: inputs.locked_provider.cloned(),
+            tab: inputs.selected_tab.clone(),
+            selected: inputs
+                .selected
+                .map(|(provider, model)| (provider.clone(), model.map(str::to_owned))),
+        }
+    }
+
+    fn matches(&self, inputs: &ModelPickerRowsCacheInputs<'_>) -> bool {
+        self.catalog_generation == inputs.catalog_generation
+            && self.auth_generation == inputs.auth_generation
+            && self.favorite_generation == inputs.favorite_generation
+            && self.query == inputs.query
+            && self.locked.as_ref() == inputs.locked_provider
+            && self.tab == *inputs.selected_tab
+            && match (&self.selected, inputs.selected) {
+                (None, None) => true,
+                (Some((provider, model)), Some((other_provider, other_model))) => {
+                    provider == other_provider && model.as_deref() == other_model
+                }
+                _ => false,
+            }
+    }
+}
+
+fn cached_model_picker_rows(
+    stored_key: &RefCell<Option<ModelPickerRowsCacheKey>>,
+    snapshot: &RefCell<Rc<Vec<ModelPickerListRow>>>,
+    inputs: ModelPickerRowsCacheInputs<'_>,
+    build: impl FnOnce() -> Vec<ModelPickerListRow>,
+) -> Rc<Vec<ModelPickerListRow>> {
+    let hit = stored_key
+        .borrow()
+        .as_ref()
+        .is_some_and(|key| key.matches(&inputs));
+    if !hit {
+        *snapshot.borrow_mut() = Rc::new(build());
+        *stored_key.borrow_mut() = Some(ModelPickerRowsCacheKey::new(&inputs));
+    }
+    snapshot.borrow().clone()
+}
+
+fn labeled_model_picker_rows(
+    providers: &[ExternalProvider],
+    catalogs: &HashMap<ProviderId, waku_client::ModelCatalog>,
+    favorites: &[FavoriteModel],
+    locked_provider: Option<&ProviderId>,
+    selected_tab: &ModelPickerTab,
+    query: &str,
+    selected: Option<(&ProviderId, Option<&str>)>,
+) -> Vec<ModelPickerListRow> {
+    visible_picker_models(
+        providers,
+        catalogs,
+        favorites,
+        locked_provider,
+        selected_tab,
+        query,
+    )
+    .into_iter()
+    .map(|(endpoint, model)| {
+        let provider_name = providers
+            .iter()
+            .find(|candidate| candidate.id == endpoint)
+            .map(|candidate| candidate.name.as_str())
+            .unwrap_or_else(|| endpoint.as_str());
+        let catalog_entry = catalogs
+            .get(&endpoint)
+            .and_then(|catalog| catalog.models.iter().find(|entry| entry.id == model.id));
+        let reason = catalog_entry
+            .and_then(|entry| entry.unsupported_reason.as_ref())
+            .map(|reason| format!("{reason:?}"));
+        let label = match reason {
+            Some(reason) => format!("{provider_name} · {} ({reason})", model.id),
+            None => format!("{provider_name} · {}", model.id),
+        };
+        ModelPickerListRow {
+            provider: endpoint.clone(),
+            model_id: model.id.clone(),
+            label,
+            supported: catalog_entry_selectable(catalog_entry),
+            favorite: favorites
+                .iter()
+                .any(|entry| entry.provider == endpoint && entry.model == model.id),
+            selected: selected.is_some_and(|(provider, selected_model)| {
+                provider == &endpoint && selected_model == Some(model.id.as_str())
+            }),
+        }
+    })
+    .collect()
+}
+
 #[cfg(test)]
 mod catalog_picker_behavior_tests {
-    use super::{catalog_entry_selectable, catalog_model_ids};
+    use super::ModelPickerTab;
+    use super::{
+        ModelPickerRowsCacheKey, cached_model_picker_rows, catalog_entry_selectable,
+        catalog_model_ids, catalog_refresh_providers, catalog_supports_model,
+        composer_needs_configure_first, labeled_model_picker_rows, model_picker_list_height,
+        picker_provider_endpoints, send_provider_model, suggested_picker_provider,
+        suggested_picker_selection, visible_picker_models,
+    };
+    use crate::model::FavoriteModel;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
     use waku_client::{
-        ApiFormat, CatalogSource, ModelCapabilities, ModelCatalog, ModelCatalogEntry, ProviderId,
-        TransportProfile,
+        ApiFormat, AuthMethod, CatalogSource, ModelCapabilities, ModelCatalog, ModelCatalogEntry,
+        ProviderAuthStatus, ProviderId, ProviderPreset, TransportProfile,
     };
 
-    fn catalog(source: CatalogSource, ids: &[&str]) -> ModelCatalog {
+    fn catalog_for(
+        provider: &str,
+        source: CatalogSource,
+        ids: &[&str],
+        supported: bool,
+    ) -> ModelCatalog {
+        let provider = ProviderId::new(provider);
         ModelCatalog {
-            provider: ProviderId::new("openai"),
+            provider: provider.clone(),
             source,
             fetched_at_ms: 0,
             models: ids
@@ -2622,25 +3136,56 @@ mod catalog_picker_behavior_tests {
                 .map(|id| ModelCatalogEntry {
                     id: (*id).into(),
                     name: (*id).into(),
-                    provider: ProviderId::new("openai"),
+                    provider: provider.clone(),
                     api_format: ApiFormat::OpenAiResponses,
                     transport: TransportProfile::Standard,
-                    base_url: "https://api.openai.com/v1".into(),
+                    base_url: "https://example.test/v1".into(),
                     context_window: 128_000,
                     max_output_tokens: 16_384,
                     reasoning: false,
                     capabilities: ModelCapabilities::openai_api(ApiFormat::OpenAiResponses),
-                    supported: true,
+                    supported,
                     unsupported_reason: None,
                 })
                 .collect(),
         }
     }
 
+    fn catalog(source: CatalogSource, ids: &[&str]) -> ModelCatalog {
+        catalog_for(ProviderId::OPENAI_RESPONSES, source, ids, true)
+    }
+
+    fn connected(id: &str, method: AuthMethod) -> (ProviderId, ProviderAuthStatus) {
+        let provider = ProviderId::new(id);
+        (
+            provider.clone(),
+            ProviderAuthStatus {
+                provider,
+                method,
+                email: None,
+                account_id: None,
+                expires_at_ms: None,
+                relogin_required: false,
+            },
+        )
+    }
+
     #[test]
     fn live_empty_catalog_is_authoritative_and_hides_manual() {
         let live = catalog(CatalogSource::Live, &[]);
         assert!(catalog_model_ids(Some(&live), &["manual".into()], "default").is_empty());
+    }
+
+    #[test]
+    fn seed_empty_catalog_is_authoritative() {
+        let seed = catalog(CatalogSource::Seed, &[]);
+        assert!(catalog_model_ids(Some(&seed), &["manual".into()], "default").is_empty());
+    }
+
+    #[test]
+    fn cache_empty_catalog_is_authoritative() {
+        let cached = catalog(CatalogSource::Cache, &[]);
+        assert!(catalog_model_ids(Some(&cached), &["manual".into()], "default").is_empty());
     }
 
     #[test]
@@ -2657,5 +3202,526 @@ mod catalog_picker_behavior_tests {
         entry[0].supported = false;
         assert!(!catalog_entry_selectable(entry.first()));
         assert!(catalog_entry_selectable(None));
+    }
+
+    #[test]
+    fn connected_go_and_xai_populate_picker_without_custom_providers() {
+        let statuses = HashMap::from([
+            connected(ProviderId::OPENCODE_GO, AuthMethod::StoredApiKey),
+            connected(ProviderId::XAI_OAUTH, AuthMethod::Oauth),
+        ]);
+        let providers = picker_provider_endpoints(&[], &statuses);
+        assert!(!composer_needs_configure_first(&providers));
+        assert_eq!(
+            catalog_refresh_providers(&[], &statuses),
+            vec![
+                ProviderId::new(ProviderId::OPENCODE_GO),
+                ProviderId::new(ProviderId::XAI_OAUTH)
+            ]
+        );
+
+        let mut catalogs = HashMap::new();
+        catalogs.insert(
+            ProviderId::new(ProviderId::OPENCODE_GO),
+            catalog_for(
+                ProviderId::OPENCODE_GO,
+                CatalogSource::Live,
+                &["kimi-k2.7-code", "gemini-3-flash"],
+                true,
+            ),
+        );
+        catalogs.insert(
+            ProviderId::new(ProviderId::XAI_OAUTH),
+            catalog_for(
+                ProviderId::XAI_OAUTH,
+                CatalogSource::Live,
+                &["grok-4.6", "grok-imagine-1"],
+                true,
+            ),
+        );
+        let models = visible_picker_models(
+            &providers,
+            &catalogs,
+            &[] as &[FavoriteModel],
+            None,
+            &ModelPickerTab::All,
+            "",
+        );
+        let ids: Vec<_> = models
+            .iter()
+            .map(|(provider, model)| (provider.as_str(), model.id.as_str()))
+            .collect();
+        assert!(ids.contains(&(ProviderId::OPENCODE_GO, "kimi-k2.7-code")));
+        assert!(ids.contains(&(ProviderId::XAI_OAUTH, "grok-4.6")));
+    }
+
+    #[test]
+    fn connected_status_without_catalog_does_not_invent_builtin_models() {
+        let statuses =
+            HashMap::from([connected(ProviderId::OPENCODE_GO, AuthMethod::StoredApiKey)]);
+        let providers = picker_provider_endpoints(&[], &statuses);
+        let models = visible_picker_models(
+            &providers,
+            &HashMap::new(),
+            &[] as &[FavoriteModel],
+            None,
+            &ModelPickerTab::All,
+            "",
+        );
+        assert!(models.is_empty());
+        assert_ne!(
+            providers[0].default_model, "",
+            "presets still have a default; the picker must not invent it"
+        );
+    }
+
+    #[test]
+    fn live_empty_connected_catalog_stays_empty() {
+        let statuses =
+            HashMap::from([connected(ProviderId::OPENCODE_GO, AuthMethod::StoredApiKey)]);
+        let providers = picker_provider_endpoints(&[], &statuses);
+        let mut catalogs = HashMap::new();
+        catalogs.insert(
+            ProviderId::new(ProviderId::OPENCODE_GO),
+            catalog_for(ProviderId::OPENCODE_GO, CatalogSource::Live, &[], true),
+        );
+        let models = visible_picker_models(
+            &providers,
+            &catalogs,
+            &[] as &[FavoriteModel],
+            None,
+            &ModelPickerTab::All,
+            "",
+        );
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn disconnected_builtin_is_not_a_configured_provider() {
+        let mut statuses = HashMap::new();
+        statuses.insert(
+            ProviderId::new(ProviderId::OPENCODE_GO),
+            ProviderAuthStatus {
+                provider: ProviderId::new(ProviderId::OPENCODE_GO),
+                method: AuthMethod::None,
+                email: None,
+                account_id: None,
+                expires_at_ms: None,
+                relogin_required: false,
+            },
+        );
+        let providers = picker_provider_endpoints(&[], &statuses);
+        assert!(composer_needs_configure_first(&providers));
+    }
+
+    #[test]
+    fn startup_retargets_unconfigured_default_to_connected_catalog() {
+        let statuses = HashMap::from([
+            connected(ProviderId::OPENCODE_GO, AuthMethod::StoredApiKey),
+            connected(ProviderId::XAI_OAUTH, AuthMethod::Oauth),
+        ]);
+        let providers = picker_provider_endpoints(&[], &statuses);
+        assert_eq!(
+            suggested_picker_provider(Some(&ProviderId::new("openai-responses")), &providers),
+            Some(ProviderId::new(ProviderId::OPENCODE_GO))
+        );
+        let mut catalogs = HashMap::new();
+        catalogs.insert(
+            ProviderId::new(ProviderId::OPENCODE_GO),
+            catalog_for(
+                ProviderId::OPENCODE_GO,
+                CatalogSource::Cache,
+                &["minimax-m3", "kimi-k2.7-code"],
+                true,
+            ),
+        );
+        let selection = suggested_picker_selection(
+            None,
+            &ProviderId::new("openai-responses"),
+            None,
+            &providers,
+            &catalogs,
+        );
+        assert_eq!(
+            selection,
+            Some((
+                ProviderId::new(ProviderId::OPENCODE_GO),
+                ProviderPreset::OpenCodeGo.default_model().to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn long_connected_go_catalog_stays_complete_and_height_capped() {
+        let statuses =
+            HashMap::from([connected(ProviderId::OPENCODE_GO, AuthMethod::StoredApiKey)]);
+        let providers = picker_provider_endpoints(&[], &statuses);
+        let ids: Vec<String> = (0..25).map(|index| format!("go-model-{index}")).collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut catalogs = HashMap::new();
+        catalogs.insert(
+            ProviderId::new(ProviderId::OPENCODE_GO),
+            catalog_for(ProviderId::OPENCODE_GO, CatalogSource::Live, &id_refs, true),
+        );
+        let models = visible_picker_models(
+            &providers,
+            &catalogs,
+            &[] as &[FavoriteModel],
+            None,
+            &ModelPickerTab::All,
+            "",
+        );
+        assert_eq!(models.len(), 25);
+        assert_eq!(model_picker_list_height(models.len()), 260.0);
+    }
+
+    #[test]
+    fn connected_xai_oauth_seed_search_gr_lists_supported_grok() {
+        let statuses = HashMap::from([connected(ProviderId::XAI_OAUTH, AuthMethod::Oauth)]);
+        let providers = picker_provider_endpoints(&[], &statuses);
+        let seed = waku_client::xai_oauth_seed(&providers[0].base_url);
+        assert!(
+            seed.iter()
+                .any(|entry| entry.id.contains("grok") && entry.supported)
+        );
+        let mut catalogs = HashMap::new();
+        catalogs.insert(
+            ProviderId::new(ProviderId::XAI_OAUTH),
+            ModelCatalog {
+                provider: ProviderId::new(ProviderId::XAI_OAUTH),
+                models: seed,
+                source: CatalogSource::Seed,
+                fetched_at_ms: 1,
+            },
+        );
+        let models = visible_picker_models(
+            &providers,
+            &catalogs,
+            &[] as &[FavoriteModel],
+            None,
+            &ModelPickerTab::All,
+            "gr",
+        );
+        assert!(models.iter().any(
+            |(provider, model)| provider.as_str() == ProviderId::XAI_OAUTH
+                && model.id.contains("grok")
+        ));
+    }
+
+    #[test]
+    fn search_gr_finds_xai_oauth_even_when_session_is_locked_to_go() {
+        let statuses = HashMap::from([
+            connected(ProviderId::OPENCODE_GO, AuthMethod::StoredApiKey),
+            connected(ProviderId::XAI_OAUTH, AuthMethod::Oauth),
+        ]);
+        let providers = picker_provider_endpoints(&[], &statuses);
+        let seed = waku_client::xai_oauth_seed("https://api.x.ai/v1");
+        let mut catalogs = HashMap::new();
+        catalogs.insert(
+            ProviderId::new(ProviderId::OPENCODE_GO),
+            catalog_for(
+                ProviderId::OPENCODE_GO,
+                CatalogSource::Live,
+                &["kimi-k2.7-code"],
+                true,
+            ),
+        );
+        catalogs.insert(
+            ProviderId::new(ProviderId::XAI_OAUTH),
+            ModelCatalog {
+                provider: ProviderId::new(ProviderId::XAI_OAUTH),
+                models: seed,
+                source: CatalogSource::Seed,
+                fetched_at_ms: 1,
+            },
+        );
+        let models = visible_picker_models(
+            &providers,
+            &catalogs,
+            &[] as &[FavoriteModel],
+            Some(&ProviderId::new(ProviderId::OPENCODE_GO)),
+            &ModelPickerTab::All,
+            "gr",
+        );
+        assert!(models.iter().any(
+            |(provider, model)| provider.as_str() == ProviderId::XAI_OAUTH
+                && model.id.contains("grok")
+        ));
+    }
+
+    #[test]
+    fn go_k2_stays_when_xai_oauth_connects() {
+        let statuses = HashMap::from([
+            connected(ProviderId::OPENCODE_GO, AuthMethod::StoredApiKey),
+            connected(ProviderId::XAI_OAUTH, AuthMethod::Oauth),
+        ]);
+        let providers = picker_provider_endpoints(&[], &statuses);
+        let mut catalogs = HashMap::new();
+        catalogs.insert(
+            ProviderId::new(ProviderId::OPENCODE_GO),
+            catalog_for(
+                ProviderId::OPENCODE_GO,
+                CatalogSource::Live,
+                &["kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5"],
+                true,
+            ),
+        );
+        catalogs.insert(
+            ProviderId::new(ProviderId::XAI_OAUTH),
+            catalog_for(
+                ProviderId::XAI_OAUTH,
+                CatalogSource::Live,
+                &["grok-4.5", "grok-4.6"],
+                true,
+            ),
+        );
+        let go = ProviderId::new(ProviderId::OPENCODE_GO);
+        let selection = suggested_picker_selection(
+            Some((&go, Some("kimi-k2.7-code"))),
+            &ProviderId::new(ProviderId::XAI_OAUTH),
+            Some("grok-4.5"),
+            &providers,
+            &catalogs,
+        );
+        assert_eq!(selection, Some((go.clone(), "kimi-k2.7-code".into())));
+        assert_eq!(
+            send_provider_model(&go, Some("kimi-k2.7-code"), &catalogs),
+            Some((go, "kimi-k2.7-code".into()))
+        );
+    }
+
+    #[test]
+    fn stale_xai_plus_go_model_snaps_to_supported_grok() {
+        let statuses = HashMap::from([
+            connected(ProviderId::OPENCODE_GO, AuthMethod::StoredApiKey),
+            connected(ProviderId::XAI_OAUTH, AuthMethod::Oauth),
+        ]);
+        let providers = picker_provider_endpoints(&[], &statuses);
+        let mut catalogs = HashMap::new();
+        catalogs.insert(
+            ProviderId::new(ProviderId::OPENCODE_GO),
+            catalog_for(
+                ProviderId::OPENCODE_GO,
+                CatalogSource::Live,
+                &["kimi-k2.7-code"],
+                true,
+            ),
+        );
+        catalogs.insert(
+            ProviderId::new(ProviderId::XAI_OAUTH),
+            catalog_for(
+                ProviderId::XAI_OAUTH,
+                CatalogSource::Live,
+                &["grok-4.5", "grok-4.6"],
+                true,
+            ),
+        );
+        let xai = ProviderId::new(ProviderId::XAI_OAUTH);
+        let selection = suggested_picker_selection(
+            Some((&xai, Some("kimi-k2.7-code"))),
+            &xai,
+            Some("kimi-k2.7-code"),
+            &providers,
+            &catalogs,
+        );
+        assert_eq!(selection, Some((xai.clone(), "grok-4.5".into())));
+        assert!(send_provider_model(&xai, Some("kimi-k2.7-code"), &catalogs).is_none());
+        assert_eq!(
+            send_provider_model(&xai, Some("grok-4.5"), &catalogs),
+            Some((xai, "grok-4.5".into()))
+        );
+        assert!(!catalog_supports_model(
+            catalogs.get(&ProviderId::new(ProviderId::XAI_OAUTH)),
+            "kimi-k2.7-code"
+        ));
+    }
+
+    #[test]
+    fn persisted_last_pair_cannot_carry_model_across_providers() {
+        let statuses = HashMap::from([connected(ProviderId::XAI_OAUTH, AuthMethod::Oauth)]);
+        let providers = picker_provider_endpoints(&[], &statuses);
+        let mut catalogs = HashMap::new();
+        catalogs.insert(
+            ProviderId::new(ProviderId::XAI_OAUTH),
+            catalog_for(
+                ProviderId::XAI_OAUTH,
+                CatalogSource::Seed,
+                &["grok-4.5"],
+                true,
+            ),
+        );
+        let selection = suggested_picker_selection(
+            None,
+            &ProviderId::new(ProviderId::XAI_OAUTH),
+            Some("kimi-k2.7-code"),
+            &providers,
+            &catalogs,
+        );
+        assert_eq!(
+            selection,
+            Some((ProviderId::new(ProviderId::XAI_OAUTH), "grok-4.5".into()))
+        );
+    }
+
+    fn picker_inputs<'a>(
+        catalog_generation: u64,
+        auth_generation: u64,
+        favorite_generation: u64,
+        locked: Option<&'a ProviderId>,
+        query: &'a str,
+        selected: Option<(&'a ProviderId, Option<&'a str>)>,
+    ) -> super::ModelPickerRowsCacheInputs<'a> {
+        super::ModelPickerRowsCacheInputs {
+            catalog_generation,
+            auth_generation,
+            favorite_generation,
+            locked_provider: locked,
+            selected_tab: &ModelPickerTab::All,
+            query,
+            selected,
+        }
+    }
+
+    fn picker_key(
+        catalog_generation: u64,
+        auth_generation: u64,
+        favorite_generation: u64,
+        locked: Option<&ProviderId>,
+        query: &str,
+        selected: Option<(&ProviderId, Option<&str>)>,
+    ) -> ModelPickerRowsCacheKey {
+        ModelPickerRowsCacheKey::new(&picker_inputs(
+            catalog_generation,
+            auth_generation,
+            favorite_generation,
+            locked,
+            query,
+            selected,
+        ))
+    }
+
+    #[test]
+    fn picker_row_cache_key_stays_put_when_generations_and_view_do() {
+        let go = ProviderId::new(ProviderId::OPENCODE_GO);
+        let first = picker_key(1, 2, 3, Some(&go), "", Some((&go, Some("kimi-k2.7-code"))));
+        let second = picker_key(1, 2, 3, Some(&go), "", Some((&go, Some("kimi-k2.7-code"))));
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn picker_row_cache_key_moves_when_catalog_auth_or_favorite_generation_changes() {
+        let baseline = picker_key(1, 1, 1, None, "", None);
+        assert_ne!(picker_key(2, 1, 1, None, "", None), baseline);
+        assert_ne!(picker_key(1, 2, 1, None, "", None), baseline);
+        assert_ne!(picker_key(1, 1, 2, None, "", None), baseline);
+    }
+
+    #[test]
+    fn picker_row_cache_key_moves_with_search_lock_or_selection() {
+        let go = ProviderId::new(ProviderId::OPENCODE_GO);
+        let baseline = picker_key(1, 1, 1, None, "", None);
+        assert_ne!(picker_key(1, 1, 1, None, "gr", None), baseline);
+        assert_ne!(picker_key(1, 1, 1, Some(&go), "", None), baseline);
+        assert_ne!(
+            picker_key(1, 1, 1, None, "", Some((&go, Some("kimi-k2.7-code")))),
+            baseline
+        );
+    }
+
+    #[test]
+    fn picker_row_cache_reuses_snapshot_until_generation_changes() {
+        let statuses = HashMap::from([
+            connected(ProviderId::OPENCODE_GO, AuthMethod::StoredApiKey),
+            connected(ProviderId::XAI_OAUTH, AuthMethod::Oauth),
+        ]);
+        let providers = picker_provider_endpoints(&[], &statuses);
+        let mut catalogs = HashMap::new();
+        catalogs.insert(
+            ProviderId::new(ProviderId::OPENCODE_GO),
+            catalog_for(
+                ProviderId::OPENCODE_GO,
+                CatalogSource::Live,
+                &["kimi-k2.7-code", "gemini-3-flash"],
+                true,
+            ),
+        );
+        catalogs.insert(
+            ProviderId::new(ProviderId::XAI_OAUTH),
+            catalog_for(
+                ProviderId::XAI_OAUTH,
+                CatalogSource::Live,
+                &["grok-4.6"],
+                true,
+            ),
+        );
+        let go = ProviderId::new(ProviderId::OPENCODE_GO);
+        let stored_key = RefCell::new(None);
+        let snapshot = RefCell::new(Rc::new(Vec::new()));
+        let mut builds = 0;
+        let rows = || {
+            labeled_model_picker_rows(
+                &providers,
+                &catalogs,
+                &[],
+                Some(&go),
+                &ModelPickerTab::All,
+                "",
+                Some((&go, Some("kimi-k2.7-code"))),
+            )
+        };
+        let first = cached_model_picker_rows(
+            &stored_key,
+            &snapshot,
+            picker_inputs(1, 1, 1, Some(&go), "", Some((&go, Some("kimi-k2.7-code")))),
+            || {
+                builds += 1;
+                rows()
+            },
+        );
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].label, "OpenCode Go · kimi-k2.7-code");
+        assert!(first[0].selected);
+        assert!(!first[1].selected);
+        let second = cached_model_picker_rows(
+            &stored_key,
+            &snapshot,
+            picker_inputs(1, 1, 1, Some(&go), "", Some((&go, Some("kimi-k2.7-code")))),
+            || panic!("same generation must reuse the snapshot"),
+        );
+        assert!(Rc::ptr_eq(&first, &second));
+        assert_eq!(builds, 1);
+        let after_catalog = cached_model_picker_rows(
+            &stored_key,
+            &snapshot,
+            picker_inputs(2, 1, 1, Some(&go), "", Some((&go, Some("kimi-k2.7-code")))),
+            || {
+                builds += 1;
+                rows()
+            },
+        );
+        assert!(!Rc::ptr_eq(&first, &after_catalog));
+        assert_eq!(builds, 2);
+        let after_auth = cached_model_picker_rows(
+            &stored_key,
+            &snapshot,
+            picker_inputs(2, 2, 1, Some(&go), "", Some((&go, Some("kimi-k2.7-code")))),
+            || {
+                builds += 1;
+                rows()
+            },
+        );
+        assert!(!Rc::ptr_eq(&after_catalog, &after_auth));
+        assert_eq!(builds, 3);
+        let after_favorite = cached_model_picker_rows(
+            &stored_key,
+            &snapshot,
+            picker_inputs(2, 2, 2, Some(&go), "", Some((&go, Some("kimi-k2.7-code")))),
+            || {
+                builds += 1;
+                rows()
+            },
+        );
+        assert!(!Rc::ptr_eq(&after_auth, &after_favorite));
+        assert_eq!(builds, 4);
     }
 }

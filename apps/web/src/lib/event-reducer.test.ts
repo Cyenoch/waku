@@ -201,7 +201,7 @@ function runningSession(): AgentSession {
     title: 'New task',
     project_id: 'project',
     workspace: { kind: 'local' },
-    provider: 'codex',
+    provider: 'openai-codex',
     runtime_mode: 'fullAccess',
     interaction_mode: 'build',
     status: 'connecting',

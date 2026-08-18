@@ -1617,12 +1617,14 @@ mod tests {
     #[test]
     fn sidebar_recency_uses_last_reply_with_creation_fallback() {
         let project_id = Uuid::new_v4();
-        let mut renamed_old_session = AgentSession::new(project_id, ProviderId::new("codex"));
+        let mut renamed_old_session =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
         renamed_old_session.created_at = 10;
         renamed_old_session.last_reply_at = Some(20);
         renamed_old_session.updated_at = 1_000;
 
-        let mut newer_unanswered_session = AgentSession::new(project_id, ProviderId::new("codex"));
+        let mut newer_unanswered_session =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
         newer_unanswered_session.created_at = 30;
         newer_unanswered_session.last_reply_at = None;
         newer_unanswered_session.updated_at = 30;

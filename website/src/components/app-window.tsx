@@ -64,7 +64,7 @@ export function AppWindow() {
               WebkitMaskImage: 'url(/providers/claude.svg)',
             }}
           />
-          Claude Code
+          Anthropic
         </span>
       </div>
 

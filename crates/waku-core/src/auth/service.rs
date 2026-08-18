@@ -36,7 +36,7 @@ pub struct AuthRuntime {
 impl AuthRuntime {
     pub fn production(directory: &Path) -> Result<Self, AuthError> {
         Ok(Self {
-            store: production_store(),
+            store: production_store(directory)?,
             endpoints: AuthEndpoints::production(),
             persist: AuthPersist::new(directory),
             callback_bind: SocketAddr::from(([127, 0, 0, 1], AuthEndpoints::CODEX_CALLBACK_PORT)),
@@ -868,17 +868,7 @@ impl AuthService {
         if ProviderPreset::parse_id(provider.as_str()) == Some(ProviderPreset::XaiOauth)
             && self.runtime.store.get(provider)?.is_none()
         {
-            return self
-                .runtime
-                .persist
-                .put_catalog_at(
-                    &cache_key,
-                    provider,
-                    xai_oauth_seed(&endpoint.base_url),
-                    CatalogSource::Seed,
-                    self.now(),
-                )
-                .map_err(|_| AuthError::Store);
+            return self.persist_xai_oauth_seed(provider, &endpoint, &cache_key);
         }
         let (auth, extra) = self.resolve(provider, &endpoint)?;
         let transport = ProviderPreset::parse_id(provider.as_str())
@@ -908,9 +898,30 @@ impl AuthService {
                         ..cached
                     });
                 }
+                if ProviderPreset::parse_id(provider.as_str()) == Some(ProviderPreset::XaiOauth) {
+                    return self.persist_xai_oauth_seed(provider, &endpoint, &cache_key);
+                }
                 Err(error)
             }
         }
+    }
+
+    fn persist_xai_oauth_seed(
+        &self,
+        provider: &ProviderId,
+        endpoint: &ExternalProvider,
+        cache_key: &str,
+    ) -> Result<ModelCatalog, AuthError> {
+        self.runtime
+            .persist
+            .put_catalog_at(
+                cache_key,
+                provider,
+                xai_oauth_seed(&endpoint.base_url),
+                CatalogSource::Seed,
+                self.now(),
+            )
+            .map_err(|_| AuthError::Store)
     }
 
     fn cached_catalog(&self, provider: &ProviderId) -> Option<ModelCatalog> {
@@ -1242,6 +1253,39 @@ mod tests {
     }
 
     #[test]
+    fn xai_oauth_live_discovery_error_falls_back_to_seed() {
+        let directory = std::env::temp_dir().join(format!("waku-auth-xai-seed-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = Arc::new(MemoryCredentialStore::default());
+        let provider = ProviderId::new("xai-oauth");
+        store
+            .set(
+                &provider,
+                StoredCredential::Oauth {
+                    access: "access".into(),
+                    refresh: "refresh".into(),
+                    expires_at_ms: u64::MAX,
+                    account_id: None,
+                    email: None,
+                },
+            )
+            .unwrap();
+        let mut runtime = AuthRuntime::testing(&directory, store, AuthEndpoints::production());
+        runtime
+            .model_base_overrides
+            .insert("xai-oauth".into(), "http://127.0.0.1:1/v1".into());
+        let service = AuthService::new(runtime).unwrap();
+        let catalog = service.refresh_models(&provider).unwrap();
+        assert_eq!(catalog.source, CatalogSource::Seed);
+        assert!(
+            catalog
+                .models
+                .iter()
+                .any(|model| model.id == "grok-4.5" && model.supported)
+        );
+    }
+
+    #[test]
     fn empty_models_http_200_is_live_empty() {
         let port = bind_json(200, serde_json::json!({ "data": [] }));
         let directory = std::env::temp_dir().join(format!("waku-auth-empty-{}", Uuid::new_v4()));
@@ -1319,15 +1363,23 @@ mod tests {
         );
         use std::io::Write;
         stream.write_all(request.as_bytes()).unwrap();
-        // Exchange will fail against production token URL; the listener must still
-        // have captured the callback instead of requiring a later bind.
-        let _ = service.poll_login(login_id);
-        let still = service
-            .callbacks
-            .lock()
-            .get(&login_id)
-            .and_then(|cb| cb.received.lock().clone());
-        assert!(still.is_none(), "callback should have been consumed");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let captured = loop {
+            let received = service
+                .callbacks
+                .lock()
+                .get(&login_id)
+                .and_then(|callback| callback.received.lock().clone());
+            if received.is_some() || std::time::Instant::now() >= deadline {
+                break received;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let Some((code, captured_state)) = captured else {
+            panic!("callback was not captured");
+        };
+        assert_eq!(code, "abc");
+        assert_eq!(captured_state, state);
     }
 
     #[test]

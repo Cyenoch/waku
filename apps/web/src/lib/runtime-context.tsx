@@ -1132,21 +1132,6 @@ function syntheticEvent(
   }
 }
 
-function providerName(provider: AgentSession['provider']) {
-  return (
-    {
-      amp: 'Amp',
-      claude: 'Claude Code',
-      codex: 'Codex',
-      cursor: 'Cursor Agent',
-      deepSeek: 'DeepSeek Harness',
-      openCode: 'OpenCode',
-      grok: 'Grok',
-      pi: 'Pi',
-    } as const
-  )[provider]
-}
-
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }

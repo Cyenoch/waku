@@ -11,4 +11,7 @@ mod store;
 pub use error::AuthError;
 pub use persist::AuthPersist;
 pub use service::{AuthRuntime, AuthService};
-pub use store::{CredentialStore, MemoryCredentialStore, StoredCredential};
+pub use store::{
+    CREDENTIALS_FILE_NAME, CredentialStore, FileCredentialStore, MemoryCredentialStore,
+    StoredCredential,
+};

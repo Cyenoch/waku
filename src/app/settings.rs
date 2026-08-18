@@ -2208,6 +2208,7 @@ impl Waku {
         self.state
             .external_providers
             .retain(|provider| &provider.id != id);
+        self.bump_model_picker_catalog_generation();
         if self.expanded_provider_settings.as_ref() == Some(id) {
             self.expanded_provider_settings = None;
         }
@@ -2411,6 +2412,7 @@ impl Waku {
         } else {
             self.state.external_providers.push(provider);
         }
+        self.bump_model_picker_catalog_generation();
         self.expanded_provider_settings = Some(id.clone());
         if self.state.last_provider == ProviderId::new("")
             || self.state.last_provider == *editing_id
@@ -2526,6 +2528,11 @@ impl Waku {
 
     pub(super) fn refresh_provider_auth_statuses(&mut self, cx: &mut Context<Self>) {
         self.auth_generation = self.auth_generation.wrapping_add(1);
+        if self.auth_status_inflight {
+            self.auth_status_queued = true;
+            return;
+        }
+        self.auth_status_inflight = true;
         let generation = self.auth_generation;
         let client = self.daemon.client();
         cx.spawn(async move |this, cx| {
@@ -2534,6 +2541,12 @@ impl Waku {
                 .spawn(async move { client.get_auth_status(None) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.auth_status_inflight = false;
+                if this.auth_status_queued {
+                    this.auth_status_queued = false;
+                    this.refresh_provider_auth_statuses(cx);
+                    return;
+                }
                 if generation != this.auth_generation {
                     return;
                 }
@@ -2544,8 +2557,10 @@ impl Waku {
                             .into_iter()
                             .map(|status| (status.provider.clone(), status))
                             .collect();
+                        this.bump_model_picker_auth_generation();
                         this.auth_phases = phases;
                         this.auth_error.clear();
+                        this.refresh_provider_catalogs(false, cx);
                     }
                     Ok(_) => {
                         this.auth_error.insert(
@@ -2558,7 +2573,30 @@ impl Waku {
                             .insert(ProviderId::new("all"), error.to_string());
                     }
                 }
+                this.schedule_auth_status_poll(cx);
                 cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn schedule_auth_status_poll(&mut self, cx: &mut Context<Self>) {
+        if self.auth_status_inflight || !auth_status_should_poll(&self.auth_phases) {
+            return;
+        }
+        let generation = self.auth_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(AUTH_STATUS_POLL_INTERVAL)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if generation != this.auth_generation {
+                    return;
+                }
+                if this.auth_status_inflight || !auth_status_should_poll(&this.auth_phases) {
+                    return;
+                }
+                this.refresh_provider_auth_statuses(cx);
             });
         })
         .detach();
@@ -2567,50 +2605,68 @@ impl Waku {
     pub(super) fn refresh_provider_catalogs(&mut self, force: bool, cx: &mut Context<Self>) {
         self.model_catalog_generation = self.model_catalog_generation.wrapping_add(1);
         let generation = self.model_catalog_generation;
-        let providers = self
-            .state
-            .external_providers
-            .iter()
-            .map(|provider| provider.id.clone())
-            .collect::<Vec<_>>();
+        let auth_generation = self.auth_generation;
+        let providers = super::composer::catalog_refresh_providers(
+            &self.state.external_providers,
+            &self.auth_statuses,
+        );
         let client = self.daemon.client();
+        self.model_catalog_pending.clear();
         self.model_catalog_pending.extend(providers.iter().cloned());
+        if providers.is_empty() {
+            self.reconcile_composer_provider_selection(cx);
+            cx.notify();
+            return;
+        }
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     let mut catalogs = Vec::new();
+                    let mut errors = Vec::new();
                     for provider in providers {
                         let response = if force {
-                            client.refresh_models(provider.clone())?
+                            client.refresh_models(provider.clone())
                         } else {
-                            client.list_models(provider.clone())?
+                            client.list_models(provider.clone())
                         };
-                        if let waku_client::ResponsePayload::Models { catalog } = response {
-                            catalogs.push(catalog);
+                        match response {
+                            Ok(waku_client::ResponsePayload::Models { catalog }) => {
+                                catalogs.push(catalog);
+                            }
+                            Ok(_) => errors.push((provider, "invalid models response".into())),
+                            Err(error) => errors.push((provider, error.to_string())),
                         }
                     }
-                    Ok::<_, anyhow::Error>(catalogs)
+                    (catalogs, errors)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if generation != this.model_catalog_generation {
+                if generation != this.model_catalog_generation
+                    || auth_generation != this.auth_generation
+                {
                     return;
                 }
                 this.model_catalog_pending.clear();
-                match result {
-                    Ok(catalogs) => {
-                        for catalog in catalogs {
-                            this.model_catalogs
-                                .insert(catalog.provider.clone(), catalog);
-                        }
-                        this.model_catalog_error.clear();
-                    }
-                    Err(error) => {
-                        this.model_catalog_error
-                            .insert(ProviderId::new("all"), error.to_string());
-                    }
+                let (catalogs, errors) = result;
+                let failed: HashSet<_> = errors
+                    .iter()
+                    .map(|(provider, _)| provider.clone())
+                    .collect();
+                let had_catalogs = !catalogs.is_empty();
+                for catalog in catalogs {
+                    this.model_catalogs
+                        .insert(catalog.provider.clone(), catalog);
                 }
+                if had_catalogs {
+                    this.bump_model_picker_catalog_generation();
+                }
+                this.model_catalog_error
+                    .retain(|provider, _| failed.contains(provider));
+                for (provider, error) in errors {
+                    this.model_catalog_error.insert(provider, error);
+                }
+                this.reconcile_composer_provider_selection(cx);
                 cx.notify();
             });
         })
@@ -2651,6 +2707,7 @@ impl Waku {
                             _ => {}
                         }
                         this.auth_phases.push(phase);
+                        this.schedule_auth_status_poll(cx);
                     }
                     Ok(_) => {
                         this.auth_error
@@ -2725,7 +2782,6 @@ impl Waku {
                         .insert(ProviderId::new("all"), error.to_string());
                 }
                 this.refresh_provider_auth_statuses(cx);
-                this.refresh_provider_catalogs(true, cx);
                 cx.notify();
             });
         })
@@ -2748,7 +2804,6 @@ impl Waku {
             let _ = this.update(cx, |this, cx| {
                 if result.is_ok() {
                     this.refresh_provider_auth_statuses(cx);
-                    this.refresh_provider_catalogs(true, cx);
                 } else if let Err(error) = result {
                     this.auth_error
                         .insert(ProviderId::new("all"), error.to_string());
@@ -2820,6 +2875,20 @@ fn settings_row_action(
         .focus_visible(|style| style.border_color(theme.accent))
         .hover(|element| element.bg(theme.overlay))
         .child(label.into())
+}
+
+const AUTH_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+fn auth_phase_needs_status_poll(phase: &waku_client::AuthPhase) -> bool {
+    matches!(
+        phase,
+        waku_client::AuthPhase::AwaitingBrowser { .. }
+            | waku_client::AuthPhase::AwaitingDevice { .. }
+    )
+}
+
+fn auth_status_should_poll(phases: &[waku_client::AuthPhase]) -> bool {
+    phases.iter().any(auth_phase_needs_status_poll)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3032,7 +3101,7 @@ fn accepts_generation(current: u64, response: u64) -> bool {
 mod auth_behavior_tests {
     use super::{
         ProviderRowActions, accepts_generation, auth_phase_summary, auth_phase_url,
-        auth_status_label, preset_login_methods, provider_row_actions,
+        auth_status_label, auth_status_should_poll, preset_login_methods, provider_row_actions,
     };
     use uuid::Uuid;
     use waku_client::{AuthMethod, LoginMethod, ProviderAuthStatus, ProviderId};
@@ -3262,6 +3331,68 @@ mod auth_behavior_tests {
             provider_row_actions(Some(AuthMethod::Oauth), Some(&phase), false),
             ProviderRowActions::Login
         );
+    }
+
+    fn awaiting_device() -> waku_client::AuthPhase {
+        waku_client::AuthPhase::AwaitingDevice {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("xai-oauth"),
+            user_code: "WXYZ".into(),
+            instructions: "verify".into(),
+            verification_url: "https://device.example".into(),
+        }
+    }
+
+    #[test]
+    fn awaiting_device_keeps_auth_status_poll_armed() {
+        assert!(auth_status_should_poll(&[awaiting_device()]));
+    }
+
+    #[test]
+    fn awaiting_browser_keeps_auth_status_poll_armed() {
+        let phase = waku_client::AuthPhase::AwaitingBrowser {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("openai-codex"),
+            url: "https://browser.example".into(),
+        };
+        assert!(auth_status_should_poll(&[phase]));
+    }
+
+    #[test]
+    fn awaiting_api_key_does_not_arm_auth_status_poll() {
+        let phase = waku_client::AuthPhase::AwaitingApiKey {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("xai"),
+            instructions: "key".into(),
+        };
+        assert!(!auth_status_should_poll(&[phase]));
+    }
+
+    #[test]
+    fn completed_and_failed_stop_auth_status_poll() {
+        let completed = waku_client::AuthPhase::Completed {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("xai-oauth"),
+        };
+        let failed = waku_client::AuthPhase::Failed {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("xai-oauth"),
+            message: "expired".into(),
+        };
+        assert!(!auth_status_should_poll(&[completed]));
+        assert!(!auth_status_should_poll(&[failed]));
+        assert!(!auth_status_should_poll(&[waku_client::AuthPhase::Idle]));
+    }
+
+    #[test]
+    fn terminal_phase_stops_poll_without_settings_reentry() {
+        let mut phases = vec![awaiting_device()];
+        assert!(auth_status_should_poll(&phases));
+        phases[0] = waku_client::AuthPhase::Completed {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("xai-oauth"),
+        };
+        assert!(!auth_status_should_poll(&phases));
     }
 
     #[test]

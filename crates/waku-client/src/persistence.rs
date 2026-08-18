@@ -518,20 +518,6 @@ impl PersistedState {
     }
 
     fn migrate_loaded(&mut self) {
-        for session in &mut self.sessions {
-            let checkpoint_totals_current = session.turns.iter().all(|turn| {
-                turn.checkpoint
-                    .as_ref()
-                    .is_none_or(waku_protocol::model::Checkpoint::totals_are_current)
-            });
-            let before = (session.turns.len(), session.last_reply_at);
-            session.migrate_legacy_state();
-            session.backfill_last_reply_at();
-            if !checkpoint_totals_current || before != (session.turns.len(), session.last_reply_at)
-            {
-                self.dirty_sessions.insert(session.id);
-            }
-        }
         self.version = STATE_VERSION;
         self.backfill_remembered_selection();
     }
@@ -590,31 +576,12 @@ pub fn load_window_state() -> Option<PersistedWindowState> {
     read_app_state_file(&default_app_state_path())?.window_state
 }
 
-fn default_legacy_settings_paths() -> Vec<PathBuf> {
-    if cfg!(debug_assertions) {
-        vec![StateStore::default_path().with_file_name("settings.json")]
-    } else {
-        vec![configuration_directory().join("settings.json")]
+fn read_app_settings_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
     }
-}
-
-fn read_app_settings_source(
-    app_settings_path: &Path,
-    legacy_settings_paths: &[PathBuf],
-) -> io::Result<Option<(Vec<u8>, bool)>> {
-    match fs::read(app_settings_path) {
-        Ok(bytes) => return Ok(Some((bytes, true))),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    for path in legacy_settings_paths {
-        match fs::read(path) {
-            Ok(bytes) => return Ok(Some((bytes, false))),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(None)
 }
 
 /// Load the app-owned launch settings before the managed daemon starts.
@@ -622,11 +589,11 @@ fn read_app_settings_source(
 /// stable between this process launch and the later UI state load.
 pub fn load_or_create_app_settings() -> io::Result<AppSettings> {
     let path = default_app_settings_path();
-    let source = read_app_settings_source(&path, &default_legacy_settings_paths())?;
-    let loaded_from_primary = source.as_ref().is_some_and(|(_, primary)| *primary);
-    let token_was_persisted = source
+    let bytes = read_app_settings_file(&path)?;
+    let missing = bytes.is_none();
+    let token_was_persisted = bytes
         .as_ref()
-        .and_then(|(bytes, _)| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
         .and_then(|value| {
             value
                 .get("daemon_exposure")
@@ -635,12 +602,12 @@ pub fn load_or_create_app_settings() -> io::Result<AppSettings> {
                 .map(|token| !token.trim().is_empty())
         })
         .unwrap_or(false);
-    let mut settings: AppSettings = source
-        .map(|(bytes, _)| serde_json::from_slice::<AppSettings>(&bytes).map_err(to_io_error))
+    let mut settings: AppSettings = bytes
+        .map(|bytes| serde_json::from_slice::<AppSettings>(&bytes).map_err(to_io_error))
         .transpose()?
         .unwrap_or_default();
     let generated_token = settings.daemon_exposure.ensure_token();
-    if !loaded_from_primary || !token_was_persisted || generated_token {
+    if missing || !token_was_persisted || generated_token {
         write_json_atomically(&path, &settings)?;
     }
     Ok(settings)
@@ -651,7 +618,6 @@ pub struct StateStore {
     path: PathBuf,
     app_state_path: PathBuf,
     app_settings_path: PathBuf,
-    legacy_settings_paths: Vec<PathBuf>,
     daemon: DaemonSupervisor,
     remote_default_cwd: Mutex<Option<PathBuf>>,
     /// A task snapshot may only be written after this client has successfully
@@ -682,7 +648,6 @@ impl StateStore {
         Self {
             app_state_path: default_app_state_path(),
             app_settings_path: default_app_settings_path(),
-            legacy_settings_paths: default_legacy_settings_paths(),
             path: Self::default_path(),
             daemon,
             remote_default_cwd: Mutex::new(None),
@@ -860,10 +825,8 @@ impl StateStore {
     }
 
     fn read_app_settings(&self) -> io::Result<Option<AppSettings>> {
-        let source =
-            read_app_settings_source(&self.app_settings_path, &self.legacy_settings_paths)?;
-        source
-            .map(|(bytes, _)| serde_json::from_slice(&bytes).map_err(to_io_error))
+        read_app_settings_file(&self.app_settings_path)?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(to_io_error))
             .transpose()
     }
 
@@ -963,16 +926,11 @@ mod tests {
     #[test]
     fn desktop_settings_paths_are_build_specific() {
         let app_settings_path = default_app_settings_path();
-        let legacy_settings_paths = default_legacy_settings_paths();
 
         #[cfg(debug_assertions)]
         {
             let state_path = StateStore::default_path();
             assert_eq!(app_settings_path, state_path.with_file_name("app.json"));
-            assert_eq!(
-                legacy_settings_paths,
-                [state_path.with_file_name("settings.json")]
-            );
         }
 
         #[cfg(not(debug_assertions))]
@@ -980,10 +938,6 @@ mod tests {
             assert_eq!(
                 app_settings_path,
                 configuration_directory().join("app.json")
-            );
-            assert_eq!(
-                legacy_settings_paths,
-                [configuration_directory().join("settings.json")]
             );
         }
     }

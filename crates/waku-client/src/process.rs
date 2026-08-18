@@ -375,8 +375,8 @@ impl DaemonSupervisor {
             exposure: Mutex::new(exposure),
             restart: Mutex::new(()),
             settings: Mutex::new(settings),
-            // The desktop sends one normalized snapshot after it has migrated
-            // the legacy combined settings document into app.json.
+            // Desktop-owned settings are written after the first successful
+            // snapshot so a failed launch cannot overwrite a good document.
             persisted_settings: Mutex::new(None),
             settings_updates,
             client_updates: Mutex::new(Vec::new()),

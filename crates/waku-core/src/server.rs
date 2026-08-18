@@ -690,8 +690,6 @@ fn command_targets_runtime(command: &Command) -> bool {
             | Command::RefreshBackgroundWork
             | Command::StopBackgroundWork { .. }
             | Command::ApplyOptions { .. }
-            | Command::Rollback { .. }
-            | Command::Fork { .. }
             | Command::ForkSessionFromResponse { .. }
             | Command::RewindSessionToMessage { .. }
             | Command::OpenTerminal { .. }
@@ -891,7 +889,8 @@ fn task_catalog_action(command: &Command) -> TaskCatalogAction {
         Command::SaveTaskState(payload) => TaskCatalogAction::Save {
             projects: payload.projects.clone(),
         },
-        Command::RemoveSession
+        Command::Start { .. }
+        | Command::RemoveSession
         | Command::ForkSessionFromResponse { .. }
         | Command::RewindSessionToMessage { .. } => TaskCatalogAction::Changed,
         _ => TaskCatalogAction::None,
@@ -996,6 +995,7 @@ mod tests {
                     events.send(WireDriverEvent::new("connected", json!({})))?;
                     Ok(ResponsePayload::Started {
                         supports_steer: true,
+                        task_generation: None,
                     })
                 }
                 Command::AttachSession => Ok(ResponsePayload::SessionRuntime {
@@ -1282,7 +1282,7 @@ mod tests {
                 runtime_id,
                 Command::Start {
                     options: WireDriverStartOptions {
-                        provider: "codex".into(),
+                        provider: ProviderId::new(ProviderId::OPENAI_CODEX),
                         cwd: PathBuf::from("."),
                         mode: "fullAccess".into(),
                         interaction_mode: "build".into(),
@@ -1290,6 +1290,7 @@ mod tests {
                         reasoning_effort: None,
                         service_tier: None,
                         context_window: None,
+                        task: None,
                     },
                 },
             )
@@ -1297,7 +1298,8 @@ mod tests {
         assert!(matches!(
             response,
             ResponsePayload::Started {
-                supports_steer: true
+                supports_steer: true,
+                ..
             }
         ));
         // Start can emit before a refreshed app discovers and subscribes to
@@ -1345,7 +1347,7 @@ mod tests {
                 runtime_id,
                 Command::Start {
                     options: WireDriverStartOptions {
-                        provider: "codex".into(),
+                        provider: ProviderId::new(ProviderId::OPENAI_CODEX),
                         cwd: PathBuf::from("."),
                         mode: "fullAccess".into(),
                         interaction_mode: "build".into(),
@@ -1353,6 +1355,7 @@ mod tests {
                         reasoning_effort: None,
                         service_tier: None,
                         context_window: None,
+                        task: None,
                     },
                 },
             )
@@ -1718,6 +1721,7 @@ mod tests {
                     }
                     return Ok(ResponsePayload::Started {
                         supports_steer: true,
+                        task_generation: None,
                     });
                 }
                 Command::Prompt { .. } => "prompt",
@@ -1865,7 +1869,7 @@ mod tests {
 
     fn test_start_options() -> WireDriverStartOptions {
         WireDriverStartOptions {
-            provider: "codex".into(),
+            provider: ProviderId::new(ProviderId::OPENAI_CODEX),
             cwd: PathBuf::from("."),
             mode: "fullAccess".into(),
             interaction_mode: "build".into(),
@@ -1873,6 +1877,7 @@ mod tests {
             reasoning_effort: None,
             service_tier: None,
             context_window: None,
+            task: None,
         }
     }
 }

@@ -83,10 +83,6 @@ pub enum WorkspaceOperation {
     CreateProjectlessWorkspace {
         prompt: Option<String>,
     },
-    MigrateProjectlessWorkspace {
-        #[ts(type = "string")]
-        path: PathBuf,
-    },
     InspectBranches {
         #[ts(type = "string")]
         cwd: PathBuf,

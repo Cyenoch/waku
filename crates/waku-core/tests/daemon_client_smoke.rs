@@ -88,6 +88,7 @@ impl MockHttp {
 }
 
 fn serve_http(mut stream: TcpStream, mock: &MockHttp) {
+    stream.set_nonblocking(false).ok();
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
@@ -352,7 +353,6 @@ fn daemon_client_mock_http_smoke() {
             DriverEvent::TurnFinished { success: false, .. } | DriverEvent::Error(_)
         )
     });
-    handle.rollback(1).unwrap();
 
     handle.apply_options(waku_client::driver::SessionOptions {
         mode: RuntimeMode::Ask,

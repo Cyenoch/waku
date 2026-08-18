@@ -10,9 +10,10 @@ pub(crate) fn start_remote(
     client: waku_client::DaemonClient,
     session_id: uuid::Uuid,
     options: DriverStartOptions,
+    task: Option<waku_client::StartTask>,
     events: DriverEventSender,
 ) -> anyhow::Result<DriverHandle> {
-    DriverHandle::start(client, session_id, options, events)
+    DriverHandle::start_restoring(client, session_id, options, task, events)
 }
 
 pub(crate) fn attach_remote(

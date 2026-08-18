@@ -16,7 +16,6 @@ path: string,
  */
 mention: string, name: string, is_dir: boolean, is_image: boolean,
 /**
- * Durable daemon-issued blob or attachment reference. The legacy field
- * name is retained for storage compatibility.
+ * Durable daemon-issued blob or attachment reference.
  */
 blob_reference?: string | null, };

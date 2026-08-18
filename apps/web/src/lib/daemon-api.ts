@@ -142,6 +142,12 @@ export interface AuthSnapshot {
   phases: AuthPhase[]
 }
 
+export function authStatusPollIntervalMs(phases: readonly AuthPhase[]): number | false {
+  return phases.some((phase) => phase.type === 'awaitingBrowser' || phase.type === 'awaitingDevice')
+    ? 1_000
+    : false
+}
+
 export async function loadAuthStatus(
   client: WakuClient,
   provider?: ProviderId,

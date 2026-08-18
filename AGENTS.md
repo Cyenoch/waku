@@ -1,5 +1,7 @@
 # Waku development guidance
 
+The project is WIP; glue code, compatibility code, and over-defensive fallback code are prohibited, and refactoring is allowed.
+
 ## Development runtime
 
 - Assume `bun ./scripts/dev.ts` is already running and owns the current

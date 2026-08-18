@@ -1,9 +1,8 @@
 //! Private workspaces for tasks that are not attached to a user project.
 //!
-//! Codex allocates ordinary projectless chats beneath a per-user root using
-//! `<root>/<local date>/<prompt slug>`, with numeric collision suffixes and a
-//! random fallback. Waku mirrors that layout beneath `~/.waku/projects` so
-//! generated workspaces do not sit beside configuration documents.
+//! New chats live under `~/.waku/projects/<local date>/<prompt slug>`, with
+//! numeric collision suffixes and a random fallback, so generated workspaces
+//! do not sit beside configuration documents.
 
 use std::fs;
 use std::io;
@@ -52,47 +51,8 @@ pub fn home_directory() -> Option<PathBuf> {
     root.parent()?.parent().map(Path::to_path_buf)
 }
 
-/// Existing builds created dated workspaces directly under `~/.waku`; keep
-/// recognizing those paths while all new workspaces live under `projects/`.
 pub fn is_projectless_path(path: &Path) -> bool {
-    workspace_root().is_some_and(|root| {
-        path.starts_with(&root)
-            || root
-                .parent()
-                .is_some_and(|legacy_root| is_legacy_workspace_path(path, legacy_root))
-    })
-}
-
-/// Whether an existing projectless workspace still uses the pre-`projects/`
-/// layout and should be moved by the daemon.
-pub fn needs_migration(path: &Path) -> bool {
-    let Some(root) = workspace_root() else {
-        return false;
-    };
-    !path.starts_with(&root)
-        && root
-            .parent()
-            .is_some_and(|legacy_root| is_legacy_workspace_path(path, legacy_root))
-}
-
-fn is_legacy_workspace_path(path: &Path, legacy_root: &Path) -> bool {
-    if path == legacy_root {
-        return true;
-    }
-    let Some(date) = path
-        .strip_prefix(legacy_root)
-        .ok()
-        .and_then(|relative| relative.components().next())
-        .and_then(|component| component.as_os_str().to_str())
-    else {
-        return false;
-    };
-    is_date_component(date)
-}
-
-pub fn is_legacy_root_path(path: &Path) -> bool {
-    workspace_root()
-        .is_some_and(|root| root.parent().is_some_and(|legacy_root| path == legacy_root))
+    workspace_root().is_some_and(|root| path.starts_with(&root))
 }
 
 pub fn create_workspace(prompt: Option<&str>) -> io::Result<Workspace> {
@@ -103,100 +63,6 @@ pub fn create_workspace(prompt: Option<&str>) -> io::Result<Workspace> {
         )
     })?;
     create_workspace_in(&root, Local::now().date_naive(), None, prompt)
-}
-
-/// Move one old dated workspace from `~/.waku/<date>/<slug>` into
-/// `~/.waku/projects/<date>/<slug>` without copying its contents through the
-/// client. The oldest layout used `~/.waku` itself; that path contains Waku's
-/// configuration now, so it receives a fresh private workspace instead of
-/// moving the configuration directory.
-pub fn migrate_workspace(path: &Path) -> io::Result<Workspace> {
-    let root = workspace_root().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            "could not locate the home directory for ~/.waku/projects",
-        )
-    })?;
-    migrate_workspace_in(&root, path)
-}
-
-fn migrate_workspace_in(root: &Path, path: &Path) -> io::Result<Workspace> {
-    if path.starts_with(root) {
-        validate_real_directory(path)?;
-        return Ok(Workspace {
-            cwd: path.to_owned(),
-            workspace_root: root.to_owned(),
-        });
-    }
-    let legacy_root = root.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "invalid projectless workspace root",
-        )
-    })?;
-    if path == legacy_root {
-        return create_workspace_in(root, Local::now().date_naive(), None, None);
-    }
-
-    let relative = path.strip_prefix(legacy_root).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path is not a legacy projectless workspace",
-        )
-    })?;
-    let components = relative.components().collect::<Vec<_>>();
-    if components.len() != 2
-        || components
-            .iter()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        || !is_date_component(components[0].as_os_str().to_string_lossy().as_ref())
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path is not a dated legacy projectless workspace",
-        ));
-    }
-    validate_real_directory(path)?;
-    ensure_real_directory(root)?;
-    let date_directory = root.join(components[0].as_os_str());
-    ensure_real_directory(&date_directory)?;
-    let original_name = components[1].as_os_str().to_string_lossy();
-    for index in 0..MAX_NUMBERED_CANDIDATES {
-        let name = if index == 0 {
-            original_name.to_string()
-        } else {
-            format!("{original_name}-{}", index + 1)
-        };
-        let destination = date_directory.join(name);
-        if destination.exists() {
-            continue;
-        }
-        match fs::rename(path, &destination) {
-            Ok(()) => {
-                return Ok(Workspace {
-                    cwd: destination,
-                    workspace_root: root.to_owned(),
-                });
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "unable to allocate a destination for the legacy projectless workspace",
-    ))
-}
-
-fn is_date_component(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 10
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
 }
 
 fn workspace_slug(directory_name: Option<&str>, prompt: Option<&str>) -> String {
@@ -310,7 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_slug_matches_codex_word_and_length_rules() {
+    fn prompt_slug_follows_word_and_length_rules() {
         assert_eq!(
             workspace_slug(
                 None,
@@ -375,27 +241,5 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 
         fs::remove_dir_all(&parent).ok();
-    }
-
-    #[test]
-    fn migrates_legacy_workspace_with_contents_under_projects() {
-        let legacy_root = test_root();
-        let root = legacy_root.join("projects");
-        let legacy = legacy_root.join("2026-08-08/fix-projectless-sessions");
-        fs::create_dir_all(&legacy).unwrap();
-        fs::write(legacy.join("notes.txt"), "kept").unwrap();
-
-        let migrated = migrate_workspace_in(&root, &legacy).unwrap();
-
-        assert_eq!(
-            migrated.cwd,
-            root.join("2026-08-08/fix-projectless-sessions")
-        );
-        assert_eq!(
-            fs::read_to_string(migrated.cwd.join("notes.txt")).unwrap(),
-            "kept"
-        );
-        assert!(!legacy.exists());
-        fs::remove_dir_all(&legacy_root).ok();
     }
 }

@@ -127,9 +127,9 @@ settings.providers_keywords:
 settings.skills:
   en: Skills
 settings.skills_keywords:
-  en: skills skill library agent disable enable delete claude codex cursor opencode pi amp shared
+  en: skills skill library agent disable enable delete shared
 settings.usage_keywords:
-  en: usage tokens cost spend cache daily chart model breakdown history claude codex
+  en: usage tokens cost spend cache daily chart model breakdown history
 settings.daemon_keywords:
   en: daemon server remote web network expose origin token port websocket
 settings.back:
@@ -181,7 +181,7 @@ daemon.hide_token:
 daemon.regenerate_token:
   en: Regenerate
 daemon.security_warning:
-  en: The token grants full access to tasks, files, Git, attachments, and coding agents on this Mac. Use WSS through a trusted TLS proxy outside a private network.
+  en: The token grants full access to tasks, files, Git, attachments, and the agent on this Mac. Use WSS through a trusted TLS proxy outside a private network.
 daemon.external_title:
   en: External daemon
 daemon.external_description:
@@ -365,8 +365,6 @@ settings.share_anonymous_usage_data:
 settings.share_anonymous_usage_data_description:
   en: Help improve Waku by sharing feature usage and reliability data. Prompts, responses, project names, file paths, and other personal data are never included
 
-providers.coding_agents:
-  en: Coding agents
 providers.description:
   en: Configure model endpoints directly. API key values are never displayed or stored by Waku.
 providers.web_description:
@@ -388,19 +386,11 @@ providers.browser_waiting:
 providers.open_browser:
   en: Open browser
 providers.use_device_code:
-  en: Use device code instead
-providers.check_failed:
-  en: "Could not check %{command}: %{error}"
+  en: Use device code
 providers.show_settings:
   en: Show %{provider} settings
 providers.hide_settings:
   en: Hide %{provider} settings
-providers.enable:
-  en: Enable %{provider}
-providers.disable:
-  en: Disable %{provider}
-providers.disabled_for_new_tasks:
-  en: Disabled for new tasks
 providers.model_count_one:
   en: "%{count} model"
 providers.model_count_many:
@@ -482,7 +472,7 @@ project.your_project:
 onboarding.open_project_to_begin:
   en: Open a project to begin
 onboarding.description:
-  en: Waku runs coding agents in folders you choose. Your code, sessions, and history stay on this Mac
+  en: Waku runs the built-in agent in folders you choose. Your code, sessions, and history stay on this Mac
 onboarding.web_description:
   en: Choose a path on the daemon host, or start without a project.
 onboarding.open_project_folder:
@@ -920,8 +910,6 @@ skills.scope_user_detail:
   en: available in every project
 skills.scope_in_project:
   en: "in %{project}"
-skills.filter_all:
-  en: All skills
 skills.select_placeholder:
   en: Select a skill
 skills.detail_invoke:
@@ -975,7 +963,7 @@ skills.toggle_failed:
 skills.empty_title:
   en: No skills yet
 skills.empty_description:
-  en: A skill is a folder with a SKILL.md — reusable instructions any agent can load, like a deploy runbook or a review checklist. Skills installed for Claude Code, Codex, and every other agent show up here, invoked as /name.
+  en: A skill is a folder with a SKILL.md — reusable instructions the agent can load, like a deploy runbook or a review checklist. Skills in ~/.agents/skills and the project .waku/skills tree show up here, invoked as /name.
 skills.library:
   en: Skills library
 skills.details:
@@ -993,24 +981,6 @@ commands.review_description:
   en: Review the pending changes on this branch
 commands.commit_description:
   en: Stage and commit the current changes
-commands.fast_description:
-  en: Toggle fast mode
-commands.fast_enabled:
-  en: Fast mode enabled
-commands.fast_disabled:
-  en: Fast mode disabled
-commands.claude_compact:
-  en: Free up context by summarizing the conversation
-commands.claude_context:
-  en: Show what is occupying the context window
-commands.claude_cost:
-  en: Show token usage and cost for this session
-commands.claude_init:
-  en: Analyze the project and write CLAUDE.md
-commands.claude_review:
-  en: Review a pull request
-commands.claude_security_review:
-  en: Security review of the pending changes
 
 composer.edit_in_composer:
   en: Edit in composer
@@ -1103,8 +1073,6 @@ session.turn_completed:
   en: Turn completed
 session.stopped_before_response:
   en: The agent stopped before returning a response
-session.codex_exited_before_response:
-  en: Codex app-server exited before returning a response
 session.steer_rejected:
   en: The agent couldn't be steered (%{error}); the message was queued as a follow-up
 session.steer_rejected_plain:
@@ -1120,10 +1088,6 @@ errors.open_session:
   en: "Could not open that session: %{error}"
 errors.create_projectless_task:
   en: "Could not create a task beneath ~/.waku/projects: %{error}"
-errors.save_projectless_migration:
-  en: "Could not save the projectless task migration: %{error}"
-errors.move_projectless_task:
-  en: "Could not move the old projectless task beneath ~/.waku/projects: %{error}"
 errors.remote_host_path:
   en: This path belongs to the daemon host and cannot be opened by the desktop
 errors.change_branch:
@@ -1136,26 +1100,6 @@ errors.save_local_state:
   en: "Could not save local state: %{error}"
 errors.task_project_not_found:
   en: The task's project could not be found
-errors.provider_native_session_unavailable:
-  en: "%{provider}'s native session is unavailable"
-errors.provider_native_thread_unavailable:
-  en: "%{provider}'s native thread is unavailable"
-errors.provider_native_cursor_unavailable:
-  en: "%{provider}'s native session cursor is unavailable"
-errors.provider_native_thread_cursor_unavailable:
-  en: "%{provider}'s native thread cursor is unavailable"
-errors.provider_waku_task_unavailable:
-  en: "%{provider}'s Waku task is unavailable"
-errors.provider_not_installed:
-  en: "%{provider} is not installed"
-errors.provider_not_found:
-  en: "%{provider} is not installed or could not be found"
-errors.claude_fork_checkpoint_missing:
-  en: Claude omitted the fork checkpoint
-errors.claude_turn_checkpoint_unavailable:
-  en: "Claude's native checkpoint for that turn is unavailable: %{error}"
-errors.pi_session_file_unavailable:
-  en: Pi's native session file is unavailable
 errors.fork_task:
   en: "Could not fork the task: %{error}"
 errors.create_rewind_snapshot:
@@ -1218,16 +1162,6 @@ errors.provider_transport_read:
   en: "%{provider} transport read failed: %{error}"
 errors.provider_invalid_json:
   en: "%{provider} sent invalid JSON: %{error}"
-errors.provider_exited:
-  en: "%{provider} exited with %{status}"
-errors.provider_rpc_exited:
-  en: "%{provider} RPC exited with %{status}"
-errors.read_provider_exit_status:
-  en: "Could not read %{provider} exit status: %{error}"
-errors.initialize_provider:
-  en: "Could not initialize %{provider}: %{error}"
-errors.provider_no_session_id:
-  en: "%{provider} did not report a session ID"
 errors.provider_rejected_prompt_detail:
   en: "%{provider} rejected the prompt: %{error}"
 errors.stop_provider:
@@ -1246,12 +1180,6 @@ errors.answer_provider_permission:
   en: "Could not answer %{provider}'s permission request: %{error}"
 errors.answer_provider_question:
   en: "Could not answer %{provider}'s question: %{error}"
-errors.initialize_codex_app_server:
-  en: Failed to initialize Codex app-server
-errors.codex_thread_open_incomplete:
-  en: Codex did not finish opening its thread
-errors.provider_receive_prompt:
-  en: "%{provider} could not receive the prompt"
 errors.provider_start_turn:
   en: "%{provider} could not start the turn"
 errors.provider_rejected_steer:
@@ -1264,8 +1192,6 @@ errors.provider_rejected_prompt:
   en: "%{provider} rejected the prompt before it ran"
 errors.provider_complete_turn:
   en: "%{provider} could not complete this turn"
-errors.pi_reported_error:
-  en: Pi reported an error
 
 session.response_unavailable:
   en: That response is no longer available
@@ -1375,7 +1301,7 @@ commit.no_workspace:
 commit.no_changes:
   en: There are no changes to commit
 commit.agent_unavailable:
-  en: The current agent CLI is unavailable, so it cannot generate a commit message
+  en: The agent is unavailable, so it cannot generate a commit message
 commit.committed:
   en: Committed changes
 commit.committed_and_pushed:

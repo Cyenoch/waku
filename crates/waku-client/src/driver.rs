@@ -1,6 +1,7 @@
 //! Concrete RPC handle for the daemon-owned embedded runtime.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use uuid::Uuid;
@@ -10,6 +11,50 @@ use waku_protocol::model::{
 use waku_protocol::{PromptInput, encode_enum, event_from_wire};
 
 use crate::DaemonClient;
+
+/// Daemon accepted a different task generation than the client submitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartGenerationMismatch {
+    pub submitted: u64,
+    pub accepted: Option<u64>,
+}
+
+impl std::fmt::Display for StartGenerationMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.accepted {
+            Some(accepted) => write!(
+                f,
+                "start task generation {} does not match daemon transcript {accepted}",
+                self.submitted
+            ),
+            None => write!(
+                f,
+                "start task generation {} has no daemon transcript generation",
+                self.submitted
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StartGenerationMismatch {}
+
+/// Compare the generation the client submitted with the generation Start returned.
+///
+/// A restore payload must land on the same transcript the daemon kept. A start
+/// without a payload has no restore race and is accepted as-is.
+pub fn accept_start_generation(
+    submitted: Option<u64>,
+    accepted: Option<u64>,
+) -> Result<Option<u64>, StartGenerationMismatch> {
+    match (submitted, accepted) {
+        (None, accepted) => Ok(accepted),
+        (Some(submitted), Some(accepted)) if submitted == accepted => Ok(Some(accepted)),
+        (Some(submitted), accepted) => Err(StartGenerationMismatch {
+            submitted,
+            accepted,
+        }),
+    }
+}
 
 #[derive(Clone)]
 pub struct DriverEventSender {
@@ -55,13 +100,22 @@ pub struct SessionOptions {
     pub context_window: Option<String>,
 }
 
-#[derive(Clone)]
-pub struct DriverHandle {
+struct DriverHandleInner {
     client: DaemonClient,
     session_id: Uuid,
     runtime_id: Uuid,
     supports_steer: bool,
     events: DriverEventSender,
+}
+
+/// RPC handle for one daemon-owned runtime.
+///
+/// Clones share the event subscription. Unsubscribing from every `Drop` would
+/// cut the stream the first time a temporary clone went out of scope — the
+/// desktop submit path clones the handle to `prompt` and then drops it.
+#[derive(Clone)]
+pub struct DriverHandle {
+    inner: Arc<DriverHandleInner>,
 }
 
 impl DriverHandle {
@@ -71,6 +125,17 @@ impl DriverHandle {
         options: DriverStartOptions,
         events: DriverEventSender,
     ) -> anyhow::Result<Self> {
+        Self::start_restoring(client, session_id, options, None, events)
+    }
+
+    pub fn start_restoring(
+        client: DaemonClient,
+        session_id: Uuid,
+        options: DriverStartOptions,
+        task: Option<waku_protocol::StartTask>,
+        events: DriverEventSender,
+    ) -> anyhow::Result<Self> {
+        let submitted = task.as_ref().map(|task| task.generation);
         let runtime_id = Uuid::new_v4();
         let command = waku_protocol::Command::Start {
             options: waku_protocol::WireDriverStartOptions {
@@ -82,10 +147,24 @@ impl DriverHandle {
                 reasoning_effort: options.reasoning_effort,
                 service_tier: options.service_tier,
                 context_window: options.context_window,
+                task: task.map(Box::new),
             },
         };
         let supports_steer = match client.request(session_id, runtime_id, command) {
-            Ok(waku_protocol::ResponsePayload::Started { supports_steer }) => supports_steer,
+            Ok(waku_protocol::ResponsePayload::Started {
+                supports_steer,
+                task_generation,
+            }) => {
+                if let Err(mismatch) = accept_start_generation(submitted, task_generation) {
+                    let _ = client.request(
+                        session_id,
+                        runtime_id,
+                        waku_protocol::Command::CloseSession,
+                    );
+                    return Err(mismatch.into());
+                }
+                supports_steer
+            }
             Ok(_) => anyhow::bail!("Waku daemon returned an invalid start response"),
             Err(error) => return Err(error),
         };
@@ -161,31 +240,51 @@ impl DriverHandle {
             return Err(error.into());
         }
         Ok(Self {
-            client,
-            session_id,
-            runtime_id,
-            supports_steer,
-            events,
+            inner: Arc::new(DriverHandleInner {
+                client,
+                session_id,
+                runtime_id,
+                supports_steer,
+                events,
+            }),
         })
     }
 
     fn notify(&self, command: waku_protocol::Command) {
-        if let Err(error) = self
-            .client
-            .notify(self.session_id, self.runtime_id, command)
+        if let Err(error) =
+            self.inner
+                .client
+                .notify(self.inner.session_id, self.inner.runtime_id, command)
         {
-            let _ = self.events.send(DriverEvent::Error(format!(
+            let _ = self.inner.events.send(DriverEvent::Error(format!(
                 "Waku daemon command failed: {error}"
             )));
         }
     }
 
     pub fn prompt(&self, input: PromptInput) {
-        self.notify(waku_protocol::Command::Prompt { input });
+        let client = self.inner.client.clone();
+        let session_id = self.inner.session_id;
+        let runtime_id = self.inner.runtime_id;
+        let events = self.inner.events.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("waku-prompt-{session_id}"))
+            .spawn(move || {
+                if let Err(error) = client.request(
+                    session_id,
+                    runtime_id,
+                    waku_protocol::Command::Prompt { input },
+                ) {
+                    emit_prompt_failure(&events, error.to_string());
+                }
+            })
+        {
+            emit_prompt_failure(&self.inner.events, error.to_string());
+        }
     }
 
     pub fn supports_steer(&self) -> bool {
-        self.supports_steer
+        self.inner.supports_steer
     }
 
     pub fn steer(&self, input: PromptInput) {
@@ -241,35 +340,13 @@ impl DriverHandle {
             return false;
         };
         matches!(
-            self.client.request(
-                self.session_id,
-                self.runtime_id,
+            self.inner.client.request(
+                self.inner.session_id,
+                self.inner.runtime_id,
                 waku_protocol::Command::ApplyOptions { options }
             ),
             Ok(waku_protocol::ResponsePayload::OptionsApplied { applied: true })
         )
-    }
-
-    pub fn rollback(&self, turns: usize) -> anyhow::Result<()> {
-        match self.client.request(
-            self.session_id,
-            self.runtime_id,
-            waku_protocol::Command::Rollback { turns },
-        )? {
-            waku_protocol::ResponsePayload::Ack => Ok(()),
-            _ => anyhow::bail!("Waku daemon returned an invalid rollback response"),
-        }
-    }
-
-    pub fn fork(&self, turns_to_remove: usize) -> anyhow::Result<()> {
-        match self.client.request(
-            self.session_id,
-            self.runtime_id,
-            waku_protocol::Command::Fork { turns_to_remove },
-        )? {
-            waku_protocol::ResponsePayload::Ack => Ok(()),
-            _ => anyhow::bail!("Waku daemon returned an invalid fork response"),
-        }
     }
 
     pub fn close(&self) {
@@ -277,8 +354,50 @@ impl DriverHandle {
     }
 }
 
-impl Drop for DriverHandle {
+impl Drop for DriverHandleInner {
     fn drop(&mut self) {
         self.client.unsubscribe(self.session_id, self.runtime_id);
+    }
+}
+
+fn emit_prompt_failure(events: &DriverEventSender, message: String) {
+    let _ = events.send(DriverEvent::Error(message.clone()));
+    let _ = events.send(DriverEvent::TurnFinished {
+        success: false,
+        summary: Some(message),
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StartGenerationMismatch, accept_start_generation};
+
+    #[test]
+    fn matching_restore_generation_is_accepted() {
+        assert_eq!(accept_start_generation(Some(7), Some(7)).unwrap(), Some(7));
+    }
+
+    #[test]
+    fn start_without_restore_payload_is_accepted() {
+        assert_eq!(accept_start_generation(None, Some(3)).unwrap(), Some(3));
+        assert_eq!(accept_start_generation(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn divergent_restore_generation_fails_closed() {
+        assert_eq!(
+            accept_start_generation(Some(10), Some(50)).unwrap_err(),
+            StartGenerationMismatch {
+                submitted: 10,
+                accepted: Some(50),
+            }
+        );
+        assert_eq!(
+            accept_start_generation(Some(10), None).unwrap_err(),
+            StartGenerationMismatch {
+                submitted: 10,
+                accepted: None,
+            }
+        );
     }
 }

@@ -77,11 +77,6 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
                 cwd: crate::projectless::create_workspace(prompt.as_deref())?.cwd,
             }
         }
-        WorkspaceOperation::MigrateProjectlessWorkspace { path } => {
-            WorkspaceResult::ProjectlessWorkspace {
-                cwd: crate::projectless::migrate_workspace(&path)?.cwd,
-            }
-        }
         WorkspaceOperation::InspectBranches { cwd } => WorkspaceResult::Branches {
             snapshot: crate::git_branch::inspect(&cwd)?,
         },
@@ -332,12 +327,10 @@ fn resolve_diff_range(cwd: &Path, source: ReviewDiffSource) -> anyhow::Result<Di
             }
             let diff_base_ref = crate::checkpoint::turn_diff_base_ref(session_id, turn_count);
             let start_ref = crate::checkpoint::turn_start_ref(session_id, turn_count);
-            let legacy_ref = crate::checkpoint::checkpoint_ref(session_id, turn_count - 1);
             let to_ref = crate::checkpoint::checkpoint_ref(session_id, turn_count);
             DiffRange {
                 from: resolve(cwd, &diff_base_ref)
                     .or_else(|| resolve(cwd, &start_ref))
-                    .or_else(|| resolve(cwd, &legacy_ref))
                     .ok_or_else(|| anyhow!("the turn's starting checkpoint is unavailable"))?,
                 to: resolve(cwd, &to_ref)
                     .ok_or_else(|| anyhow!("the turn's ending checkpoint is unavailable"))?,
@@ -682,6 +675,7 @@ mod tests {
         let root = repository();
         let session_id = Uuid::new_v4();
         crate::checkpoint::capture_turn(&root, session_id, 0).unwrap();
+        crate::checkpoint::capture_turn_start(&root, session_id, 1).unwrap();
         fs::write(
             root.join("src/lib.rs"),
             "fn baseline() {}\nfn from_turn() {}\n",

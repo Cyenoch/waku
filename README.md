@@ -21,8 +21,9 @@ is authoritative; discovery errors fall back to the last-good cache or provider
 seed. Explicit model IDs on custom endpoints are used only when discovery fails.
 Catalog compatibility prevents unsupported model selection, and typed service
 tier applies only to supported entries in the official OpenAI API catalogs.
-API keys entered in Waku are stored in the macOS Keychain; environment-variable
-credentials are read at runtime and never persisted.
+API keys and OAuth refresh tokens entered in Waku are stored in a daemon-owned
+owner-only credentials file; environment-variable credentials are read at runtime
+and never persisted.
 
 
 ## Highlights
@@ -56,8 +57,7 @@ sequence deduplication, and replay cursors as the Rust client. Run
 `bun run protocol:check` to verify that generated files are current.
 
 Projectless task workspaces live on the daemon host under
-`~/.waku/projects/<date>/<slug>`. The daemon moves workspaces created by the
-older `~/.waku/<date>/<slug>` layout on first load.
+`~/.waku/projects/<date>/<slug>`.
 
 Configuration ownership is separate too: the Release desktop writes
 `~/.waku/app.json`, while Debug stays isolated at `temp/app.json`. Daemon settings live in `~/.waku/settings.json`. The desktop's Settings → Daemon page can explicitly

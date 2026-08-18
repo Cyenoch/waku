@@ -8,7 +8,5 @@ export type TranscriptBlock = {
 after_message: number, turn_id: string | null,
 /**
  * Ordered non-message work emitted at this point in the transcript.
- * The persisted field keeps its historical tagged shape so existing
- * sessions remain readable while the runtime model stays activity-only.
  */
 content: StoredTranscriptBlockContent, };

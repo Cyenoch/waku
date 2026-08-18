@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use crate::{
-    Backend, Command, EventSink, Request, ResponsePayload, WireDriverEvent, WorkspaceOperation,
-    WorkspaceResult,
+    Backend, Command, EventSink, Request, ResponsePayload, StartTask, WireDriverEvent,
+    WorkspaceOperation, WorkspaceResult,
 };
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
@@ -21,7 +21,7 @@ use crate::auth::{AuthRuntime, AuthService};
 use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
 use crate::model::{
     ActivityKind, AgentSession, Checkpoint, CheckpointStatus, DriverEvent, PermissionOption,
-    Project, SessionStatus, TurnStatus,
+    Project, SessionStatus,
 };
 use crate::persistence::{ComposerDraftStore, PersistedState, StateStore};
 use crate::settings::DaemonSettingsStore;
@@ -60,10 +60,9 @@ impl WakuBackend {
         task_store: StateStore,
         auth: AuthService,
     ) -> anyhow::Result<Self> {
-        let mut task_state = task_store
+        let task_state = task_store
             .load()
             .context("could not load Waku task database")?;
-        migrate_projectless_state(&task_store, &mut task_state)?;
         let composer_drafts = ComposerDraftStore::for_state_path(task_store.path());
         let attachments = AttachmentStore::new(
             task_store
@@ -157,39 +156,6 @@ impl WakuBackend {
         }
         Ok(checkpoint)
     }
-}
-
-/// Storage-layout migrations belong to the daemon because both the database
-/// rows and the directories name paths on its host. Persist after each move
-/// so a later failure cannot leave an earlier project pointing at its old
-/// location in SQLite.
-fn migrate_projectless_state(
-    task_store: &StateStore,
-    task_state: &mut PersistedState,
-) -> anyhow::Result<()> {
-    let indices = task_state
-        .projects
-        .iter()
-        .enumerate()
-        .filter_map(|(index, project)| {
-            crate::projectless::needs_migration(&project.path).then_some(index)
-        })
-        .collect::<Vec<_>>();
-    for index in indices {
-        let old_path = task_state.projects[index].path.clone();
-        let workspace = crate::projectless::migrate_workspace(&old_path).with_context(|| {
-            format!(
-                "could not move projectless workspace {} under ~/.waku/projects",
-                old_path.display()
-            )
-        })?;
-        task_state.projects[index].name = crate::model::Project::PROJECTLESS_NAME.to_owned();
-        task_state.projects[index].path = workspace.cwd;
-        task_store
-            .save(task_state)
-            .context("could not persist migrated projectless workspace")?;
-    }
-    Ok(())
 }
 
 impl Backend for WakuBackend {
@@ -553,10 +519,16 @@ impl Backend for WakuBackend {
             }
             Command::Start { options } => {
                 let previous = self.sessions.lock().remove(&session_id);
+                let previous_runtime = previous.as_ref().map(|(runtime_id, _)| *runtime_id);
                 if let Some((_, driver)) = previous.as_ref() {
                     self.store_live_snapshot(session_id, driver);
                 }
                 drop(previous);
+                let (snapshot, task_generation) = self.prepare_embedded_start(
+                    session_id,
+                    options.task.map(|task| *task),
+                    previous_runtime,
+                )?;
                 let provider_id = options.provider.clone();
                 let settings = self.settings.get();
                 self.auth.set_custom_providers(settings.external_providers);
@@ -564,7 +536,6 @@ impl Backend for WakuBackend {
                     .auth
                     .overlay_for_model(&provider_id, options.model.as_deref())?;
                 let service_tier = options.service_tier.filter(|_| capabilities.service_tier);
-                let snapshot = self.embedded_snapshot(session_id)?;
                 let options = DriverStartOptions {
                     provider,
                     cwd: options.cwd,
@@ -614,7 +585,10 @@ impl Backend for WakuBackend {
                 self.sessions
                     .lock()
                     .insert(session_id, (runtime_id, handle));
-                Ok(ResponsePayload::Started { supports_steer })
+                Ok(ResponsePayload::Started {
+                    supports_steer,
+                    task_generation,
+                })
             }
             Command::CloseSession => {
                 let removed = {
@@ -661,6 +635,66 @@ impl Backend for WakuBackend {
 }
 
 impl WakuBackend {
+    fn prepare_embedded_start(
+        &self,
+        session_id: Uuid,
+        task: Option<StartTask>,
+        previous_runtime: Option<Uuid>,
+    ) -> anyhow::Result<(waku_harness::SessionSnapshot, Option<u64>)> {
+        let task_generation = self.ensure_start_task(session_id, task, previous_runtime)?;
+        Ok((self.embedded_snapshot(session_id)?, task_generation))
+    }
+
+    fn ensure_start_task(
+        &self,
+        session_id: Uuid,
+        task: Option<StartTask>,
+        previous_runtime: Option<Uuid>,
+    ) -> anyhow::Result<Option<u64>> {
+        let Some(task) = task else {
+            let state = self.task_state.lock();
+            if state
+                .sessions
+                .iter()
+                .any(|session| session.id == session_id)
+            {
+                return Ok(None);
+            }
+            return Err(anyhow!("the task is unavailable"));
+        };
+        if task.session.id != session_id {
+            bail!(
+                "start task {} does not match session {session_id}",
+                task.session.id
+            );
+        }
+        if self.removed_session_ids.lock().contains(&session_id) {
+            return Err(anyhow!("the task is unavailable"));
+        }
+        let mut state = self.task_state.lock();
+        if let Some(existing) = state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            self.task_store
+                .hydrate(existing)
+                .context("could not hydrate start task")?;
+        }
+        if let Some(project) = task.project {
+            upsert_start_project(&mut state, project);
+        }
+        upsert_start_session(&mut state, task.session, previous_runtime, task.generation);
+        let accepted = state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(AgentSession::transcript_baseline_generation);
+        state.mark_session_dirty(session_id);
+        self.task_store.save(&mut state)?;
+        Ok(accepted)
+    }
+
     fn embedded_snapshot(&self, session_id: Uuid) -> anyhow::Result<waku_harness::SessionSnapshot> {
         let mut state = self.task_state.lock();
         let index = state
@@ -670,15 +704,7 @@ impl WakuBackend {
             .ok_or_else(|| anyhow!("the task is unavailable"))?;
         self.task_store.hydrate(&mut state.sessions[index])?;
 
-        // Skeleton loads cannot migrate message-derived turns. Do it after
-        // hydration and persist only when the durable representation changed.
-        let before = serde_json::to_vec(&state.sessions[index])
-            .context("could not compare persisted task state before migration")?;
-        state.sessions[index].migrate_legacy_state();
-        let migrated = serde_json::to_vec(&state.sessions[index])
-            .context("could not compare persisted task state after migration")?
-            != before;
-        let snapshot = match self.task_store.harness_snapshot(session_id) {
+        let snapshot = match self.task_store.load_harness_snapshot(session_id)? {
             Some(snapshot) => snapshot,
             None if session_requires_stored_snapshot(&state.sessions[index]) => {
                 return Err(missing_harness_snapshot());
@@ -692,11 +718,12 @@ impl WakuBackend {
                 snapshot
             }
         };
-        if migrated {
-            state.mark_session_dirty(session_id);
-            self.task_store.save(&mut state)?;
-        }
         Ok(snapshot)
+    }
+
+    #[cfg(test)]
+    fn mark_removed_for_test(&self, session_id: Uuid) {
+        self.removed_session_ids.lock().insert(session_id);
     }
 
     fn store_live_snapshot(&self, session_id: Uuid, driver: &DriverHandle) {
@@ -895,11 +922,6 @@ impl WakuBackend {
         let snapshot =
             rewind_session_snapshot(self.required_session_snapshot(session_id)?, retained)?;
         let restore_ref = crate::checkpoint::turn_start_ref(session_id, turn_count);
-        let restore_ref = if crate::checkpoint::has_ref(&cwd, &restore_ref) {
-            restore_ref
-        } else {
-            crate::checkpoint::checkpoint_ref(session_id, retained)
-        };
         if crate::checkpoint::has_ref(&cwd, &restore_ref) {
             crate::checkpoint::restore_ref(&cwd, &restore_ref)?;
         }
@@ -1049,10 +1071,43 @@ fn persist_and_forward_driver_event(
 }
 
 fn session_requires_stored_snapshot(session: &AgentSession) -> bool {
-    session.turns.iter().any(|turn| {
-        turn.provider_turn_started
-            || matches!(turn.status, TurnStatus::Completed | TurnStatus::Failed)
-    })
+    session.turns.iter().any(|turn| turn.provider_turn_started)
+}
+
+fn upsert_start_project(state: &mut PersistedState, project: Project) {
+    if let Some(existing) = state
+        .projects
+        .iter_mut()
+        .find(|existing| existing.id == project.id)
+    {
+        *existing = project;
+    } else {
+        state.projects.push(project);
+    }
+}
+
+fn upsert_start_session(
+    state: &mut PersistedState,
+    mut session: AgentSession,
+    active_runtime: Option<Uuid>,
+    generation: u64,
+) {
+    if let Some(existing) = state
+        .sessions
+        .iter_mut()
+        .find(|existing| existing.id == session.id)
+    {
+        let stale = generation != existing.transcript_baseline_generation()
+            || session_projection_precedes(existing, &session, active_runtime);
+        if stale {
+            merge_stale_session_metadata(existing, session);
+        } else {
+            preserve_daemon_checkpoints(existing, &mut session);
+            *existing = session;
+        }
+    } else {
+        state.sessions.push(session);
+    }
 }
 
 fn fork_session_snapshot(
@@ -1304,14 +1359,7 @@ fn handle_driver_command(
             }
             return Ok(ResponsePayload::OptionsApplied { applied });
         }
-        Command::Rollback { turns } => {
-            driver.rollback(turns)?;
-            backend
-                .task_store
-                .set_harness_snapshot(session_id, driver.snapshot()?);
-        }
-        Command::Fork { .. }
-        | Command::AttachSession
+        Command::AttachSession
         | Command::Start { .. }
         | Command::GetSettings
         | Command::UpdateSettings { .. }
@@ -1608,7 +1656,7 @@ struct TurnFinishedWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MessageRole, ProviderId};
+    use crate::model::{MessageRole, ProviderId, TurnStatus};
     use std::sync::Arc;
     use waku_harness::{
         AssistantMessage, ContentBlock, Message, QueueMode, StopReason, TextBlock, ThinkingBlock,
@@ -1840,9 +1888,11 @@ mod tests {
         let mut session =
             AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
         session.begin_turn("inspect");
+        session.mark_active_turn_provider_started();
         session.push_message(MessageRole::Assistant, "calling");
         session.finish_active_turn(TurnStatus::Completed);
         session.begin_turn("continue");
+        session.mark_active_turn_provider_started();
         session.push_message(MessageRole::Assistant, "done");
         session.finish_active_turn(TurnStatus::Completed);
         session.status = SessionStatus::Idle;
@@ -2004,6 +2054,347 @@ mod tests {
             Some(crate::driver::WAKU_SYSTEM_PROMPT)
         );
 
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    fn failed_pre_provider_session(project_id: Uuid) -> AgentSession {
+        let mut session =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
+        session.begin_turn("hi");
+        session.push_message(
+            MessageRole::Assistant,
+            "无法启动智能体：the task is unavailable",
+        );
+        session.finish_active_turn(TurnStatus::Failed);
+        session.status = SessionStatus::Failed;
+        session
+    }
+
+    #[test]
+    fn pre_provider_failure_without_snapshot_starts_fresh() {
+        let directory = std::env::temp_dir().join(format!("waku-daemon-pre-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = PersistedState::fresh(directory.to_path_buf());
+        let session = failed_pre_provider_session(state.projects[0].id);
+        let session_id = session.id;
+        state.sessions.clear();
+        state.push_session(session);
+        store.save(&mut state).unwrap();
+
+        let backend = backend_in(&directory);
+        let (snapshot, generation) = backend
+            .prepare_embedded_start(session_id, None, None)
+            .unwrap();
+        assert!(generation.is_none());
+        assert!(snapshot.messages.is_empty());
+        assert!(backend.task_store.harness_snapshot(session_id).is_some());
+
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn first_turn_persists_empty_snapshot_before_start_failure() {
+        let directory = std::env::temp_dir().join(format!("waku-daemon-first-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = PersistedState::fresh(directory.to_path_buf());
+        state.sessions[0].begin_turn("first prompt");
+        let session_id = state.sessions[0].id;
+        store.save(&mut state).unwrap();
+
+        let backend = backend_in(&directory);
+        let _ = backend
+            .prepare_embedded_start(session_id, None, None)
+            .unwrap();
+        assert!(backend.task_store.harness_snapshot(session_id).is_some());
+        let error = backend
+            .auth
+            .overlay_for_model(&ProviderId::new("missing-provider"), Some("no-model"))
+            .unwrap_err();
+        assert!(error.to_string().contains("not configured"), "{error}");
+        assert!(backend.task_store.harness_snapshot(session_id).is_some());
+
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn provider_started_history_without_snapshot_still_fails_closed() {
+        let directory = std::env::temp_dir().join(format!("waku-daemon-closed-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = PersistedState::fresh(directory.to_path_buf());
+        let mut session = two_turn_session(state.projects[0].id);
+        session.turns[0].status = TurnStatus::Failed;
+        let session_id = session.id;
+        state.sessions.clear();
+        state.push_session(session);
+        store.save(&mut state).unwrap();
+
+        let backend = backend_in(&directory);
+        let error = backend
+            .prepare_embedded_start(session_id, None, None)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("persisted harness snapshot is missing"),
+            "{error}"
+        );
+
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn app_local_session_restores_onto_fresh_daemon_db() {
+        let directory =
+            std::env::temp_dir().join(format!("waku-daemon-restore-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let backend = backend_in(&directory);
+        let project = Project::from_path(directory.join("ws"));
+        let session = failed_pre_provider_session(project.id);
+        let session_id = session.id;
+        let generation = session.transcript_baseline_generation();
+        let (_, accepted) = backend
+            .prepare_embedded_start(
+                session_id,
+                Some(StartTask {
+                    session,
+                    project: Some(project),
+                    generation,
+                }),
+                None,
+            )
+            .unwrap();
+        assert_eq!(accepted, Some(generation));
+        assert!(backend.task_store.harness_snapshot(session_id).is_some());
+
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn unknown_session_without_payload_stays_unavailable() {
+        let directory = std::env::temp_dir().join(format!("waku-daemon-miss-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let backend = backend_in(&directory);
+        let error = backend
+            .prepare_embedded_start(Uuid::new_v4(), None, None)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("the task is unavailable"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn removed_session_cannot_be_restored_by_start_payload() {
+        let directory = std::env::temp_dir().join(format!("waku-daemon-del-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = PersistedState::fresh(directory.to_path_buf());
+        let session = failed_pre_provider_session(state.projects[0].id);
+        let session_id = session.id;
+        state.sessions.clear();
+        state.push_session(session.clone());
+        store.save(&mut state).unwrap();
+        let backend = backend_in(&directory);
+        backend.mark_removed_for_test(session_id);
+        let error = backend
+            .prepare_embedded_start(
+                session_id,
+                Some(StartTask {
+                    generation: session.transcript_baseline_generation(),
+                    session,
+                    project: None,
+                }),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("the task is unavailable"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn stale_start_generation_keeps_newer_daemon_transcript() {
+        let directory = std::env::temp_dir().join(format!("waku-daemon-gen-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = PersistedState::fresh(directory.to_path_buf());
+        let mut existing = failed_pre_provider_session(state.projects[0].id);
+        existing.title = "daemon newer".into();
+        existing.updated_at = 50;
+        let session_id = existing.id;
+        state.sessions.clear();
+        state.push_session(existing.clone());
+        store.save(&mut state).unwrap();
+
+        let mut stale = existing;
+        stale.title = "client stale".into();
+        stale.updated_at = 10;
+        let backend = backend_in(&directory);
+        backend
+            .prepare_embedded_start(
+                session_id,
+                Some(StartTask {
+                    session: stale,
+                    project: None,
+                    generation: 10,
+                }),
+                None,
+            )
+            .unwrap();
+        let title = backend
+            .task_state
+            .lock()
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .unwrap()
+            .title
+            .clone();
+        assert_eq!(title, "daemon newer");
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn equal_timestamp_missing_provider_history_is_rejected() {
+        let directory = std::env::temp_dir().join(format!("waku-daemon-eq-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = PersistedState::fresh(directory.to_path_buf());
+        let mut existing = two_turn_session(state.projects[0].id);
+        existing.updated_at = 50;
+        let session_id = existing.id;
+        let daemon_generation = existing.transcript_baseline_generation();
+        state.sessions.clear();
+        state.push_session(existing.clone());
+        store.set_harness_snapshot(session_id, empty_session_snapshot());
+        store.save(&mut state).unwrap();
+
+        let mut stale = existing;
+        stale.turns.pop();
+        stale.messages.truncate(2);
+        stale.updated_at = 50;
+        let submitted = stale.transcript_baseline_generation();
+        assert_ne!(submitted, daemon_generation);
+
+        let backend = backend_in(&directory);
+        let (_, accepted) = backend
+            .prepare_embedded_start(
+                session_id,
+                Some(StartTask {
+                    session: stale,
+                    project: None,
+                    generation: submitted,
+                }),
+                None,
+            )
+            .unwrap();
+        assert_eq!(accepted, Some(daemon_generation));
+        assert_ne!(accepted, Some(submitted));
+        let kept = backend
+            .task_state
+            .lock()
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(kept.turns.len(), 2);
+        assert!(kept.turns.iter().all(|turn| turn.provider_turn_started));
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn matching_baseline_accepts_new_unstarted_user_turn() {
+        let directory =
+            std::env::temp_dir().join(format!("waku-daemon-unstarted-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = PersistedState::fresh(directory.to_path_buf());
+        let mut existing = two_turn_session(state.projects[0].id);
+        existing.updated_at = 50;
+        let session_id = existing.id;
+        let baseline = existing.transcript_baseline_generation();
+        state.sessions.clear();
+        state.push_session(existing.clone());
+        store.set_harness_snapshot(session_id, empty_session_snapshot());
+        store.save(&mut state).unwrap();
+
+        let mut incoming = existing;
+        incoming.begin_turn("follow up");
+        incoming.updated_at = 50;
+        assert_eq!(incoming.transcript_baseline_generation(), baseline);
+        assert_eq!(incoming.turns.len(), 3);
+        assert!(!incoming.turns[2].provider_turn_started);
+
+        let backend = backend_in(&directory);
+        let (_, accepted) = backend
+            .prepare_embedded_start(
+                session_id,
+                Some(StartTask {
+                    generation: incoming.transcript_baseline_generation(),
+                    session: incoming,
+                    project: None,
+                }),
+                None,
+            )
+            .unwrap();
+        assert_eq!(accepted, Some(baseline));
+        let stored = backend
+            .task_state
+            .lock()
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(stored.turns.len(), 3);
+        assert!(!stored.turns[2].provider_turn_started);
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn provider_reset_without_provider_history_can_restore() {
+        let directory = std::env::temp_dir().join(format!("waku-daemon-reset-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = PersistedState::fresh(directory.to_path_buf());
+        let mut session = failed_pre_provider_session(state.projects[0].id);
+        session.provider = ProviderId::new("opencode-go");
+        let session_id = session.id;
+        state.sessions.clear();
+        state.push_session(session.clone());
+        store.save(&mut state).unwrap();
+
+        session.provider = ProviderId::new("openai-responses");
+        session.updated_at += 1;
+        let backend = backend_in(&directory);
+        backend
+            .prepare_embedded_start(
+                session_id,
+                Some(StartTask {
+                    generation: session.transcript_baseline_generation(),
+                    session,
+                    project: None,
+                }),
+                None,
+            )
+            .unwrap();
+        let provider = backend
+            .task_state
+            .lock()
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .unwrap()
+            .provider
+            .clone();
+        assert_eq!(provider.as_str(), "openai-responses");
         std::fs::remove_dir_all(directory).ok();
     }
 

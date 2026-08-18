@@ -1,6 +1,6 @@
 //! Modal Git commit/push flow opened from the Environment summary.
 //!
-//! Git inspection, mutation, and one-shot agent CLI generation all run on the
+//! Git inspection, mutation, and one-shot agent generation all run on the
 //! background executor. UI surfaces only paint the cached state below.
 
 use gpui::{KeyBinding, actions};

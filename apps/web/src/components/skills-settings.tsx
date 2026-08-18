@@ -1,13 +1,12 @@
 import { useQueryClient } from '@tanstack/react-query'
-import type { Project, ProviderId, SkillEntry, SkillSource } from '@waku/client'
+import type { Project, SkillEntry, SkillSource } from '@waku/client'
 import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Virtuoso } from 'react-virtuoso'
 import remarkGfm from 'remark-gfm'
 import { toast } from 'sonner'
-import { ControlMenu } from '@/components/control-menu'
 import { Button } from '@/components/ui/button'
-import { ProviderIcon, providerMeta, WakuIcon } from '@/components/waku-icon'
+import { WakuIcon } from '@/components/waku-icon'
 import { useSkills } from '@/hooks/use-daemon-data'
 import { useCopyFeedback } from '@/hooks/use-copy-feedback'
 import { daemonKeys, setSkillsEnabled, trashSkills } from '@/lib/daemon-api'
@@ -16,7 +15,6 @@ import { useI18n, type AppLocale } from '@/lib/i18n'
 import type { Translator } from '@/lib/transcript-presentation'
 import { cn } from '@/lib/utils'
 
-type SkillSourceFilter = 'all' | 'shared' | ProviderId
 
 type SkillListRow =
   | { type: 'section'; key: string; label: string; count: number }
@@ -28,13 +26,10 @@ export function SkillsSettings({ projects }: { projects: Project[] }) {
   const queryClient = useQueryClient()
   const skills = useSkills(projects)
   const [query, setQuery] = useState('')
-  const [source, setSource] = useState<SkillSourceFilter>('all')
   const [selectedKey, setSelectedKey] = useState<number | null>(null)
   const catalog = skills.data?.skills ?? []
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const matches = catalog.filter((skill) => {
-    const sourceMatches = source === 'all' || skill.installs.some((install) => skillSourceKey(install.source) === source)
-    if (!sourceMatches) return false
     if (!normalizedQuery) return true
     return `${skill.name} ${skill.description} ${skill.project ?? ''} ${skill.installs.map((install) => install.dir).join(' ')}`
       .toLocaleLowerCase()
@@ -43,7 +38,6 @@ export function SkillsSettings({ projects }: { projects: Project[] }) {
   const selected = matches.find((skill) => skill.rowKey === selectedKey) ?? matches[0]
   const rows = buildSkillRows(matches, t)
   const disabled = catalog.filter((skill) => !skill.enabled).length
-  const sourceOptions = availableSkillSources(catalog, t)
 
   async function mutate(
     action: () => Promise<void>,
@@ -97,20 +91,6 @@ export function SkillsSettings({ projects }: { projects: Project[] }) {
               }}
             />
           </label>
-          <ControlMenu
-            icon="package"
-            items={sourceOptions.map((option) => ({
-              id: option.id,
-              label: option.label,
-              suffix: String(option.count),
-              selected: source === option.id,
-              onSelect: () => setSource(option.id),
-            }))}
-            label={source === 'all' ? t('skills.filter_all') : skillSourceFilterLabel(source, t)}
-            menuClassName="w-[220px]"
-            placement="below"
-            triggerClassName="h-7 w-fit max-w-[230px] border bg-background px-2"
-          />
         </div>
         <div className="min-h-0 flex-1">
           {skills.isPending ? (
@@ -159,7 +139,7 @@ export function SkillsSettings({ projects }: { projects: Project[] }) {
           )}
         </div>
         <div className="flex h-[26px] shrink-0 items-center justify-center border-t px-3 text-[9.5px] text-[var(--text-ghost)]">
-          {normalizedQuery || source !== 'all'
+          {normalizedQuery
             ? t('skills.filter_caption', { shown: matches.length, total: catalog.length })
             : `${t(catalog.length === 1 ? 'skills.count_one' : 'skills.count_many', { count: catalog.length })}${disabled ? ` · ${t('skills.count_disabled', { count: disabled })}` : ''}`}
         </div>
@@ -308,10 +288,8 @@ function SkillInfoRow({ label, children }: { label: string; children: React.Reac
   )
 }
 
-function SkillGlyph({ skill, enabled, large = false }: { skill: SkillEntry; enabled: boolean; large?: boolean }) {
-  const source = skill.installs.length === 1 ? skill.installs[0]?.source : 'shared'
+function SkillGlyph({ enabled, large = false }: { skill: SkillEntry; enabled: boolean; large?: boolean }) {
   const className = cn(large ? 'size-[18px]' : 'size-[13px]', !enabled && 'opacity-45')
-  if (source && source !== 'shared') return <ProviderIcon className={className} provider={source.provider} />
   return <WakuIcon className={cn(className, 'text-[var(--text-secondary)]')} name="package" />
 }
 
@@ -358,34 +336,13 @@ function buildSkillRows(skills: SkillEntry[], t: Translator) {
   return rows
 }
 
-function availableSkillSources(skills: SkillEntry[], t: Translator) {
-  const counts = new Map<Exclude<SkillSourceFilter, 'all'>, number>()
-  for (const skill of skills) {
-    const seen = new Set<Exclude<SkillSourceFilter, 'all'>>()
-    for (const install of skill.installs) seen.add(skillSourceKey(install.source))
-    for (const key of seen) counts.set(key, (counts.get(key) ?? 0) + 1)
-  }
-  const ids = [...counts.keys()] as Array<Exclude<SkillSourceFilter, 'all'>>
-  return [
-    { id: 'all' as const, label: t('skills.filter_all'), count: skills.length },
-    ...ids.filter((id) => counts.has(id)).map((id) => ({ id, label: skillSourceFilterLabel(id, t), count: counts.get(id)! })),
-  ]
+
+function skillSourceLabel(_source: SkillSource, t: Translator) {
+  return t('skills.source_shared')
 }
 
-function skillSourceKey(source: SkillSource): Exclude<SkillSourceFilter, 'all'> {
-  return source === 'shared' ? 'shared' : source.provider
-}
-
-function skillSourceLabel(source: SkillSource, t: Translator) {
-  return source === 'shared' ? t('skills.source_shared') : providerMeta(source.provider).shortName
-}
-
-function skillSourceFilterLabel(source: Exclude<SkillSourceFilter, 'all'>, t: Translator) {
-  return source === 'shared' ? t('skills.source_shared') : providerMeta(source).shortName
-}
-
-function skillSourcesLabel(skill: SkillEntry, t: Translator) {
-  return [...new Set(skill.installs.map((install) => skillSourceLabel(install.source, t)))].join(' · ')
+function skillSourcesLabel(_skill: SkillEntry, t: Translator) {
+  return t('skills.source_shared')
 }
 
 function formatBytes(value: number, locale: AppLocale) {

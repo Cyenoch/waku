@@ -17,6 +17,7 @@ fn start_driver(mut request: DriverStartRequest, cwd: PathBuf) -> anyhow::Result
         request.daemon_client,
         request.session_id,
         request.options,
+        Some(request.task),
         event_tx,
     )?;
     Ok(PreparedDriver { handle, events })
@@ -172,10 +173,9 @@ fn prepare_submission(
     .err()
     .map(|error| tr!("errors.capture_pre_turn_checkpoint", error = error));
 
-    // Process startup can synchronously resolve executables, bind sockets,
-    // and spawn children. It belongs behind the same animated preparation
-    // boundary as Git work, otherwise the last spinner frame visibly freezes
-    // just before Stop appears.
+    // Daemon Start talks HTTP and can block on auth overlay. Keep it behind
+    // the same animated preparation boundary as Git work so the last spinner
+    // frame does not freeze just before Stop appears.
     let driver = driver_start.map(|request| {
         request.and_then(|request| start_driver(request, project_path.to_path_buf()))
     });
@@ -358,6 +358,9 @@ impl Waku {
         snapshot: RemoteTaskStateSnapshot,
         cx: &mut Context<Self>,
     ) {
+        if self.auth_statuses.is_empty() {
+            self.refresh_provider_auth_statuses(cx);
+        }
         let runtime_ids = self.runtimes.keys().copied().collect::<HashSet<_>>();
         let removed = merge_remote_session_catalog(
             &mut self.state.sessions,
@@ -683,16 +686,22 @@ impl Waku {
     }
 
     pub(super) fn model_for_session<'a>(&'a self, session: &'a AgentSession) -> Option<&'a str> {
-        session.model.as_deref().or_else(|| {
-            self.configured_provider(&session.provider)
-                .map(|provider| provider.default_model.as_str())
-        })
+        let model = session
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())?;
+        super::composer::catalog_supports_model(self.model_catalogs.get(&session.provider), model)
+            .then_some(model)
     }
 
     pub(super) fn model_display_name(&self, provider: &ProviderId, model: Option<&str>) -> String {
         let endpoint = self
             .configured_provider(provider)
             .map(|provider| provider.name.as_str())
+            .or_else(|| {
+                waku_client::ProviderPreset::parse_id(provider.as_str())
+                    .map(waku_client::ProviderPreset::display_name)
+            })
             .unwrap_or_else(|| provider.as_str());
         match model {
             Some(model) if !model.trim().is_empty() => format!("{endpoint} · {model}"),
@@ -1364,7 +1373,12 @@ impl Waku {
         SessionOptions {
             mode: session.runtime_mode,
             interaction_mode: session.interaction_mode,
-            model: self.model_for_session(session).map(str::to_owned),
+            model: super::composer::send_provider_model(
+                &session.provider,
+                session.model.as_deref(),
+                &self.model_catalogs,
+            )
+            .map(|(_, model)| model),
             reasoning_effort: session.reasoning_effort.clone(),
             service_tier: self.service_tier_for_session(session),
             context_window: session.context_window.clone(),
@@ -1440,15 +1454,14 @@ impl Waku {
         session: &AgentSession,
         cwd: PathBuf,
     ) -> anyhow::Result<DriverStartRequest> {
-        let Some(provider) = self.configured_provider(&session.provider) else {
-            anyhow::bail!(tr!(
-                "errors.provider_not_found",
-                provider = session.provider.as_str()
-            ));
+        let Some(endpoint) =
+            provider_endpoint_for_start(&session.provider, &self.state.external_providers)
+        else {
+            anyhow::bail!("provider {} is not configured", session.provider.as_str());
         };
-        provider.id.validate().map_err(anyhow::Error::msg)?;
-        if provider.default_model.trim().is_empty() {
-            anyhow::bail!("provider {:?} has no default model", provider.id.as_str());
+        endpoint.id.validate().map_err(anyhow::Error::msg)?;
+        if endpoint.default_model.trim().is_empty() {
+            anyhow::bail!("provider {:?} has no default model", endpoint.id.as_str());
         }
         let SessionOptions {
             mode,
@@ -1469,6 +1482,16 @@ impl Waku {
                 reasoning_effort,
                 service_tier,
                 context_window,
+            },
+            task: waku_client::StartTask {
+                session: session.clone(),
+                project: self
+                    .state
+                    .projects
+                    .iter()
+                    .find(|project| project.id == session.project_id)
+                    .cloned(),
+                generation: session.transcript_baseline_generation(),
             },
             event_wake: self.event_wake_tx.clone(),
             daemon_client: self.daemon.client(),
@@ -1945,6 +1968,7 @@ impl Waku {
             Some(Ok(prepared)) => Ok(self.install_prepared_driver(session_id, prepared)),
             Some(Err(error)) => Err(error),
         };
+
         self.invalidate_checkpoint_refs();
         if let Some(runtime) = self.runtimes.get_mut(&session_id) {
             runtime
@@ -1964,10 +1988,8 @@ impl Waku {
             self.show_toast(warning);
         }
         // Template commands expand here, at the seam between the transcript
-        // and the transport: the user message keeps the typed `/name …` —
-        // the same echo the CLIs show — while the provider receives the
-        // rendered prompt. Claude's commands pass through untouched; its CLI
-        // owns their expansion.
+        // and the transport: the user message keeps the typed `/name …`
+        // while the embedded harness receives the rendered prompt.
         let prompt = submission.prompt.clone();
         let driver_prompt =
             crate::composer_complete::expanded_submission(&prompt, &self.slash_command_index)
@@ -2197,6 +2219,19 @@ fn prompt_input_from_submission_with_text(
     waku_client::PromptInput { text, attachments }
 }
 
+pub(super) fn provider_endpoint_for_start(
+    provider: &ProviderId,
+    customs: &[ExternalProvider],
+) -> Option<ExternalProvider> {
+    if let Some(preset) = waku_client::ProviderPreset::parse_id(provider.as_str()) {
+        return Some(preset.endpoint());
+    }
+    customs
+        .iter()
+        .find(|candidate| &candidate.id == provider)
+        .cloned()
+}
+
 #[cfg(test)]
 mod service_tier_tests {
     use super::{catalog_allows_service_tier, gated_service_tier};
@@ -2209,7 +2244,7 @@ mod service_tier_tests {
         ModelCatalogEntry {
             id: "gpt-5".into(),
             name: "gpt-5".into(),
-            provider: ProviderId::new("openai"),
+            provider: ProviderId::new(ProviderId::OPENAI_RESPONSES),
             api_format: ApiFormat::OpenAiResponses,
             transport: TransportProfile::Standard,
             base_url: "https://api.openai.com/v1".into(),
@@ -2261,5 +2296,49 @@ mod service_tier_tests {
             ),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod start_route_tests {
+    use super::provider_endpoint_for_start;
+    use crate::model::ExternalProvider;
+    use waku_client::{ProviderId, ProviderPreset};
+
+    #[test]
+    fn every_builtin_preset_starts_without_a_custom_endpoint() {
+        for preset in ProviderPreset::ALL {
+            let endpoint = provider_endpoint_for_start(&preset.provider_id(), &[])
+                .unwrap_or_else(|| panic!("{} must start without a custom endpoint", preset.id()));
+            assert_eq!(endpoint.id, preset.provider_id());
+            assert!(!endpoint.default_model.trim().is_empty(), "{}", preset.id());
+            assert!(endpoint.base_url.starts_with("https://"), "{}", preset.id());
+        }
+    }
+
+    #[test]
+    fn unknown_provider_is_not_an_install_or_binary_error() {
+        assert!(provider_endpoint_for_start(&ProviderId::new("mystery-cli"), &[]).is_none());
+        let message = format!(
+            "provider {} is not configured",
+            ProviderId::new("mystery-cli")
+        );
+        assert!(!message.contains("installed"));
+        assert!(!message.contains("尚未安装"));
+        assert!(!message.contains("could not be found"));
+    }
+
+    #[test]
+    fn custom_endpoints_still_start_by_id() {
+        let custom = ExternalProvider::new(
+            "corp",
+            "Corp",
+            "https://example.test/v1",
+            Default::default(),
+            "local-model",
+        );
+        let endpoint =
+            provider_endpoint_for_start(&ProviderId::new("corp"), &[custom]).expect("custom");
+        assert_eq!(endpoint.default_model, "local-model");
     }
 }

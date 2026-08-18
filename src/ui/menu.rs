@@ -39,6 +39,8 @@ actions!(
         DismissMenu,
         SelectNextEntry,
         SelectPreviousEntry,
+        SelectFirstEntry,
+        SelectLastEntry,
         SelectNextTab,
         SelectPreviousTab,
         ConfirmEntry
@@ -67,6 +69,7 @@ const PANEL_FIELD_CONTEXT: &str = "WakuMenu > ComposerInput";
 /// That is what lets `enter` here beat the field's submit.
 pub fn init(cx: &mut App) {
     use gpui::KeyBinding;
+    const MODEL_PICKER_FIELD_CONTEXT: &str = "WakuMenu > ModelPicker > ComposerInput";
     cx.bind_keys([
         KeyBinding::new("escape", DismissMenu, Some(MENU_CONTEXT)),
         KeyBinding::new("down", SelectNextEntry, Some(PANEL_FIELD_CONTEXT)),
@@ -74,6 +77,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("tab", SelectNextTab, Some(PANEL_FIELD_CONTEXT)),
         KeyBinding::new("shift-tab", SelectPreviousTab, Some(PANEL_FIELD_CONTEXT)),
         KeyBinding::new("enter", ConfirmEntry, Some(PANEL_FIELD_CONTEXT)),
+        KeyBinding::new("down", SelectNextEntry, Some(MODEL_PICKER_FIELD_CONTEXT)),
+        KeyBinding::new("up", SelectPreviousEntry, Some(MODEL_PICKER_FIELD_CONTEXT)),
+        KeyBinding::new("enter", ConfirmEntry, Some(MODEL_PICKER_FIELD_CONTEXT)),
+        KeyBinding::new("home", SelectFirstEntry, Some(MODEL_PICKER_FIELD_CONTEXT)),
+        KeyBinding::new("end", SelectLastEntry, Some(MODEL_PICKER_FIELD_CONTEXT)),
     ]);
 }
 

@@ -88,7 +88,7 @@ function session(patch: Partial<AgentSession>): AgentSession {
     id: 'session',
     title: 'New Task',
     project_id: 'project',
-    provider: 'codex',
+    provider: 'openai-codex',
     model: null,
     runtime_mode: 'ask',
     interaction_mode: 'build',

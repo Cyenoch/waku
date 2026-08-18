@@ -35,13 +35,10 @@ export const Route = createFileRoute('/')({
 })
 
 const PROVIDERS = [
-  { slug: 'amp', label: 'Amp' },
-  { slug: 'claude', label: 'Claude Code' },
-  { slug: 'openai', label: 'Codex' },
-  { slug: 'cursor', label: 'Cursor' },
+  { slug: 'claude', label: 'Anthropic' },
+  { slug: 'openai', label: 'ChatGPT Codex' },
   { slug: 'opencode', label: 'OpenCode' },
-  { slug: 'grok', label: 'Grok' },
-  { slug: 'pi', label: 'Pi' },
+  { slug: 'grok', label: 'xAI' },
 ]
 
 const FEATURES = [
@@ -52,8 +49,8 @@ const FEATURES = [
   },
   {
     icon: Layers,
-    title: 'Every agent, one timeline',
-    body: 'Each agent is connected over its strongest native interface — stream-json, JSON-RPC, live events — and normalized into one provider-neutral model.',
+    title: 'HTTP models, one timeline',
+    body: 'Each provider is a configured HTTP endpoint. OpenAI, Anthropic, and compatible APIs normalize into one session model.',
   },
   {
     icon: History,
@@ -68,7 +65,7 @@ const FEATURES = [
   {
     icon: HardDrive,
     title: 'Local by architecture',
-    body: 'Projects, sessions, transcripts, and provider IDs live on your disk. No account, no telemetry, no Waku cloud between you and your agents.',
+    body: 'Projects, sessions, and transcripts live on your disk. No account, no telemetry, no Waku cloud between you and the model.',
   },
   {
     icon: RefreshCw,
@@ -84,7 +81,7 @@ const FAQ = [
   },
   {
     q: 'Do I need new API keys?',
-    a: 'No. Waku detects amp, claude, codex, cursor-agent, opencode, grok, and pi on your machine and drives them directly — your existing logins, plans, and rate limits apply unchanged.',
+    a: 'Sign in from Settings. Built-in providers use an API key or OAuth (ChatGPT Codex, SuperGrok). Custom endpoints take an API root URL and a key environment variable.',
   },
   {
     q: 'Where does my data live?',
@@ -215,10 +212,10 @@ function Home() {
                 Not backed by Y Combinator
               </div>
               <h1 className="max-w-4xl text-4xl font-semibold tracking-[-0.03em] text-balance md:text-[3.4rem] md:leading-[1.04]">
-                One native app for all your coding agents.
+                A native coding agent with a built-in Rust harness.
               </h1>
               <p className="mt-5 max-w-[36rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
-                Waku drives the agent CLIs you already have — sessions,
+                Waku talks to HTTP model endpoints — sessions,
                 transcripts, tool activity, and checkpoints in one fast
                 graphite window, entirely on your machine.
               </p>
@@ -239,7 +236,7 @@ function Home() {
 
               {/* Providers */}
               <div className="mt-16">
-                <SectionLabel>Drives the agents you already use</SectionLabel>
+                <SectionLabel>Talks to the endpoints you configure</SectionLabel>
                 <div className="mt-4 flex flex-wrap items-center gap-x-7 gap-y-4">
                   {PROVIDERS.map((p) => (
                     <Tooltip key={p.slug}>
@@ -276,7 +273,7 @@ function Home() {
                 />
                 <img
                   src="/app-screenshot-light.png"
-                  alt="Waku showing a coding-agent session"
+                  alt="Waku showing a coding session"
                   width={2266}
                   height={1752}
                   className="block h-auto w-full"

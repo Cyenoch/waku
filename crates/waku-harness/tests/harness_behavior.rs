@@ -1232,7 +1232,7 @@ fn built_in_tools_execute_and_reject_path_traversal() {
         ToolCall {
             id: "s".into(),
             name: "search".into(),
-            arguments: json!({"pattern":"gamma","path":"."}),
+            arguments: json!({"query":"gamma","path":"."}),
             thought_signature: None,
         },
     )

@@ -39,7 +39,7 @@ describe('composer preferences', () => {
   test('does not erase an explicit model when a blank draft is selected', () => {
     const preferences = rememberComposerSession(
       readComposerPreferences(null, 'ws://first'),
-      { provider: 'claude', model: 'claude-opus', reasoning_effort: null, service_tier: null, context_window: null },
+      { provider: 'anthropic', model: 'claude-opus', reasoning_effort: null, service_tier: null, context_window: null },
     )
     expect(rememberComposerSession(preferences, {
       provider: 'custom-endpoint', model: null, reasoning_effort: null, service_tier: null, context_window: null,

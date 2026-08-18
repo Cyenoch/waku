@@ -1,7 +1,7 @@
-//! The Skills settings page: one library across every ecosystem's skill
-//! trees, presented as a mail-style master–detail split — the list of skills
-//! on the left, the selected skill's full detail on the right — with enable
-//! and delete management.
+//! The Skills settings page: the shared skill library, presented as a
+//! mail-style master–detail split — the list of skills on the left, the
+//! selected skill's full detail on the right — with enable and delete
+//! management.
 //!
 //! Discovery is filesystem work and lives on the background executor
 //! ([`Waku::ensure_skills_catalog`]); frames read only the cached catalog.
@@ -14,7 +14,7 @@ use std::path::Path;
 use gpui::{KeyBinding, actions};
 
 use super::composer::next_picker_highlight;
-use crate::skills::{SkillEntry, SkillSource, SkillsCatalog};
+use crate::skills::{SkillEntry, SkillsCatalog};
 
 use super::*;
 
@@ -30,19 +30,8 @@ const SKILLS_SEARCH_CONTEXT: &str = "SkillsPane > ComposerInput";
 
 const SKILLS_LIST_WIDTH: f32 = 264.0;
 
-fn skill_source_icon(source: &SkillSource) -> &'static str {
-    match source {
-        SkillSource::Shared => "icons/package.svg",
-        SkillSource::Provider(provider) => crate::ui::provider_icon(provider),
-    }
-}
-
-fn skill_icon(skill: &SkillEntry) -> &'static str {
-    if skill.installs.len() > 1 {
-        "icons/package.svg"
-    } else {
-        skill_source_icon(&skill.primary().source)
-    }
+fn skill_icon(_skill: &SkillEntry) -> &'static str {
+    "icons/package.svg"
 }
 
 /// A landed catalog older than this is rescanned when the page opens.
@@ -416,7 +405,7 @@ impl Waku {
             .filter(|row| matches!(row, SkillsRow::Skill { .. }))
             .count();
         let total = catalog.skills.len();
-        let footer = if !query.is_empty() || self.skills_source_filter.is_some() {
+        let footer = if !query.is_empty() {
             tr!("skills.filter_caption", shown = shown, total = total)
         } else {
             let disabled = catalog.disabled_count();
@@ -504,8 +493,7 @@ impl Waku {
                         TextField::new("skills-search-field", self.skills_search.clone())
                             .icon("icons/search.svg", 13.0)
                             .w_full(),
-                    )
-                    .child(self.render_skills_source_filter(catalog, theme, cx)),
+                    ),
             )
             .child(body)
             .child(
@@ -524,116 +512,15 @@ impl Waku {
             )
     }
 
-    /// The provider filter over the list. `None` — every source — is the
-    /// default; the menu shows per-source counts so an empty pick is never a
-    /// surprise.
-    fn render_skills_source_filter(
-        &self,
-        catalog: &SkillsCatalog,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let current = self.skills_source_filter.clone();
-        let chip_label = match current.as_ref() {
-            None => tr!("skills.filter_all"),
-            Some(source) => source.label(),
-        };
-        let mut counts: HashMap<SkillSource, usize> = HashMap::new();
-        for skill in &catalog.skills {
-            let mut seen = Vec::new();
-            for install in &skill.installs {
-                if !seen.contains(&install.source) {
-                    seen.push(install.source.clone());
-                    *counts.entry(install.source.clone()).or_default() += 1;
-                }
-            }
-        }
-        let weak = cx.entity().downgrade();
-        let handle = self.menu_handle("skills-source-filter", cx);
-        let mut sources = vec![SkillSource::Shared];
-        sources.extend(
-            self.state
-                .external_providers
-                .iter()
-                .map(|provider| SkillSource::Provider(provider.id.clone())),
-        );
-        dropdown_menu(
-            MenuChip::new("skills-source-filter")
-                .icon(
-                    match current.as_ref() {
-                        None => "icons/package.svg",
-                        Some(source) => skill_source_icon(source),
-                    },
-                    theme.text_tertiary,
-                )
-                .label(chip_label)
-                .outlined()
-                .background(theme.raised)
-                .height(px(26.0))
-                .selected(handle.is_open())
-                .w_full()
-                .justify_between(),
-            "skills-source-filter-menu",
-            &handle,
-            MenuAlign::BelowLeft,
-            move |_| {
-                let mut items = Vec::new();
-                {
-                    let weak = weak.clone();
-                    items.push(
-                        MenuItem::new(tr!("skills.filter_all"), move |_, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.skills_source_filter = None;
-                                cx.notify();
-                            });
-                        })
-                        .selected(current.is_none()),
-                    );
-                }
-                items.push(MenuItem::Separator);
-                for source in &sources {
-                    let weak = weak.clone();
-                    let selected_source = source.clone();
-                    let count = counts.get(source).copied().unwrap_or(0);
-                    let label = if count > 0 {
-                        format!("{} · {count}", source.label())
-                    } else {
-                        source.label()
-                    };
-                    items.push(
-                        MenuItem::new(label, move |_, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.skills_source_filter = Some(selected_source.clone());
-                                cx.notify();
-                            });
-                        })
-                        .icon(skill_source_icon(source))
-                        .selected(current.as_ref() == Some(source)),
-                    );
-                }
-                items
-            },
-        )
-    }
-
     // ── List rows ──────────────────────────────────────────────────────────
 
-    /// Catalog indices the query and source filter leave visible, in catalog
-    /// order. A grouped skill passes a source filter when any of its copies
-    /// lives in that source's tree.
+    /// Catalog indices the query leaves visible, in catalog order.
     fn visible_skill_indices(&self, catalog: &SkillsCatalog, query: &str) -> Vec<usize> {
         catalog
             .skills
             .iter()
             .enumerate()
-            .filter(|(_, skill)| {
-                self.skills_source_filter.as_ref().is_none_or(|filter| {
-                    skill
-                        .installs
-                        .iter()
-                        .any(|install| &install.source == filter)
-                }) && (query.is_empty() || skill_matches(skill, query))
-            })
+            .filter(|(_, skill)| query.is_empty() || skill_matches(skill, query))
             .map(|(index, _)| index)
             .collect()
     }

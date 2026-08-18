@@ -501,9 +501,7 @@ type Activity = {
 type Block = {
   after_message: number;
   turn_id: string;
-  content:
-    | { kind: "reasoning"; data: { content: string; started_at_ms: number; finished_at_ms: number } }
-    | { kind: "activities"; data: Activity[] };
+  content: { kind: "activities"; data: Activity[] };
 };
 
 type MessageRow = {
@@ -538,7 +536,7 @@ const PROFILES: Profile[] = [
     // frame, so this one is about sheer length rather than heavy rows.
     key: "long-history",
     title: "Perf · long history (thousands of turns)",
-    provider: "codex",
+    provider: "openai-codex",
     model: "gpt-5.2-codex",
     turns: 2000,
     answerBytes: [300, 1400],
@@ -555,7 +553,7 @@ const PROFILES: Profile[] = [
     // wrapping, which is where per-row measurement time goes.
     key: "markdown-heavy",
     title: "Perf · markdown and code heavy answers",
-    provider: "claude",
+    provider: "anthropic",
     model: "claude-opus-5",
     turns: 260,
     answerBytes: [6000, 22000],
@@ -572,7 +570,7 @@ const PROFILES: Profile[] = [
     // Expanding one of these turns is the worst case for the transcript.
     key: "tool-storm",
     title: "Perf · tool activity storm (expand a turn)",
-    provider: "grok",
+    provider: "xai",
     model: "grok-4.5",
     turns: 90,
     answerBytes: [400, 2500],
@@ -588,7 +586,7 @@ const PROFILES: Profile[] = [
     // Everything at once, and the biggest detail blob — the hydrate-cost test.
     key: "kitchen-sink",
     title: "Perf · everything at maximum",
-    provider: "openCode",
+    provider: "opencode-zen",
     model: "gpt-5.2",
     turns: 700,
     answerBytes: [800, 9000],
@@ -780,12 +778,27 @@ function buildSession(
         after_message: anchor,
         turn_id: turnId,
         content: {
-          kind: "reasoning",
-          data: {
-            content: reasoningText(random, int(random, profile.reasoningBytes[0], profile.reasoningBytes[1])),
-            started_at_ms: startedMs,
-            finished_at_ms: startedMs + int(random, 400, 9000),
-          },
+          kind: "activities",
+          data: [{
+            id: mockUuid(random),
+            source_id: null,
+            kind: "reasoning",
+            title: "Reasoning",
+            detail: null,
+            arguments: null,
+            output: null,
+            image_urls: [],
+            failed: false,
+            complete: true,
+            file_changes: [],
+            display_target: null,
+            display_description: null,
+            reasoning: {
+              content: reasoningText(random, int(random, profile.reasoningBytes[0], profile.reasoningBytes[1])),
+              started_at_ms: startedMs,
+              finished_at_ms: startedMs + int(random, 400, 9000),
+            },
+          }],
         },
       });
     }
@@ -863,9 +876,7 @@ function buildSession(
     created_at: createdAt,
     updated_at: updatedAt,
     last_reply_at: updatedAt,
-    // Left unset on purpose: these transcripts have no provider session to
-    // resume, and a bogus cursor would send the driver looking for one.
-    provider_cursor: null,
+    runtime_event_cursor: null,
     turns,
     transcript_blocks: blocks,
   });

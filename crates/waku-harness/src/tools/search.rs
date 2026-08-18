@@ -40,7 +40,6 @@ impl Tool for SearchTool {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "pattern": { "type": "string", "description": "Legacy spelling for query" },
                     "path": { "type": "string" },
                     "max_results": { "type": "integer" }
                 },
@@ -52,9 +51,7 @@ impl Tool for SearchTool {
     }
 
     fn validate(&self, args: &Value) -> Result<(), ToolError> {
-        if !args.get("query").is_some_and(Value::is_string)
-            && !args.get("pattern").is_some_and(Value::is_string)
-        {
+        if !args.get("query").is_some_and(Value::is_string) {
             return Err(ToolError::InvalidArguments("query must be a string".into()));
         }
         Ok(())
@@ -71,8 +68,7 @@ impl Tool for SearchTool {
                 .arguments
                 .get("query")
                 .and_then(Value::as_str)
-                .or_else(|| call.arguments.get("pattern").and_then(Value::as_str))
-                .unwrap_or_default();
+                .unwrap_or("");
             if query.is_empty() {
                 return Err(ToolError::InvalidArguments(
                     "query must not be empty".into(),

@@ -40,8 +40,8 @@ use crate::md::render::{
     TranscriptSelection,
 };
 use crate::ui::menu::{
-    ConfirmEntry, ContextMenuHandle, DismissMenu, MenuAlign, MenuItem, SelectNextEntry,
-    SelectPreviousEntry, context_menu, dropdown_menu, popover,
+    ConfirmEntry, ContextMenuHandle, DismissMenu, MenuAlign, MenuItem, SelectFirstEntry,
+    SelectLastEntry, SelectNextEntry, SelectPreviousEntry, context_menu, dropdown_menu, popover,
 };
 use crate::ui::scrollbar::{self, ScrollbarState};
 use crate::ui::tooltip::Tooltip;
@@ -76,6 +76,8 @@ const CONTENT_MAX_WIDTH: f32 = 720.0;
 /// Menu-registry id of the composer's model picker, shared by its render site
 /// and the primary-modifier `/` toggle action.
 const MODEL_PICKER_MENU_ID: &str = "provider-model-picker";
+const MODEL_PICKER_ROW_HEIGHT: f32 = 34.0;
+const MODEL_PICKER_MAX_LIST_HEIGHT: f32 = 260.0;
 const BRANCH_PICKER_MENU_ID: &str = "workspace-branch-picker";
 const BRANCH_PICKER_ROW_HEIGHT: f32 = 26.0;
 const SIDEBAR_MIN_WIDTH: f32 = 180.0;
@@ -186,6 +188,7 @@ enum StreamDeltaKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ModelPickerTab {
     Favorites,
+    All,
     Provider(ProviderId),
 }
 
@@ -544,6 +547,7 @@ struct PreparedSubmission {
 struct DriverStartRequest {
     session_id: Uuid,
     options: DriverStartOptions,
+    task: waku_client::StartTask,
     event_wake: smol::channel::Sender<()>,
     daemon_client: waku_client::DaemonClient,
 }
@@ -976,6 +980,8 @@ pub struct Waku {
     auth_statuses: HashMap<ProviderId, waku_client::ProviderAuthStatus>,
     auth_phases: Vec<waku_client::AuthPhase>,
     auth_generation: u64,
+    auth_status_inflight: bool,
+    auth_status_queued: bool,
     auth_pending: HashSet<ProviderId>,
     auth_error: HashMap<ProviderId, String>,
     model_catalogs: HashMap<ProviderId, waku_client::ModelCatalog>,
@@ -1023,7 +1029,20 @@ pub struct Waku {
     /// Keyboard cursor over the model picker's filtered rows. `None` means the
     /// keyboard has not moved yet, so `enter` takes the first row.
     model_picker_highlight: Option<usize>,
-    model_picker_scroll: ScrollHandle,
+    model_picker_list_state: ListState,
+    /// Identity of the virtualized picker list, used only to decide when to
+    /// reset `ListState`. The labeled rows themselves live in the generation
+    /// snapshot below.
+    model_picker_row_cache: RefCell<Vec<(ProviderId, String)>>,
+    /// Bumped when picker-visible catalogs or custom provider lists change.
+    model_picker_catalog_generation: u64,
+    /// Bumped when connected-auth status that feeds picker endpoints changes.
+    model_picker_auth_generation: u64,
+    /// Bumped when `state.favorite_models` changes.
+    model_picker_favorite_generation: u64,
+    /// O(1) render-time key + snapshot pair backing `model_picker_rows_cached`.
+    model_picker_rows_key: RefCell<Option<composer::ModelPickerRowsCacheKey>>,
+    model_picker_rows_snapshot: RefCell<Rc<Vec<composer::ModelPickerListRow>>>,
     branch_search: Entity<ComposerInput>,
     branch_create_input: Entity<ComposerInput>,
     branch_picker_mode: BranchPickerMode,
@@ -1225,8 +1244,6 @@ pub struct Waku {
     /// scrollbar and land at the top when the selection moves.
     skills_detail_scroll: ScrollHandle,
     skills_detail_scrollbar: Rc<ScrollbarState>,
-    /// Source the list is narrowed to; `None` shows every ecosystem.
-    skills_source_filter: Option<crate::skills::SkillSource>,
     /// The skill directory whose delete button is armed for its confirming
     /// second click.
     skills_delete_arming: Option<PathBuf>,
@@ -1415,46 +1432,6 @@ pub(super) fn next_time_label_change(sessions: &[AgentSession], now: u64) -> Opt
         }
     }
     next
-}
-
-fn migrate_legacy_projectless_projects(
-    state: &mut PersistedState,
-    workspace: &waku_client::WorkspaceClient,
-) -> (bool, Option<anyhow::Error>) {
-    let legacy_indices = state
-        .projects
-        .iter()
-        .enumerate()
-        .filter_map(|(index, project)| {
-            crate::projectless::needs_migration(&project.path).then_some(index)
-        })
-        .collect::<Vec<_>>();
-    if legacy_indices.is_empty() {
-        return (false, None);
-    }
-
-    let mut changed = false;
-    for index in legacy_indices {
-        let path = state.projects[index].path.clone();
-        let response = workspace
-            .request(waku_client::WorkspaceOperation::MigrateProjectlessWorkspace { path });
-        let cwd = match response {
-            Ok(waku_client::WorkspaceResult::ProjectlessWorkspace { cwd }) => cwd,
-            Ok(_) => {
-                return (
-                    changed,
-                    Some(anyhow::anyhow!(
-                        "the daemon returned an invalid projectless response"
-                    )),
-                );
-            }
-            Err(error) => return (changed, Some(error)),
-        };
-        state.projects[index].name = Project::PROJECTLESS_NAME.to_owned();
-        state.projects[index].path = cwd;
-        changed = true;
-    }
-    (changed, None)
 }
 
 impl Waku {
@@ -1773,18 +1750,6 @@ impl Waku {
         let sidebar_pane = WakuPane::new(Waku::sidebar_pane_content, cx);
         let transcript_pane = WakuPane::new(Waku::transcript_pane_content, cx);
         let right_panel_pane = WakuPane::new(Waku::right_panel_pane_content, cx);
-        let workspace_client = waku_client::WorkspaceClient::new(daemon.client());
-        let (projectless_migrated, projectless_migration_error) =
-            migrate_legacy_projectless_projects(&mut state, &workspace_client);
-        let projectless_save_error = projectless_migrated
-            .then(|| store.save(&mut state).err())
-            .flatten();
-        let startup_toast = projectless_migration_error
-            .map(|error| tr!("errors.move_projectless_task", error = error))
-            .or_else(|| {
-                projectless_save_error
-                    .map(|error| tr!("errors.save_projectless_migration", error = error))
-            });
         let sidebar_visible = state.sidebar_visible;
         let right_panel_visible = state.right_panel_visible;
         let sidebar_width = sanitize_panel_width(
@@ -1837,7 +1802,6 @@ impl Waku {
         }
         let mut interrupted_turn_checkpoints = Vec::new();
         for session in &mut state.sessions {
-            session.migrate_legacy_state();
             // A provider runtime belongs to the daemon and may still be
             // streaming after this desktop process restarted. Leave its
             // persisted projection intact until the background attachment
@@ -1938,6 +1902,7 @@ impl Waku {
         let sidebar_list_state = ListState::new(0, ListAlignment::Top, px(256.0));
         let usage_projects_list = ListState::new(0, ListAlignment::Top, px(256.0));
         let branch_picker_list_state = ListState::new(0, ListAlignment::Top, px(152.0));
+        let model_picker_list_state = ListState::new(0, ListAlignment::Top, px(152.0));
         let transcript_is_scrolled = Rc::new(Cell::new(false));
         let transcript_anchor_following = Rc::new(Cell::new(false));
         transcript_rows.set_scroll_handler({
@@ -2154,7 +2119,7 @@ impl Waku {
                             this.reveal_selected_picker_model();
                         } else {
                             this.model_picker_highlight = Some(0);
-                            this.model_picker_scroll.scroll_to_item(0);
+                            this.model_picker_list_state.scroll_to_reveal_item(0);
                         }
                         cx.notify();
                     }
@@ -2396,6 +2361,8 @@ impl Waku {
                 auth_statuses: HashMap::new(),
                 auth_phases: Vec::new(),
                 auth_generation: 0,
+                auth_status_inflight: false,
+                auth_status_queued: false,
                 auth_pending: HashSet::new(),
                 auth_error: HashMap::new(),
                 model_catalogs: HashMap::new(),
@@ -2421,7 +2388,13 @@ impl Waku {
                 usage_chart_bounds: Rc::default(),
                 model_picker_tab,
                 model_picker_highlight: None,
-                model_picker_scroll: ScrollHandle::new(),
+                model_picker_list_state,
+                model_picker_row_cache: RefCell::new(Vec::new()),
+                model_picker_catalog_generation: 0,
+                model_picker_auth_generation: 0,
+                model_picker_favorite_generation: 0,
+                model_picker_rows_key: RefCell::new(None),
+                model_picker_rows_snapshot: RefCell::new(Rc::new(Vec::new())),
                 branch_picker_mode: BranchPickerMode::Browse,
                 branch_picker_highlight: None,
                 branch_picker_list_state,
@@ -2526,20 +2499,11 @@ impl Waku {
                 skills_selection: TranscriptSelection::default(),
                 skills_detail_scroll: ScrollHandle::new(),
                 skills_detail_scrollbar: ScrollbarState::new(),
-                skills_source_filter: None,
                 skills_delete_arming: None,
                 settings_scroll: ScrollHandle::new(),
                 settings_scrollbar: ScrollbarState::new(),
                 header_drag_armed: false,
-                toast: startup_toast.map(|message| ToastState {
-                    message,
-                    tone: ToastTone::Alert,
-                    id: 0,
-                    timer_generation: 0,
-                    duration_remaining: DEFAULT_TOAST_DURATION,
-                    timer_started: None,
-                    hovered: false,
-                }),
+                toast: None,
                 toast_generation: 0,
                 copied_control_feedback: HashMap::new(),
                 copied_control_generation: 0,
@@ -2611,6 +2575,7 @@ impl Waku {
             // The autocomplete indexes prefetch alongside, so typing `/` or
             // `@` into the very first prompt already has data to draw.
             this.refresh_composer_sources(cx);
+            this.refresh_provider_auth_statuses(cx);
             // The skill library too: the Skills settings page must open onto
             // data, not a scan.
             this.ensure_skills_catalog(false, cx);

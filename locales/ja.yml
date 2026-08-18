@@ -63,10 +63,10 @@ settings.usage: 使用状況
 settings.daemon: デーモン
 settings.general_keywords: 一般 ローカル プロジェクト 会話 プライバシー 分析 テレメトリ 匿名 共有 アップデート 自動 バージョン
 settings.appearance_keywords: 外観 テーマ システム ライト ダーク 言語 英語 中国語 簡体字 日本語
-settings.providers_keywords: プロバイダー エージェント モデル claude codex cursor opencode amp grok pi
+settings.providers_keywords: プロバイダー エンドポイント モデル api
 settings.skills: スキル
-settings.skills_keywords: スキル ライブラリ エージェント 無効 有効 削除 claude codex cursor opencode pi amp 共有
-settings.usage_keywords: 使用状況 トークン コスト 支出 キャッシュ 日別 グラフ モデル 内訳 履歴 claude codex
+settings.skills_keywords: スキル ライブラリ エージェント 無効 有効 削除 共有
+settings.usage_keywords: 使用状況 トークン コスト 支出 キャッシュ 日別 グラフ モデル 内訳 履歴
 settings.daemon_keywords: デーモン サーバー リモート ウェブ ネットワーク 公開 オリジン トークン ポート websocket
 settings.back: 戻る
 settings.search: 設定を検索
@@ -92,7 +92,7 @@ daemon.token: トークン
 daemon.reveal_token: トークンを表示
 daemon.hide_token: トークンを隠す
 daemon.regenerate_token: 再生成
-daemon.security_warning: このトークンは、この Mac 上のタスク、ファイル、Git、添付ファイル、コーディングエージェントへの完全なアクセス権を持ちます。プライベートネットワーク外では信頼できる TLS プロキシ経由で WSS を使用してください。
+daemon.security_warning: このトークンは、この Mac 上のタスク、ファイル、Git、添付ファイル、エージェントへの完全なアクセス権を持ちます。プライベートネットワーク外では信頼できる TLS プロキシ経由で WSS を使用してください。
 daemon.external_title: 外部デーモン
 daemon.external_description: このデスクトップは Waku の外部で管理されているデーモンに接続しています。リスナー、ブラウザオリジン、トークンは接続先ホストで設定してください。
 daemon.web_external_description: Waku Web はブラウザの外部で管理されているデーモンに接続します。リスナー、ブラウザオリジン、トークンは接続先ホストで設定してください。
@@ -187,10 +187,8 @@ settings.automatic_updates_description: バックグラウンドで新しいバ�
 settings.share_anonymous_usage_data: 匿名の使用状況データを共有
 settings.share_anonymous_usage_data_description: 機能の利用状況と信頼性に関するデータを共有して、Waku の改善にご協力ください。プロンプト、回答、プロジェクト名、ファイルパスなどの個人データは一切含まれません
 
-providers.coding_agents: コーディングエージェント
 providers.description: モデルエンドポイントを直接設定します。API キーの値を Waku が表示・保存することはありません
 providers.web_description: デーモンホスト上のモデルエンドポイントを直接設定します。API キーの値を Waku が表示・保存することはありません
-providers.check_failed: "%{command} を確認できませんでした：%{error}"
 providers.catalog_models: ライブカタログのモデル
 providers.not_authenticated: 未接続
 providers.api_key_placeholder: API キーを入力（送信後に消去）
@@ -202,9 +200,6 @@ providers.open_browser: ブラウザを開く
 providers.use_device_code: デバイスコードを使う
 providers.show_settings: "%{provider} の設定を表示"
 providers.hide_settings: "%{provider} の設定を隠す"
-providers.enable: "%{provider} を有効にする"
-providers.disable: "%{provider} を無効にする"
-providers.disabled_for_new_tasks: 新規タスクでは無効
 providers.model_count_one: "%{count} 個のモデル"
 providers.model_count_many: "%{count} 個のモデル"
 common.settings: 設定
@@ -247,7 +242,7 @@ project.without_a_project: プロジェクトなし
 project.your_project: あなたのプロジェクト
 
 onboarding.open_project_to_begin: プロジェクトを開いて始めましょう
-onboarding.description: Waku は選択したフォルダでコーディングエージェントを実行します。コード、タスク、履歴はこの Mac に保存されます
+onboarding.description: Waku は選択したフォルダで組み込みエージェントを実行します。コード、タスク、履歴はこの Mac に保存されます
 onboarding.web_description: デーモンホスト上のパスを選ぶか、プロジェクトなしで開始してください。
 onboarding.open_project_folder: プロジェクトフォルダを開く…
 onboarding.what_should_we_build: 何を作りましょうか？
@@ -473,7 +468,6 @@ skills.section_user: ユーザー
 skills.source_shared: 共有
 skills.scope_user_detail: すべてのプロジェクトで利用可能
 skills.scope_in_project: "%{project} 内"
-skills.filter_all: すべてのスキル
 skills.select_placeholder: スキルを選択
 skills.detail_invoke: 呼び出し
 skills.detail_location: 場所
@@ -500,7 +494,7 @@ skills.deleted_toast: "「%{name}」をゴミ箱に移動しました"
 skills.delete_failed: "スキルを削除できませんでした：%{error}"
 skills.toggle_failed: "スキルを更新できませんでした：%{error}"
 skills.empty_title: スキルはまだありません
-skills.empty_description: スキルは SKILL.md を含むフォルダです。デプロイ手順やレビューチェックリストのように、どのエージェントでも読み込める再利用可能な指示をまとめられます。Claude Code、Codex、その他のエージェント向けにインストールされたスキルがここに表示され、/name で呼び出せます。
+skills.empty_description: スキルは SKILL.md を含むフォルダです。デプロイ手順やレビューチェックリストのように、エージェントが読み込める再利用可能な指示をまとめられます。~/.agents/skills とプロジェクトの .waku/skills にあるスキルがここに表示され、/name で呼び出せます。
 skills.library: スキルライブラリ
 skills.details: スキルの詳細
 skills.section_user_skills: ユーザースキル
@@ -510,15 +504,6 @@ skills.disable_named: "%{name} を無効にする"
 commands.init_description: このプロジェクトの %{instructions_file} を作成または更新
 commands.review_description: このブランチの保留中の変更をレビュー
 commands.commit_description: 現在の変更をステージしてコミット
-commands.fast_description: 高速モードを切り替え
-commands.fast_enabled: 高速モードを有効にしました
-commands.fast_disabled: 高速モードを無効にしました
-commands.claude_compact: 会話を要約してコンテキストを空ける
-commands.claude_context: コンテキストウインドウの使用状況を表示
-commands.claude_cost: このセッションのトークン使用量とコストを表示
-commands.claude_init: プロジェクトを分析して CLAUDE.md を作成
-commands.claude_review: プルリクエストをレビュー
-commands.claude_security_review: 保留中の変更をセキュリティレビュー
 
 composer.edit_in_composer: 入力欄で編集
 composer.steer: 指示を追加
@@ -568,7 +553,6 @@ errors.remote_project_picker: デーモンホスト上のプロジェクトを�
 session.stopped: 停止しました
 session.turn_completed: ターンが完了しました
 session.stopped_before_response: エージェントは回答を返す前に停止しました
-session.codex_exited_before_response: Codex app-server は回答を返す前に終了しました
 session.steer_rejected: エージェントに追加の指示を送れませんでした（%{error}）。メッセージはフォローアップとしてキューに追加されました
 session.steer_rejected_plain: エージェントに追加の指示を送れませんでした。メッセージはフォローアップとしてキューに追加されました
 session.agent_ran_out_of_context: このターンでエージェントのコンテキストが不足しました
@@ -577,24 +561,12 @@ session.agent_stopped_reason: "エージェントが停止しました：%{reaso
 
 errors.open_session: "そのタスクを開けませんでした：%{error}"
 errors.create_projectless_task: "~/.waku/projects 内にタスクを作成できませんでした：%{error}"
-errors.save_projectless_migration: "プロジェクトなしタスクの移行を保存できませんでした：%{error}"
-errors.move_projectless_task: "以前のルート直下のプロジェクトなしタスクを ~/.waku/projects 内に移動できませんでした：%{error}"
 errors.remote_host_path: このパスはデーモンホスト上にあるため、デスクトップアプリでは開けません
 errors.change_branch: "ブランチを変更できませんでした：%{error}"
 errors.capture_pre_turn_checkpoint: "ターン開始前のチェックポイントを取得できませんでした：%{error}"
 errors.capture_turn_checkpoint: "ターンのチェックポイントを取得できませんでした：%{error}"
 errors.save_local_state: "ローカルの状態を保存できませんでした：%{error}"
 errors.task_project_not_found: タスクのプロジェクトが見つかりませんでした
-errors.provider_native_session_unavailable: "%{provider} のネイティブセッションは利用できません"
-errors.provider_native_thread_unavailable: "%{provider} のネイティブスレッドは利用できません"
-errors.provider_native_cursor_unavailable: "%{provider} のネイティブセッションカーソルは利用できません"
-errors.provider_native_thread_cursor_unavailable: "%{provider} のネイティブスレッドカーソルは利用できません"
-errors.provider_waku_task_unavailable: "%{provider} の Waku タスクは利用できません"
-errors.provider_not_installed: "%{provider} は設定されていません"
-errors.provider_not_found: "%{provider} が見つかりません"
-errors.claude_fork_checkpoint_missing: Claude からフォーク用チェックポイントが返されませんでした
-errors.claude_turn_checkpoint_unavailable: "そのターンの Claude ネイティブチェックポイントは利用できません：%{error}"
-errors.pi_session_file_unavailable: Pi のネイティブセッションファイルは利用できません
 errors.fork_task: "タスクをフォークできませんでした：%{error}"
 errors.create_rewind_snapshot: "巻き戻し用の安全スナップショットを作成できませんでした：%{error}"
 errors.restore_checkpoint: "チェックポイントを復元できませんでした：%{error}"
@@ -626,11 +598,6 @@ errors.provider_transport_write: "%{provider} の通信への書き込みに失�
 errors.provider_transport_write_short: "%{provider} の通信への書き込みに失敗しました"
 errors.provider_transport_read: "%{provider} の通信の読み込みに失敗しました：%{error}"
 errors.provider_invalid_json: "%{provider} から無効な JSON が送信されました：%{error}"
-errors.provider_exited: "%{provider} が %{status} で終了しました"
-errors.provider_rpc_exited: "%{provider} RPC が %{status} で終了しました"
-errors.read_provider_exit_status: "%{provider} の終了ステータスを読み取れませんでした：%{error}"
-errors.initialize_provider: "%{provider} を初期化できませんでした：%{error}"
-errors.provider_no_session_id: "%{provider} からセッション ID が返されませんでした"
 errors.provider_rejected_prompt_detail: "%{provider} がプロンプトを拒否しました：%{error}"
 errors.stop_provider: "%{provider} を停止できませんでした：%{error}"
 errors.switch_provider_model: "%{provider} のモデルを切り替えられませんでした：%{error}"
@@ -640,16 +607,12 @@ errors.select_model: "モデルを選択できませんでした：%{error}"
 errors.read_provider_event_stream: "%{provider} のイベントストリームを読み取れませんでした：%{error}"
 errors.answer_provider_permission: "%{provider} の権限リクエストに回答できませんでした：%{error}"
 errors.answer_provider_question: "%{provider} の質問に回答できませんでした：%{error}"
-errors.initialize_codex_app_server: Codex app-server を初期化できませんでした
-errors.codex_thread_open_incomplete: Codex はスレッドを開く処理を完了しませんでした
-errors.provider_receive_prompt: "%{provider} はプロンプトを受信できませんでした"
 errors.provider_start_turn: "%{provider} はターンを開始できませんでした"
 errors.provider_rejected_steer: "%{provider} が追加の指示を拒否しました：%{error}"
 errors.provider_stopped_receiving: "%{provider} はメッセージの受信を停止しました"
 errors.provider_initialize_session: "%{provider} はこのセッションを初期化できませんでした"
 errors.provider_rejected_prompt: "%{provider} は実行前にプロンプトを拒否しました"
 errors.provider_complete_turn: "%{provider} はこのターンを完了できませんでした"
-errors.pi_reported_error: Pi からエラーが報告されました
 
 session.response_unavailable: その回答は利用できなくなりました
 session.response_cannot_fork: その回答からは現在タスクをフォークできません
@@ -706,7 +669,7 @@ commit.pushing: プッシュ中…
 commit.no_task: コミットできるタスクがありません
 commit.no_workspace: このタスクにはワークスペースがありません
 commit.no_changes: コミットする変更はありません
-commit.agent_unavailable: 現在のエージェント CLI を利用できないため、コミットメッセージを生成できません
+commit.agent_unavailable: 現在のエージェントを利用できないため、コミットメッセージを生成できません
 commit.committed: 変更をコミットしました
 commit.committed_and_pushed: 変更をコミットしてプッシュしました
 commit.pushed: 変更をプッシュしました

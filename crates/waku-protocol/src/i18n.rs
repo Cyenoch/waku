@@ -198,8 +198,8 @@ mod tests {
             "New task"
         );
         assert_eq!(
-            &*rust_i18n::t!("providers.disabled_for_new_tasks", locale = "en"),
-            "Disabled for new tasks"
+            &*rust_i18n::t!("errors.task_not_found", locale = "en"),
+            "Task not found"
         );
     }
 }

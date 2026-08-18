@@ -106,10 +106,6 @@ impl DriverHandle {
         self.inner.replace_auth(auth, extra_auth_headers)
     }
 
-    pub fn rollback(&self, turns: usize) -> anyhow::Result<()> {
-        self.inner.rewind(turns)
-    }
-
     pub fn snapshot(&self) -> anyhow::Result<waku_harness::SessionSnapshot> {
         self.inner.snapshot()
     }
@@ -164,6 +160,33 @@ pub(crate) fn start_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{InteractionMode, RuntimeMode};
+    use std::time::{Duration, Instant};
+    use waku_protocol::{ModelCapabilities, ProviderPreset};
+
+    fn start_options(preset: ProviderPreset) -> DriverStartOptions {
+        let format = preset.default_format();
+        DriverStartOptions {
+            provider: preset.endpoint(),
+            cwd: std::env::temp_dir(),
+            mode: RuntimeMode::Ask,
+            interaction_mode: InteractionMode::Build,
+            model: Some(preset.default_model().to_owned()),
+            reasoning_effort: None,
+            service_tier: None,
+            context_window: None,
+            auth: waku_harness::Auth::Bearer("test".into()),
+            transport: preset.transport(),
+            extra_auth_headers: Vec::new(),
+            capabilities: match preset {
+                ProviderPreset::OpenAiCodex => ModelCapabilities::codex(),
+                ProviderPreset::Anthropic => ModelCapabilities::anthropic(),
+                ProviderPreset::Xai | ProviderPreset::XaiOauth => ModelCapabilities::xai(false),
+                _ => ModelCapabilities::openai_compatible(format),
+            },
+            snapshot: waku_harness::Session::new(None).snapshot(),
+        }
+    }
 
     #[test]
     fn provider_events_coalesce_wakes_without_dropping_payloads() {
@@ -180,5 +203,48 @@ mod tests {
         ));
         assert!(matches!(received.try_recv(), Ok(DriverEvent::TextDelta(text)) if text == "one"));
         assert!(matches!(received.try_recv(), Ok(DriverEvent::TextDelta(text)) if text == "two"));
+    }
+
+    #[test]
+    fn every_preset_constructs_an_embedded_driver_never_a_provider_binary() {
+        for preset in ProviderPreset::ALL {
+            let (events, received) = test_event_channel();
+            let handle = start_local(preset.provider_id(), start_options(preset), events)
+                .unwrap_or_else(|error| {
+                    let rendered = error.to_string();
+                    assert!(
+                        !rendered.contains("installed")
+                            && !rendered.contains("尚未安装")
+                            && !rendered.contains("could not be found")
+                            && !rendered.contains("not found"),
+                        "{} used a binary/install path: {rendered}",
+                        preset.id()
+                    );
+                    panic!(
+                        "{} must construct the embedded driver: {rendered}",
+                        preset.id()
+                    );
+                });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match received.recv_timeout(remaining) {
+                    Ok(DriverEvent::Connected) => break,
+                    Ok(DriverEvent::Error(error)) => {
+                        assert!(
+                            !error.contains("installed")
+                                && !error.contains("尚未安装")
+                                && !error.contains("could not be found"),
+                            "{} used a binary/install path: {error}",
+                            preset.id()
+                        );
+                        panic!("{} failed after start: {error}", preset.id());
+                    }
+                    Ok(_) => {}
+                    Err(_) => panic!("{} never emitted Connected", preset.id()),
+                }
+            }
+            drop(handle);
+        }
     }
 }

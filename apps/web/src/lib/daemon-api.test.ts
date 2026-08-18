@@ -1,5 +1,6 @@
 import { activeAuthPhase, isActiveAuthPhase, isAllowedExternalUrl } from '@/components/settings-view'
-import { explicitModelFallback } from '@/components/model-picker'
+import { explicitModelFallback, resolvedSessionModel } from '@/components/model-picker'
+import { authStatusPollIntervalMs } from '@/lib/daemon-api'
 import { describe, expect, test } from 'bun:test'
 import type { ComposerDraftChange, Project, WakuClient } from '@waku/client'
 import {
@@ -70,6 +71,16 @@ describe('web auth and catalog guards', () => {
     expect(activeAuthPhase([completed, failed], 'xai')).toBeNull()
   })
 
+  test('polls only while a browser or device phase is active', () => {
+    const awaiting = { type: 'awaitingDevice', loginId: 'login', provider: 'xai-oauth', userCode: 'ABCD', verificationUrl: 'https://example.test', instructions: 'code' } as const
+    const completed = { type: 'completed', loginId: 'login', provider: 'xai-oauth' } as const
+    const apiKey = { type: 'awaitingApiKey', loginId: 'login', provider: 'xai', instructions: 'key' } as const
+    expect(authStatusPollIntervalMs([awaiting])).toBe(1_000)
+    expect(authStatusPollIntervalMs([completed])).toBe(false)
+    expect(authStatusPollIntervalMs([apiKey])).toBe(false)
+    expect(authStatusPollIntervalMs([])).toBe(false)
+  })
+
   test('only allows secure external URLs and localhost HTTP fixtures', () => {
     expect(isAllowedExternalUrl('https://auth.example.test/callback')).toBe(true)
     expect(isAllowedExternalUrl('http://localhost:3000/callback')).toBe(true)
@@ -90,11 +101,18 @@ describe('web auth and catalog guards', () => {
     expect(explicitModelFallback('openai-chat', provider, { isError: true, isFetched: true })).toHaveLength(0)
     expect(explicitModelFallback('custom', provider, { isError: false, isFetched: true, data: { provider: 'custom' } })).toHaveLength(0)
   })
+
+  test('does not keep a Go model on a SuperGrok session', () => {
+    const grok = { id: 'grok-4.5', name: 'Grok 4.5', supported: true, unsupportedReason: null, capabilities: { serviceTier: false, reasoningEffort: true, reasoningSummary: false, sampling: false }, apiFormat: 'openAiResponses' as const, source: 'live' as const }
+    expect(resolvedSessionModel('kimi-k2.7-code', [grok], 'grok-4.5')).toBe('grok-4.5')
+    expect(resolvedSessionModel('grok-4.5', [grok], 'grok-4.5')).toBe('grok-4.5')
+    expect(resolvedSessionModel('kimi-k2.7-code', [], 'grok-4.5')).toBeUndefined()
+  })
 })
 
 describe('beginTurn', () => {
   test('puts the submitted prompt in the transcript before runtime startup', () => {
-    const draft = createSession('project', 'codex', false)
+    const draft = createSession('project', 'openai-codex', false)
     const active = beginTurn(draft, 'Build the feature')
 
     expect(active.status).toBe('connecting')
@@ -311,7 +329,7 @@ describe('persistProject', () => {
 
 describe('persistSession', () => {
   test('checkpoints one session without reloading or replacing the catalog', async () => {
-    const saved = createSession('project', 'codex', false)
+    const saved = createSession('project', 'openai-codex', false)
     const commands: unknown[] = []
     const client = {
       request: async (command: unknown) => {

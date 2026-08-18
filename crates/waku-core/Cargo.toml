@@ -49,8 +49,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSLocale",
     "NSString",
 ] }
-security-framework = "3"
 
 [dev-dependencies]
 waku-client = { path = "../waku-client" }
+waku-harness = { path = "../waku-harness" }
 waku-provider = { path = "../waku-provider" }

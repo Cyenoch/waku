@@ -1,6 +1,7 @@
 use super::composer::{
     ComposerSubmitAction, composer_submit_action, dropped_file_mention, merged_submission,
-    next_picker_highlight, visible_branch_entries,
+    model_picker_list_height, next_model_picker_highlight, next_picker_highlight,
+    visible_branch_entries,
 };
 use super::runtime::merge_remote_session_catalog;
 use super::settings::visible_settings_pages;
@@ -55,7 +56,7 @@ fn attach_changed_files(session: &mut AgentSession, files: Vec<CheckpointFile>) 
 #[test]
 fn remote_task_catalog_adds_web_tasks_without_replacing_hydrated_detail() {
     let project_id = Uuid::new_v4();
-    let mut local = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut local = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     local.title = "Local title".into();
     local
         .messages
@@ -67,7 +68,8 @@ fn remote_task_catalog_adds_web_tasks_without_replacing_hydrated_detail() {
     local_projection.status = SessionStatus::Waiting;
     local_projection.updated_at += 10;
 
-    let mut web_task = AgentSession::new(project_id, ProviderId::new("claude")).list_projection();
+    let mut web_task =
+        AgentSession::new(project_id, ProviderId::new(ProviderId::ANTHROPIC)).list_projection();
     web_task.title = "Created in Web".into();
     let web_task_id = web_task.id;
 
@@ -389,7 +391,7 @@ fn conversation_navigation_active_turn_follows_the_scroll_top_and_tail() {
 #[test]
 fn conversation_navigation_preview_uses_each_prompt_and_latest_response() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut session = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     session.begin_turn("  First\n\nprompt  ");
     session.push_message(MessageRole::Assistant, "Interim update");
     session.push_message(MessageRole::Assistant, "Final answer");
@@ -414,7 +416,7 @@ fn conversation_navigation_preview_uses_each_prompt_and_latest_response() {
 #[test]
 fn conversation_navigation_preview_does_not_change_during_a_running_turn() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut session = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     let session_id = session.id;
     session.begin_turn("Streaming prompt");
     append_text_delta_to_session(
@@ -571,7 +573,7 @@ fn pending_expansion_reasserts_the_user_message_anchor() {
 
 #[test]
 fn settling_an_anchored_turn_splices_without_resetting_its_prompt() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     session.begin_turn("hi");
     session.push_message(MessageRole::Assistant, "Hello.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -692,11 +694,11 @@ fn stream_batches_commit_full_adjacent_text_and_preserve_event_order() {
 #[test]
 fn stream_parts_keep_targeting_the_running_session_after_selection_changes() {
     let project_id = uuid::Uuid::new_v4();
-    let mut running = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut running = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     running.begin_turn("background task");
     running.status = SessionStatus::Working;
     let running_id = running.id;
-    let visible = AgentSession::new(project_id, ProviderId::new("claude"));
+    let visible = AgentSession::new(project_id, ProviderId::new(ProviderId::ANTHROPIC));
     let visible_id = visible.id;
     let mut sessions = vec![running, visible];
 
@@ -714,7 +716,7 @@ fn stream_parts_keep_targeting_the_running_session_after_selection_changes() {
 
 #[test]
 fn reasoning_and_tools_share_one_ordered_activity_block() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     session.begin_turn("Build it");
 
     push_transcript_activity(
@@ -772,24 +774,24 @@ fn idle_reaping_releases_finished_sessions_but_never_a_running_turn() {
     let fresh = Duration::from_secs(60);
     let stale = Duration::from_secs(60 * 60);
 
-    let idle = AgentSession::new(project_id, ProviderId::new("codex"));
+    let idle = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     assert!(session_is_reapable(Some(&idle), stale, false));
     assert!(!session_is_reapable(Some(&idle), fresh, false));
     assert!(!session_is_reapable(Some(&idle), stale, true));
 
-    let mut working = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut working = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     working.begin_turn("a long tool call");
     working.status = SessionStatus::Working;
     assert!(!session_is_reapable(Some(&working), stale, false));
 
     // An approval can sit unanswered far longer than the idle window; its agent
     // is blocked on the user, not abandoned.
-    let mut waiting = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut waiting = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     waiting.begin_turn("needs approval");
     waiting.status = SessionStatus::Waiting;
     assert!(!session_is_reapable(Some(&waiting), stale, false));
 
-    let mut failed = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut failed = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     failed.begin_turn("failed turn");
     failed.finish_active_turn(TurnStatus::Failed);
     failed.status = SessionStatus::Failed;
@@ -895,7 +897,7 @@ fn splicing_one_row_in_place_preserves_the_list() {
 #[test]
 fn row_kinds_and_row_count_describe_the_same_rows() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut session = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     let turn_id = session.begin_turn("Build it");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -942,7 +944,7 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
 
 #[test]
 fn changed_files_attach_to_the_terminal_response_before_its_footer() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     let first_turn = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -971,7 +973,7 @@ fn changed_files_attach_to_the_terminal_response_before_its_footer() {
 
 #[test]
 fn changed_files_remain_visible_when_an_interrupted_turn_has_no_answer() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     let turn_id = session.begin_turn("Make the change");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1014,7 +1016,7 @@ fn changed_files_remain_visible_when_an_interrupted_turn_has_no_answer() {
 
 #[test]
 fn changed_files_surface_appears_only_for_a_ready_nonempty_checkpoint() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     let turn_id = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -1053,7 +1055,7 @@ fn changed_files_surface_appears_only_for_a_ready_nonempty_checkpoint() {
 
 #[test]
 fn checkpoint_completion_invalidates_the_cached_transcript_rows() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     let turn_id = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -1100,7 +1102,7 @@ fn an_inline_checkpoint_keeps_followup_row_identity() {
 /// reasoning block and tool activity from the session.
 #[test]
 fn the_row_fingerprint_moves_whenever_the_fold_does() {
-    let mut base = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut base = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     let turn_id = base.begin_turn("Build it");
     base.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1213,7 +1215,7 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
 #[test]
 fn a_settled_turn_folds_all_of_its_work_above_the_answer() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut session = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     let turn_id = session.begin_turn("Build it");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1268,7 +1270,7 @@ fn a_settled_turn_folds_all_of_its_work_above_the_answer() {
 /// work between them, so they are all answer and none of them folds.
 #[test]
 fn consecutive_trailing_text_parts_all_stay_out_of_the_fold() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     let turn_id = session.begin_turn("Build it");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1296,7 +1298,7 @@ fn consecutive_trailing_text_parts_all_stay_out_of_the_fold() {
 /// so the whole turn folds behind its summary rather than spilling raw work.
 #[test]
 fn a_turn_without_an_answer_folds_completely() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     let turn_id = session.begin_turn("Build it");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1326,7 +1328,7 @@ fn a_turn_without_an_answer_folds_completely() {
 #[test]
 fn assistant_response_footer_is_owned_by_the_terminal_part_and_copies_the_visible_answer() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut session = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     let turn_id = session.begin_turn("Build it");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1380,7 +1382,7 @@ fn assistant_response_footer_is_owned_by_the_terminal_part_and_copies_the_visibl
 /// the text before it, so the copied message must leave that text out too.
 #[test]
 fn assistant_response_footer_treats_a_blank_part_as_work() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     let turn_id = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "First text part.");
     session.push_message(MessageRole::Assistant, "  ");
@@ -1400,7 +1402,7 @@ fn assistant_response_footer_treats_a_blank_part_as_work() {
 #[test]
 fn running_assistant_response_withholds_its_footer() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut session = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     session.begin_turn("Keep going");
     session.push_message(MessageRole::Assistant, "Interim text.");
 
@@ -1411,7 +1413,7 @@ fn running_assistant_response_withholds_its_footer() {
 #[test]
 fn unkeyed_assistant_message_keeps_a_standalone_footer() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut session = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     session
         .messages
         .push(Message::new(MessageRole::Assistant, "Standalone response."));
@@ -1450,7 +1452,7 @@ fn turn_fold_visibility_splice_preserves_surrounding_message_rows() {
 #[test]
 fn running_turn_keeps_its_ordered_work_visible() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut session = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     let turn_id = session.begin_turn("Keep going");
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
@@ -1475,7 +1477,7 @@ fn running_turn_keeps_its_ordered_work_visible() {
 #[test]
 fn plain_settled_response_does_not_add_an_empty_work_fold() {
     let project_id = Uuid::new_v4();
-    let mut session = AgentSession::new(project_id, ProviderId::new("codex"));
+    let mut session = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
     session.begin_turn("Answer directly");
     session.push_message(MessageRole::Assistant, "The answer.");
     session.finish_active_turn(TurnStatus::Completed);
@@ -1506,7 +1508,7 @@ fn sidebar_time_labels_prefer_the_live_turn_over_the_last_reply() {
     assert_eq!(format_time_ago(420 * 86_400), "420d");
 
     // Never replied, nothing running: the row stays quiet.
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     assert_eq!(session_time_label(&session, 1_000), None);
 
     // A live turn counts up instead of showing the previous reply's age.
@@ -1536,7 +1538,7 @@ fn time_label_wakes_land_exactly_on_label_boundaries() {
 
     // Nothing on the clock: no sessions, or none that ever replied.
     assert_eq!(next_time_label_change(&[], 1_000), None);
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     assert_eq!(
         next_time_label_change(std::slice::from_ref(&session), 1_000),
         None
@@ -1560,7 +1562,7 @@ fn time_label_wakes_land_exactly_on_label_boundaries() {
     );
 
     // The earliest boundary across sessions wins.
-    let mut fresher = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut fresher = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     fresher.last_reply_at = Some(1_000 + 2 * 86_400 + 3_550);
     let sessions = [&sessions[0], &fresher]
         .into_iter()
@@ -1572,7 +1574,7 @@ fn time_label_wakes_land_exactly_on_label_boundaries() {
     );
 
     // A live turn pins the chain to seconds for its elapsed counter.
-    let mut busy = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut busy = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     busy.begin_turn("go");
     busy.status = SessionStatus::Working;
     let sessions = [busy];
@@ -1595,7 +1597,7 @@ fn working_elapsed_stays_compact() {
 /// permission pause — and gone the moment the session stops being busy.
 #[test]
 fn a_busy_turn_pins_the_working_indicator_after_the_last_row() {
-    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new("codex"));
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::OPENAI_CODEX));
     session.begin_turn("Build it");
     session.status = SessionStatus::Working;
 
@@ -1664,6 +1666,22 @@ fn model_picker_highlight_wraps_at_both_ends() {
 }
 
 #[test]
+fn long_model_catalog_list_height_is_capped() {
+    assert_eq!(model_picker_list_height(2), 68.0);
+    assert_eq!(model_picker_list_height(25), 260.0);
+    assert!(model_picker_list_height(25) < 25.0 * 34.0);
+}
+
+#[test]
+fn model_picker_home_end_jump_across_a_long_catalog() {
+    assert_eq!(next_model_picker_highlight(Some(8), 25, "home"), Some(0));
+    assert_eq!(next_model_picker_highlight(Some(8), 25, "end"), Some(24));
+    assert_eq!(next_model_picker_highlight(Some(24), 25, "down"), Some(0));
+    assert_eq!(next_model_picker_highlight(None, 25, "up"), Some(24));
+    assert_eq!(next_model_picker_highlight(None, 0, "home"), None);
+}
+
+#[test]
 fn settings_search_filters_pages_for_arrow_cycling() {
     use super::SettingsPage;
 
@@ -1689,8 +1707,8 @@ fn settings_search_filters_pages_for_arrow_cycling() {
     assert_eq!(pages("skill"), vec![SettingsPage::Skills]);
 
     // A keyword shared across pages keeps them all reachable.
-    let usage_pages = vec![SettingsPage::Skills, SettingsPage::Usage];
-    assert_eq!(pages("codex"), usage_pages);
+    let model_pages = vec![SettingsPage::Providers, SettingsPage::Usage];
+    assert_eq!(pages("model"), model_pages);
     assert_eq!(pages("endpoint"), vec![SettingsPage::Providers]);
 
     assert_eq!(pages("no such setting"), vec![]);
@@ -1701,9 +1719,8 @@ fn configured_provider_models_are_visible_and_searchable() {
     use super::ModelPickerTab;
     use super::composer::visible_picker_models;
     use crate::model::{ExternalProvider, FavoriteModel};
-    use std::collections::HashMap;
     let mut claude = ExternalProvider::new(
-        "claude",
+        "corp-anthropic",
         "Claude",
         "https://example.test",
         Default::default(),
@@ -1711,7 +1728,7 @@ fn configured_provider_models_are_visible_and_searchable() {
     );
     claude.models = vec!["claude-sonnet-5".into(), "claude-haiku".into()];
     let codex = ExternalProvider::new(
-        "codex",
+        "corp-codex",
         "Codex",
         "https://example.test",
         Default::default(),
@@ -1719,22 +1736,21 @@ fn configured_provider_models_are_visible_and_searchable() {
     );
     let providers = [claude, codex];
     let favorites = [FavoriteModel {
-        provider: ProviderId::new("claude"),
+        provider: ProviderId::new("corp-anthropic"),
         model: "claude-haiku".into(),
     }];
-    let catalogs = HashMap::new();
     let models = visible_picker_models(
         &providers,
-        &catalogs,
+        &std::collections::HashMap::new(),
         &favorites,
         None,
-        &ModelPickerTab::Provider(ProviderId::new("claude")),
+        &ModelPickerTab::Provider(ProviderId::new("corp-anthropic")),
         "",
     );
     assert_eq!(models.len(), 2);
     let models = visible_picker_models(
         &providers,
-        &catalogs,
+        &std::collections::HashMap::new(),
         &favorites,
         None,
         &ModelPickerTab::Favorites,

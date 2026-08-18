@@ -2,6 +2,7 @@ import { useQueries, useQuery } from '@tanstack/react-query'
 import type { ModelCatalog, ProviderId } from '@waku/client'
 import { useDaemon } from '@/lib/daemon-context'
 import {
+  authStatusPollIntervalMs,
   daemonKeys,
   discoverComposerCommands,
   hydrateSession,
@@ -115,7 +116,7 @@ export function useProviderAuth(provider?: ProviderId) {
     queryKey: daemonKeys.auth(config?.address ?? 'disconnected', provider),
     queryFn: () => loadAuthStatus(requireClient(client), provider),
     enabled: phase === 'connected' && Boolean(client && config),
-    refetchInterval: (query) => query.state.data?.phases.length ? 1_000 : false,
+    refetchInterval: (query) => authStatusPollIntervalMs(query.state.data?.phases ?? []),
   })
 }
 

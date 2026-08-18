@@ -75,8 +75,8 @@ const PROVIDER_SERIES_RGB: [u32; 8] = [
 
 pub fn provider_series_rgb(provider: &ProviderId) -> u32 {
     let slot = match provider.as_str().to_ascii_lowercase().as_str() {
-        "anthropic" | "claude" => 0,
-        "openai-responses" | "openai" => 1,
+        "anthropic" => 0,
+        "openai-responses" => 1,
         "xai" => 2,
         "opencode-zen" => 3,
         "opencode-go" => 4,

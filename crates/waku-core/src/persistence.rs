@@ -140,7 +140,7 @@ impl ComposerDraftStore {
     }
 
     /// Apply only the drafts a client actually changed. The mutation and
-    /// atomic file replacement share the same lock as legacy snapshot writes,
+    /// atomic file replacement share the same lock as snapshot writes,
     /// so concurrent clients cannot clobber unrelated draft keys.
     pub fn apply_changes(&self, changes: Vec<ComposerDraftChange>) -> io::Result<()> {
         if changes.is_empty() {
@@ -502,21 +502,6 @@ impl PersistedState {
     }
 
     fn migrate_loaded(&mut self) {
-        for session in &mut self.sessions {
-            let checkpoint_totals_current = session.turns.iter().all(|turn| {
-                turn.checkpoint
-                    .as_ref()
-                    .is_none_or(crate::model::Checkpoint::totals_are_current)
-            });
-            let before = (session.turns.len(), session.last_reply_at);
-            session.migrate_legacy_state();
-            session.backfill_last_reply_at();
-            // Migration rewrote this session, so the stored row is stale.
-            if !checkpoint_totals_current || before != (session.turns.len(), session.last_reply_at)
-            {
-                self.dirty_sessions.insert(session.id);
-            }
-        }
         self.version = STATE_VERSION;
         self.backfill_remembered_selection();
     }
@@ -812,8 +797,6 @@ pub struct StateStore {
     /// Desktop-owned preferences. Debug stays isolated in the checkout while
     /// Release uses the explicit cross-client Waku configuration directory.
     app_settings_path: PathBuf,
-    /// Read-only migration sources for the former combined settings document.
-    legacy_settings_paths: Vec<PathBuf>,
     storage: Mutex<Option<Storage>>,
     blobs: Arc<BlobStore>,
     desktop_files: bool,
@@ -848,18 +831,12 @@ impl StateStore {
         let configuration_directory = dirs::home_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join(".waku");
-        let (app_settings_path, legacy_settings_paths) = if cfg!(debug_assertions) {
-            (
-                directory.join("app.json"),
-                vec![directory.join("settings.json")],
-            )
+        let app_settings_path = if cfg!(debug_assertions) {
+            directory.join("app.json")
         } else {
-            (
-                configuration_directory.join("app.json"),
-                vec![configuration_directory.join("settings.json")],
-            )
+            configuration_directory.join("app.json")
         };
-        Self::with_settings_paths(path, app_settings_path, legacy_settings_paths)
+        Self::with_settings_paths(path, app_settings_path)
     }
 
     /// Local database owner used inside `waku-daemon`. It never reads or
@@ -870,18 +847,13 @@ impl StateStore {
         store
     }
 
-    fn with_settings_paths(
-        path: PathBuf,
-        app_settings_path: PathBuf,
-        legacy_settings_paths: Vec<PathBuf>,
-    ) -> Self {
+    fn with_settings_paths(path: PathBuf, app_settings_path: PathBuf) -> Self {
         let directory = path.parent().unwrap_or_else(|| Path::new(".")).to_owned();
         let root = directory.join("blobs");
         let blobs = Arc::new(BlobStore::new(root));
         Self {
             app_state_path: directory.join("state.json"),
             app_settings_path,
-            legacy_settings_paths,
             path,
             storage: Mutex::new(None),
             blobs,
@@ -909,6 +881,25 @@ impl StateStore {
 
     pub fn set_harness_snapshot(&self, id: uuid::Uuid, snapshot: waku_harness::SessionSnapshot) {
         self.harness_snapshots.lock().insert(id, snapshot);
+    }
+
+    /// Memory first, then the durable `session_details` row. Start may upsert a
+    /// client-owned transcript without hydrating; that must not invent an empty
+    /// snapshot over a stored provider conversation.
+    pub fn load_harness_snapshot(
+        &self,
+        id: uuid::Uuid,
+    ) -> io::Result<Option<waku_harness::SessionSnapshot>> {
+        if let Some(snapshot) = self.harness_snapshot(id) {
+            return Ok(Some(snapshot));
+        }
+        let Some(snapshot) =
+            self.with_connection(|connection| existing_harness_snapshot(connection, id))?
+        else {
+            return Ok(None);
+        };
+        self.harness_snapshots.lock().insert(id, snapshot.clone());
+        Ok(Some(snapshot))
     }
 
     /// Insert a billed usage event. `INSERT OR IGNORE` so journal replay and
@@ -1071,30 +1062,13 @@ impl StateStore {
     }
 
     fn read_app_settings(&self) -> io::Result<Option<AppSettings>> {
-        let source = match fs::read(&self.app_settings_path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let mut migrated = None;
-                for path in &self.legacy_settings_paths {
-                    match fs::read(path) {
-                        Ok(bytes) => {
-                            migrated = Some(bytes);
-                            break;
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error),
-                    }
-                }
-                migrated
-            }
-            Err(error) => return Err(error),
-        };
-        let Some(bytes) = source else {
-            return Ok(None);
-        };
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(to_io_error)
+        match fs::read(&self.app_settings_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(to_io_error),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn read_app_state(&self) -> io::Result<Option<AppState>> {
@@ -1293,7 +1267,6 @@ impl StateStore {
             return Ok(());
         };
         let mut document: serde_json::Value = serde_json::from_str(&data).map_err(to_io_error)?;
-        waku_protocol::model::migrate_legacy_session_fields(&mut document);
         if let Some(snapshot) = document
             .as_object_mut()
             .and_then(|object| object.remove("harnessSnapshot"))
@@ -1918,11 +1891,7 @@ mod tests {
     }
 
     fn store_in(directory: &Path) -> StateStore {
-        StateStore::with_settings_paths(
-            directory.join("app.db"),
-            directory.join("app.json"),
-            vec![directory.join("settings.json")],
-        )
+        StateStore::with_settings_paths(directory.join("app.db"), directory.join("app.json"))
     }
 
     /// `load` returns list-only sessions by design; tests that assert on
@@ -1996,33 +1965,6 @@ mod tests {
         assert!(settings.get("analytics_id").is_none());
         assert_eq!(app_state["analytics_id"], restored.analytics_id.to_string());
         assert!(app_state.get("analytics_enabled").is_none());
-
-        fs::remove_dir_all(directory).ok();
-    }
-
-    #[test]
-    fn legacy_combined_settings_migrate_app_fields_without_claiming_daemon_fields() {
-        let directory = temporary_directory();
-        fs::create_dir_all(&directory).unwrap();
-        let legacy_path = directory.join("settings.json");
-        let legacy = r#"{
-            "theme": "dark",
-            "analytics_enabled": false,
-            "computer_use_enabled": true,
-            "disabled_providers": ["claude"]
-        }"#;
-        fs::write(&legacy_path, legacy).unwrap();
-
-        let restored = store_in(&directory).load().unwrap();
-        assert_eq!(restored.theme, ThemePreference::Dark);
-        assert!(!restored.analytics_enabled);
-
-        let app: serde_json::Value =
-            serde_json::from_slice(&fs::read(directory.join("app.json")).unwrap()).unwrap();
-        assert_eq!(app["theme"], "dark");
-        assert!(app.get("computer_use_enabled").is_none());
-        assert!(app.get("disabled_providers").is_none());
-        assert_eq!(fs::read_to_string(legacy_path).unwrap(), legacy);
 
         fs::remove_dir_all(directory).ok();
     }
@@ -2531,10 +2473,6 @@ mod tests {
                 .unwrap();
             assert!(path.starts_with(checkout));
             assert_eq!(store.app_settings_path, path.with_file_name("app.json"));
-            assert_eq!(
-                store.legacy_settings_paths,
-                [path.with_file_name("settings.json")]
-            );
         }
         #[cfg(not(debug_assertions))]
         {
@@ -2545,10 +2483,6 @@ mod tests {
             assert_eq!(
                 store.app_settings_path,
                 configuration_directory.join("app.json")
-            );
-            assert_eq!(
-                store.legacy_settings_paths,
-                [configuration_directory.join("settings.json")]
             );
         }
     }
@@ -2802,12 +2736,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["theme"], "light");
         assert_eq!(value["language"], "simplified-chinese");
-        for daemon_key in [
-            "computer_use_enabled",
-            "computer_use_allowed_apps",
-            "disabled_providers",
-            "provider_binary_overrides",
-        ] {
+        for daemon_key in ["computer_use_enabled", "computer_use_allowed_apps"] {
             assert!(
                 value.get(daemon_key).is_none(),
                 "{daemon_key} leaked into app.json"
@@ -2846,8 +2775,6 @@ mod tests {
             "language",
             "computer_use_enabled",
             "computer_use_allowed_apps",
-            "disabled_providers",
-            "provider_binary_overrides",
         ] {
             assert!(
                 app_state.get(setting_key).is_none(),
@@ -2982,7 +2909,7 @@ mod tests {
                     id, project_id, title, provider, model, status,
                     created_at, updated_at, last_reply_at
                  ) VALUES('session-1', 'project-1', 'Investigate the parser',
-                          'codex', NULL, 'idle', 1, 1, NULL)",
+                          'openai-codex', NULL, 'idle', 1, 1, NULL)",
                 [],
             )
             .unwrap();
@@ -3283,37 +3210,6 @@ mod tests {
         assert!(session.last_reply_at >= Some(replied_at));
         session.finish_active_turn(crate::model::TurnStatus::Failed);
         assert!(session.last_reply_at >= Some(replied_at));
-    }
-
-    #[test]
-    fn last_reply_at_is_derived_for_sessions_stored_without_it() {
-        let mut session = AgentSession::new(
-            Uuid::new_v4(),
-            ProviderId::new(ProviderId::OPENAI_RESPONSES),
-        );
-        session.begin_turn("Ask");
-        session.finish_active_turn(crate::model::TurnStatus::Completed);
-        let completed_at = session.turns.last().unwrap().completed_at.unwrap();
-
-        // Drop the field, as a session written before it existed would be.
-        session.last_reply_at = None;
-        session.backfill_last_reply_at();
-        assert_eq!(session.last_reply_at, Some(completed_at));
-
-        // A session that never ran has nothing to derive.
-        let mut fresh = AgentSession::new(
-            Uuid::new_v4(),
-            ProviderId::new(ProviderId::OPENAI_RESPONSES),
-        );
-        fresh.backfill_last_reply_at();
-        assert!(fresh.last_reply_at.is_none());
-
-        // A running legacy turn still has submission activity to recover.
-        fresh.begin_turn("Ask");
-        let started_at = fresh.turns.last().unwrap().started_at;
-        fresh.last_reply_at = None;
-        fresh.backfill_last_reply_at();
-        assert_eq!(fresh.last_reply_at, Some(started_at));
     }
 
     #[test]
@@ -3828,30 +3724,5 @@ mod tests {
         assert!(state.projects.is_empty());
         assert!(state.selected_session.is_none());
         fs::remove_dir_all(directory).ok();
-    }
-    #[test]
-    fn legacy_runtime_mode_json_migrates_plan_and_auto() {
-        let mut plan = serde_json::json!({"runtimeMode":"plan","interactionMode":"build"});
-        waku_protocol::model::migrate_legacy_session_fields(&mut plan);
-        assert_eq!(plan["runtimeMode"], "ask");
-        assert_eq!(plan["interactionMode"], "plan");
-
-        let mut auto = serde_json::json!({"runtimeMode":"auto"});
-        waku_protocol::model::migrate_legacy_session_fields(&mut auto);
-        assert_eq!(auto["runtimeMode"], "ask");
-
-        let mut missing = serde_json::json!({"title":"t"});
-        waku_protocol::model::migrate_legacy_session_fields(&mut missing);
-        assert_eq!(missing["runtimeMode"], "ask");
-
-        assert!(
-            serde_json::from_value::<waku_protocol::model::RuntimeMode>(serde_json::json!("plan"))
-                .is_err()
-        );
-        assert_eq!(
-            serde_json::from_value::<waku_protocol::model::RuntimeMode>(serde_json::json!("ask"))
-                .unwrap(),
-            waku_protocol::model::RuntimeMode::Ask
-        );
     }
 }

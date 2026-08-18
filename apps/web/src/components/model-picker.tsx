@@ -47,6 +47,17 @@ export function explicitModelFallback(
   return endpointModels(configured)
 }
 
+export function resolvedSessionModel(
+  sessionModel: string | null | undefined,
+  models: readonly { id: string; supported: boolean }[],
+  defaultModel?: string,
+): string | undefined {
+  const requested = sessionModel?.trim()
+  if (requested && models.some((model) => model.id === requested && model.supported)) return requested
+  if (defaultModel && models.some((model) => model.id === defaultModel && model.supported)) return defaultModel
+  return models.find((model) => model.supported)?.id
+}
+
 export function ModelPicker({
   session,
   openSignal,
@@ -87,13 +98,19 @@ export function ModelPicker({
   const currentCatalog = catalogs.get(session.provider)
   const currentQuery = catalogQueries[providerEntries.findIndex((provider) => provider.id === session.provider)]
   const currentModels = currentCatalog?.models ?? explicitModelFallback(session.provider, currentProvider, currentQuery)
-  const selectedModelId = session.model ?? currentProvider?.defaultModel ?? currentModels[0]?.id
+  const selectedModelId = resolvedSessionModel(session.model, currentModels, currentProvider?.defaultModel)
   const selectedModel = currentModels.find((model) => model.id === selectedModelId)
-  const selectedName = `${providerEntries.find((provider) => provider.id === session.provider)?.name ?? providerMeta(session.provider).name} · ${selectedModel?.name ?? selectedModelId ?? t('models.none_reported')}`
+  const selectedName = selectedModelId
+    ? `${providerEntries.find((provider) => provider.id === session.provider)?.name ?? providerMeta(session.provider).name} · ${selectedModel?.name ?? selectedModelId}`
+    : (providerEntries.find((provider) => provider.id === session.provider)?.name ?? providerMeta(session.provider).name)
   const lockedProvider = session.messages.length ? session.provider : null
 
   useEffect(() => { if (!openSignal) return; setOpen(true); onOpenSignalHandled?.() }, [onOpenSignalHandled, openSignal])
   useEffect(() => { if (!open) return; setQuery(''); setTab(session.provider); setHighlight(null) }, [open, session.provider])
+  useEffect(() => {
+    if (!currentCatalog || !selectedModel || !selectedModelId || selectedModelId === session.model) return
+    onChange(session.provider, { ...selectedModel, source: currentCatalog.source })
+  }, [currentCatalog, onChange, selectedModel, selectedModelId, session.model, session.provider])
 
   const usable = providerEntries.filter((provider) => !lockedProvider || provider.id === lockedProvider)
   const rows = (() => {

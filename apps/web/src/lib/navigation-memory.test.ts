@@ -52,14 +52,14 @@ describe('browser route transitions', () => {
 describe('selected task removal', () => {
   test('opens the newest remaining task in the same project', () => {
     const project = { ...createProject('/repos/waku'), id: 'waku' }
-    const removed = { ...createSession(project.id, 'codex', false), id: 'removed' }
+    const removed = { ...createSession(project.id, 'openai-codex', false), id: 'removed' }
     const older = {
-      ...createSession(project.id, 'codex', false),
+      ...createSession(project.id, 'openai-codex', false),
       id: 'older',
       updated_at: 10,
     }
     const newer = {
-      ...createSession(project.id, 'claude', false),
+      ...createSession(project.id, 'anthropic', false),
       id: 'newer',
       updated_at: 20,
     }
@@ -74,7 +74,7 @@ describe('selected task removal', () => {
 
   test('opens a fresh task in the same ordinary project when history is empty', () => {
     const project = { ...createProject('/repos/waku'), id: 'waku' }
-    const removed = createSession(project.id, 'codex', false)
+    const removed = createSession(project.id, 'openai-codex', false)
     expect(taskRemovalDestination([project], [project], [], removed)).toEqual({
       kind: 'newTask',
       project,
@@ -87,7 +87,7 @@ describe('selected task removal', () => {
       id: 'projectless',
       name: 'No project',
     }
-    const removed = createSession(project.id, 'codex', false)
+    const removed = createSession(project.id, 'openai-codex', false)
     expect(taskRemovalDestination([project], [], [], removed)).toEqual({
       kind: 'projectless',
     })

@@ -10,7 +10,6 @@ The debug app requires:
 - macOS or Linux (Wayland or X11)
 - Rust 1.96 or newer
 - Bun
-- A supported agent CLI when testing a provider integration
 
 On Ubuntu and Debian, install the Linux compiler and GPUI runtime
 prerequisites with:

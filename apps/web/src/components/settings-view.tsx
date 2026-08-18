@@ -304,6 +304,23 @@ function BuiltinProviderCard({ provider, t }: { provider: typeof BUILTIN_AUTH_PR
     setKey('')
   }, [client])
 
+  useEffect(() => {
+    if (!pending || pending.type === 'idle') return
+    const remote = auth.data?.phases ?? []
+    const settled = remote.some(
+      (candidate) =>
+        (candidate.type === 'completed' || candidate.type === 'failed')
+        && candidate.provider === provider.id
+        && candidate.loginId === pending.loginId,
+    )
+    const connected = Boolean(status?.method && status.method !== 'none')
+    if (!settled && !connected) return
+    setPending(null)
+    if (connected && config) {
+      void queryClient.invalidateQueries({ queryKey: daemonKeys.models(config.address, provider.id) })
+    }
+  }, [auth.data, config, pending, provider.id, queryClient, status])
+
   async function login(method: LoginMethod) {
     if (!client) return
     try {
@@ -311,6 +328,7 @@ function BuiltinProviderCard({ provider, t }: { provider: typeof BUILTIN_AUTH_PR
       setPending(isActiveAuthPhase(next) ? next : null)
       if (next.type === 'awaitingBrowser') openExternal(next.url)
       if (next.type === 'awaitingDevice') openExternal(next.verificationUrl)
+      await auth.refetch()
     } catch (error) {
       toast.error(errorMessage(error))
     }

@@ -127,9 +127,7 @@ export function UsageTrendChart({
 
 const KNOWN_PROVIDER_SERIES_COLORS: Record<string, string> = {
   anthropic: '#d97757',
-  claude: '#d97757',
   'openai-responses': '#10a37f',
-  openai: '#10a37f',
   'openai-chat': '#0d8f6e',
   'openai-codex': '#6366f1',
   xai: '#0ea5e9',

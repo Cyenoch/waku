@@ -4,9 +4,9 @@ use waku_protocol::ProviderId;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
-    #[error("secure credential store is unavailable: {0}")]
+    #[error("credential store is unavailable: {0}")]
     SecureStoreUnavailable(&'static str),
-    #[error("secure credential store failed")]
+    #[error("credential store failed")]
     Store,
     #[error("login was cancelled")]
     Cancelled,

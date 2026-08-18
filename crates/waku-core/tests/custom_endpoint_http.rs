@@ -99,6 +99,7 @@ impl MockHttp {
 }
 
 fn serve_http(mut stream: TcpStream, mock: &MockHttp) {
+    stream.set_nonblocking(false).ok();
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];

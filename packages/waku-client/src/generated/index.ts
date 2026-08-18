@@ -81,6 +81,7 @@ export type { SkillScope } from "./SkillScope";
 export type { SkillSource } from "./SkillSource";
 export type { SkillsCatalog } from "./SkillsCatalog";
 export type { SlashCommand } from "./SlashCommand";
+export type { StartTask } from "./StartTask";
 export type { StoredAttachment } from "./StoredAttachment";
 export type { StoredTranscriptBlockContent } from "./StoredTranscriptBlockContent";
 export type { TokenTotals } from "./TokenTotals";

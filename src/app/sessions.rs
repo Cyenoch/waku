@@ -876,6 +876,9 @@ impl Waku {
         model: String,
         cx: &mut Context<Self>,
     ) {
+        if !super::composer::catalog_supports_model(self.model_catalogs.get(&provider), &model) {
+            return;
+        }
         let Some((session_id, provider_changed)) = self
             .selected_session()
             .filter(|session| {
@@ -962,8 +965,8 @@ impl Waku {
         });
     }
 
-    /// Discovery is not requested here: launch already requested it for every
-    /// installed provider, so tabs only ever switch between loaded lists.
+    /// Discovery is not requested here: launch already listed catalogs for
+    /// every connected built-in and custom endpoint.
     pub(super) fn set_runtime_mode(&mut self, mode: RuntimeMode, cx: &mut Context<Self>) {
         if let Some(session) = self.selected_session_mut()
             && session.runtime_mode != mode
@@ -1011,8 +1014,8 @@ impl Waku {
         if let Some(runtime) = runtime.as_ref() {
             runtime.driver.cancel();
             if retain_runtime {
-                // A detached process keeps Codex's app-server resident, but
-                // Computer Use descendants still belong to the cancelled turn.
+                // A detached provider runtime stays resident, while Computer Use
+                // descendants still belong to the cancelled turn.
             }
         }
         // Do not leave already-received text in the smoothing queue: once the
@@ -1336,19 +1339,17 @@ impl Waku {
     }
 
     pub(super) fn create_projectless_session(&mut self, cx: &mut Context<Self>) {
-        if let Some(draft_id) = self
-            .state
-            .sessions
-            .iter()
-            .find(|session| {
-                !session.has_started()
-                    && self.state.projects.iter().any(|project| {
-                        project.id == session.project_id
-                            && project.is_projectless()
-                            && !crate::projectless::is_legacy_root_path(&project.path)
-                    })
-            })
-            .map(|session| session.id)
+        if let Some(draft_id) =
+            self.state
+                .sessions
+                .iter()
+                .find(|session| {
+                    !session.has_started()
+                        && self.state.projects.iter().any(|project| {
+                            project.id == session.project_id && project.is_projectless()
+                        })
+                })
+                .map(|session| session.id)
         {
             self.select_session(draft_id, cx);
             return;
@@ -1394,8 +1395,8 @@ mod tests {
     #[test]
     fn new_task_navigation_keeps_the_selected_project_after_visiting_history() {
         let project_id = Uuid::new_v4();
-        let draft = AgentSession::new(project_id, ProviderId::new("codex"));
-        let mut started = AgentSession::new(Uuid::new_v4(), ProviderId::new("claude"));
+        let draft = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
+        let mut started = AgentSession::new(Uuid::new_v4(), ProviderId::new(ProviderId::ANTHROPIC));
         started.begin_turn("Existing task");
         let mut navigation = SessionNavigation::default();
 
@@ -1411,7 +1412,7 @@ mod tests {
     #[test]
     fn new_task_navigation_does_not_reopen_a_started_or_removed_draft() {
         let project_id = Uuid::new_v4();
-        let mut draft = AgentSession::new(project_id, ProviderId::new("codex"));
+        let mut draft = AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_CODEX));
         let mut navigation = SessionNavigation::default();
         navigation.remember_new_task(draft.id);
 

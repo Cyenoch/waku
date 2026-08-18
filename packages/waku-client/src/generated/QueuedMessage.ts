@@ -7,7 +7,6 @@ import type { MessageAttachment } from "./MessageAttachment";
  */
 export type QueuedMessage = { id: string, content: string,
 /**
- * The text typed before Waku appended provider-facing attachment
- * mentions. `None` is the legacy/plain-message representation.
+ * User-visible text before attachment mentions were appended.
  */
 display_content?: string | null, attachments?: Array<MessageAttachment>, created_at: number, };

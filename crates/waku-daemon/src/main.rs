@@ -44,11 +44,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let task_path = waku_core::persistence::StateStore::default_path();
-    let settings = waku_core::DaemonSettingsStore::open_with_legacy(
-        waku_core::DaemonSettings::default_path(),
-        [task_path.with_file_name("settings.json")],
-    )
-    .context("could not load daemon settings")?;
+    let settings = waku_core::DaemonSettingsStore::open(waku_core::DaemonSettings::default_path())
+        .context("could not load daemon settings")?;
     let task_store = waku_core::persistence::StateStore::daemon(task_path);
     waku_core::serve(
         listener,

@@ -16,7 +16,7 @@ use crate::skills::SkillsCatalog;
 use crate::usage_history::{UsageHistory, UsageWindow};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
@@ -105,12 +105,6 @@ pub enum Command {
     },
     ApplyOptions {
         options: WireSessionOptions,
-    },
-    Rollback {
-        turns: usize,
-    },
-    Fork {
-        turns_to_remove: usize,
     },
     GetSettings,
     UpdateSettings {
@@ -245,6 +239,26 @@ pub struct WireDriverStartOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
     pub context_window: Option<String>,
+    /// Locally persisted task to create or restore before the embedded driver
+    /// starts. Absent for already-daemon-owned tasks. Unknown ids without this
+    /// payload stay unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<Box<StartTask>>,
+}
+
+/// Client-owned task accepted for submit. The daemon upserts this before
+/// reconstructing an embedded transcript so a relaunch or fresh database cannot
+/// lose a session the app already persisted.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct StartTask {
+    pub session: AgentSession,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<Project>,
+    /// Fingerprint of the client's provider-started transcript. Unstarted
+    /// user turns are excluded. Stale restores do not replace a newer
+    /// daemon projection; Start still proceeds against the canonical task.
+    pub generation: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -356,6 +370,9 @@ pub enum ResponsePayload {
     },
     Started {
         supports_steer: bool,
+        /// Generation the daemon accepted when Start carried a task payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_generation: Option<u64>,
     },
     OptionsApplied {
         applied: bool,
@@ -517,7 +534,7 @@ mod tests {
 
         assert_eq!(json["type"], "forkSessionFromResponse");
         assert_eq!(json["turnCount"], 7);
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     #[test]
@@ -526,7 +543,7 @@ mod tests {
 
         assert_eq!(json["type"], "rewindSessionToMessage");
         assert_eq!(json["turnCount"], 4);
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     #[test]
@@ -607,6 +624,33 @@ mod tests {
         assert_eq!(json["liveSessionIds"][0], Uuid::nil().to_string());
         assert!(json["sessions"].is_array());
         assert!(json.get("0").is_none());
+    }
+
+    #[test]
+    fn start_task_restore_uses_stable_camel_case_fields() {
+        let session = AgentSession::new(Uuid::from_u128(1), ProviderId::new("openai-responses"));
+        let json = serde_json::to_value(Command::Start {
+            options: WireDriverStartOptions {
+                provider: ProviderId::new("openai-responses"),
+                cwd: PathBuf::from("/tmp"),
+                mode: "ask".into(),
+                interaction_mode: "build".into(),
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                task: Some(Box::new(StartTask {
+                    session,
+                    project: None,
+                    generation: 9,
+                })),
+            },
+        })
+        .unwrap();
+        assert_eq!(json["type"], "start");
+        assert_eq!(json["options"]["task"]["generation"], 9);
+        assert!(json["options"]["task"]["session"]["id"].is_string());
+        assert!(json["options"].get("taskId").is_none());
     }
 
     #[test]

@@ -17,7 +17,7 @@ the original feature bullet instead of adding separate entries for them.
 ## [unreleased]
 
 - Replace CLI discovery with configurable provider endpoints and dynamic model pickers
-- Keep API key values out of desktop settings and persisted state
+- Persist entered API keys and OAuth refresh tokens in a daemon-owned owner-only credentials file instead of the macOS Keychain
 - Default new sessions to Ask access and migrate legacy Auto/Plan modes safely
 
 ## [0.1.2]

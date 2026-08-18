@@ -44,21 +44,6 @@ impl DaemonSettings {
             .join(".waku")
             .join("settings.json")
     }
-
-    pub fn discard_legacy_app_keys(&mut self) {
-        for key in [
-            "analytics_enabled",
-            "favorite_models",
-            "theme",
-            "language",
-            "disabled_providers",
-            "provider_binary_overrides",
-            "computer_use_enabled",
-            "computer_use_allowed_apps",
-        ] {
-            self.extra.remove(key);
-        }
-    }
 }
 
 #[cfg(test)]

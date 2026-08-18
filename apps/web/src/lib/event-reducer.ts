@@ -293,7 +293,7 @@ function upsertActivity(
   finishStreamingMessages(session)
   completeReasoning(session)
   for (const block of [...session.transcript_blocks].reverse()) {
-    const activities = ensureActivities(block)
+    const activities = activitiesForBlock(block)
     const matching = [...activities].reverse().find((activity) =>
       incoming.source_id
         ? activity.source_id === incoming.source_id
@@ -324,7 +324,7 @@ function pushActivity(session: AgentSession, activity: ActivityItem) {
   const turnId = activeTurn(session)?.id ?? null
   const last = session.transcript_blocks.at(-1)
   if (last && last.after_message === afterMessage && last.turn_id === turnId) {
-    ensureActivities(last).push(activity)
+    activitiesForBlock(last).push(activity)
     return
   }
   session.transcript_blocks.push({
@@ -381,45 +381,20 @@ function completeReasoning(session: AgentSession) {
 
 function completeActivities(session: AgentSession) {
   for (const block of session.transcript_blocks) {
-    for (const activity of ensureActivities(block)) activity.complete = true
+    for (const activity of activitiesForBlock(block)) activity.complete = true
   }
 }
 
 function lastReasoning(session: AgentSession) {
   const block = session.transcript_blocks.at(-1)
-  const activity = block ? ensureActivities(block).at(-1) : undefined
+  const activity = block ? activitiesForBlock(block).at(-1) : undefined
   return activity?.reasoning ? { activity } : null
 }
 
 export function activitiesForBlock(block: TranscriptBlock): ActivityItem[] {
-  if (block.content.kind === 'activities') return block.content.data
-  const reasoning = block.content.data
-  return [
-    {
-      id: `legacy-reasoning-${block.after_message}`,
-      source_id: null,
-      kind: 'reasoning',
-      title: 'Reasoning',
-      detail: null,
-      arguments: null,
-      output: null,
-      image_urls: [],
-      failed: false,
-      complete: true,
-      file_changes: [],
-      display_target: null,
-      display_description: null,
-      reasoning,
-    },
-  ]
+  return block.content.data
 }
 
-function ensureActivities(block: TranscriptBlock): ActivityItem[] {
-  if (block.content.kind === 'activities') return block.content.data
-  const activities = activitiesForBlock(block)
-  block.content = { kind: 'activities', data: activities }
-  return activities
-}
 
 function activeTurn(session: AgentSession) {
   const turn = session.turns.at(-1)

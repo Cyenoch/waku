@@ -59,10 +59,10 @@ settings.usage: 用量
 settings.daemon: 守护进程
 settings.general_keywords: 通用 本地 项目 对话 隐私 匿名 使用数据 分析 分享 更新 自动 版本
 settings.appearance_keywords: 外观 主题 系统 浅色 深色 语言 英语 中文 简体
-settings.providers_keywords: 服务商 智能体 模型 claude codex cursor opencode amp grok pi
+settings.providers_keywords: 服务商 端点 模型 api
 settings.skills: 技能
-settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 claude codex cursor opencode pi amp 共享
-settings.usage_keywords: 用量 令牌 费用 支出 缓存 每日 图表 模型 明细 历史 claude codex
+settings.skills_keywords: 技能 技能库 智能体 禁用 启用 删除 共享
+settings.usage_keywords: 用量 令牌 费用 支出 缓存 每日 图表 模型 明细 历史
 settings.daemon_keywords: 守护进程 服务 远程 网页 网络 暴露 来源 令牌 端口 websocket
 settings.back: 返回
 settings.search: 搜索设置
@@ -88,7 +88,7 @@ daemon.token: 令牌
 daemon.reveal_token: 显示令牌
 daemon.hide_token: 隐藏令牌
 daemon.regenerate_token: 重新生成
-daemon.security_warning: 此令牌可完全访问这台 Mac 上的任务、文件、Git、附件和编程智能体。在私有网络之外请通过受信任的 TLS 代理使用 WSS。
+daemon.security_warning: 此令牌可完全访问这台 Mac 上的任务、文件、Git、附件和智能体。在私有网络之外请通过受信任的 TLS 代理使用 WSS。
 daemon.external_title: 外部守护进程
 daemon.external_description: 此桌面应用连接到由 Waku 之外管理的守护进程。请在对应主机上配置监听地址、浏览器来源和令牌。
 daemon.web_external_description: Waku Web 连接到由浏览器之外管理的守护进程。请在对应主机上配置监听地址、浏览器来源和令牌。
@@ -179,10 +179,8 @@ settings.automatic_updates: 自动更新
 settings.automatic_updates_description: 在后台检查新版本，并在发现更新时提示安装
 settings.share_anonymous_usage_data: 分享匿名使用数据
 settings.share_anonymous_usage_data_description: 分享功能使用情况和可靠性数据，帮助改进 Waku。不会包含提示词、回复、项目名称、文件路径等个人信息
-providers.coding_agents: 编程智能体
 providers.description: 直接配置模型端点。Waku 不会显示或存储 API 密钥值
 providers.web_description: 直接在守护进程主机上配置模型端点。Waku 不会显示或存储 API 密钥值
-providers.check_failed: "无法检查 %{command}：%{error}"
 providers.catalog_models: 来自实时目录的模型
 providers.not_authenticated: 未连接
 providers.api_key_placeholder: 输入 API 密钥（提交后清除）
@@ -191,12 +189,9 @@ providers.sign_in: 登录
 providers.logout: 登出
 providers.browser_waiting: 请在系统浏览器中完成登录
 providers.open_browser: 打开浏览器
-providers.use_device_code: 改用设备码
+providers.use_device_code: 使用设备码
 providers.show_settings: 显示 %{provider} 设置
 providers.hide_settings: 隐藏 %{provider} 设置
-providers.enable: 启用 %{provider}
-providers.disable: 禁用 %{provider}
-providers.disabled_for_new_tasks: 新建任务时不可用
 providers.model_count_one: "%{count} 个模型"
 providers.model_count_many: "%{count} 个模型"
 common.settings: 设置
@@ -235,7 +230,7 @@ project.project_lower: 项目
 project.without_a_project: 不使用项目
 project.your_project: 你的项目
 onboarding.open_project_to_begin: 打开一个项目即可开始
-onboarding.description: Waku 会在你选择的文件夹中运行编程智能体。代码、任务和历史记录都保留在这台 Mac 上
+onboarding.description: Waku 会在你选择的文件夹中运行内置智能体。代码、任务和历史记录都保留在这台 Mac 上
 onboarding.web_description: 请选择守护进程主机上的路径，或在不使用项目的情况下开始。
 onboarding.open_project_folder: 打开项目文件夹…
 onboarding.what_should_we_build: 想构建什么？
@@ -450,7 +445,6 @@ skills.section_user: 用户
 skills.source_shared: 共享
 skills.scope_user_detail: 在所有项目中可用
 skills.scope_in_project: "位于 %{project}"
-skills.filter_all: 全部技能
 skills.select_placeholder: 选择一个技能
 skills.detail_invoke: 调用
 skills.detail_location: 位置
@@ -477,7 +471,7 @@ skills.deleted_toast: "已将“%{name}”移到废纸篓"
 skills.delete_failed: "无法删除技能：%{error}"
 skills.toggle_failed: "无法更新技能：%{error}"
 skills.empty_title: 还没有技能
-skills.empty_description: 技能是一个包含 SKILL.md 的文件夹 — 任何智能体都能加载的可复用指令，例如部署手册或评审清单。为 Claude Code、Codex 等所有智能体安装的技能都会显示在这里，以 /名称 调用。
+skills.empty_description: 技能是一个包含 SKILL.md 的文件夹 — 智能体可加载的可复用指令，例如部署手册或评审清单。~/.agents/skills 与项目 .waku/skills 中的技能会显示在这里，以 /名称 调用。
 skills.library: 技能库
 skills.details: 技能详情
 skills.section_user_skills: 用户技能
@@ -486,15 +480,6 @@ skills.disable_named: 停用%{name}
 commands.init_description: 为此项目创建或更新 %{instructions_file}
 commands.review_description: 审查当前分支中尚未合并的更改
 commands.commit_description: 暂存并提交当前更改
-commands.fast_description: 切换快速模式
-commands.fast_enabled: 已启用快速模式
-commands.fast_disabled: 已关闭快速模式
-commands.claude_compact: 总结对话以释放上下文空间
-commands.claude_context: 查看上下文窗口的占用情况
-commands.claude_cost: 查看当前任务的令牌用量与费用
-commands.claude_init: 分析项目并编写 CLAUDE.md
-commands.claude_review: 审查拉取请求
-commands.claude_security_review: 对尚未合并的更改进行安全审查
 composer.edit_in_composer: 在输入框中编辑
 composer.steer: 引导
 composer.remove_followup: 从队列中移除
@@ -538,7 +523,6 @@ errors.remote_project_picker: 添加守护进程主机上的项目需要远程�
 session.stopped: 已停止
 session.turn_completed: 本轮已完成
 session.stopped_before_response: 智能体在返回回复前停止了
-session.codex_exited_before_response: Codex app-server 在返回回复前退出了
 session.steer_rejected: 无法向智能体补充指示（%{error}）；消息已排队，将作为后续消息发送
 session.steer_rejected_plain: 无法向智能体补充指示；消息已排队，将作为后续消息发送
 session.agent_ran_out_of_context: 智能体在本轮任务中耗尽了上下文空间
@@ -546,24 +530,12 @@ session.agent_declined_turn: 智能体拒绝执行本轮任务
 session.agent_stopped_reason: "智能体已停止：%{reason}"
 errors.open_session: "无法打开该任务：%{error}"
 errors.create_projectless_task: "无法在 ~/.waku/projects 下创建任务：%{error}"
-errors.save_projectless_migration: "无法保存无项目任务的迁移结果：%{error}"
-errors.move_projectless_task: "无法将旧的根目录无项目任务移至 ~/.waku/projects：%{error}"
 errors.remote_host_path: 此路径属于守护进程主机，无法在桌面应用中打开
 errors.change_branch: "无法切换分支：%{error}"
 errors.capture_pre_turn_checkpoint: "无法创建任务开始前的检查点：%{error}"
 errors.capture_turn_checkpoint: "无法创建本轮任务的检查点：%{error}"
 errors.save_local_state: "无法保存本地状态：%{error}"
 errors.task_project_not_found: 找不到该任务所属的项目
-errors.provider_native_session_unavailable: "%{provider} 的原生会话不可用"
-errors.provider_native_thread_unavailable: "%{provider} 的原生线程不可用"
-errors.provider_native_cursor_unavailable: "%{provider} 的原生会话位置不可用"
-errors.provider_native_thread_cursor_unavailable: "%{provider} 的原生线程位置不可用"
-errors.provider_waku_task_unavailable: "%{provider} 对应的 Waku 任务不可用"
-errors.provider_not_installed: "%{provider} 尚未配置"
-errors.provider_not_found: "尚未安装 %{provider}，或无法找到该程序"
-errors.claude_fork_checkpoint_missing: Claude 未返回派生任务所需的检查点
-errors.claude_turn_checkpoint_unavailable: "Claude 中该轮任务的原生检查点不可用：%{error}"
-errors.pi_session_file_unavailable: Pi 的原生会话文件不可用
 errors.fork_task: "无法派生任务：%{error}"
 errors.create_rewind_snapshot: "无法创建回退前的安全快照：%{error}"
 errors.restore_checkpoint: "无法恢复检查点：%{error}"
@@ -595,11 +567,6 @@ errors.provider_transport_write: "%{provider} 通信写入失败：%{error}"
 errors.provider_transport_write_short: "%{provider} 通信写入失败"
 errors.provider_transport_read: "%{provider} 通信读取失败：%{error}"
 errors.provider_invalid_json: "%{provider} 发来了无效的 JSON：%{error}"
-errors.provider_exited: "%{provider} 已退出（%{status}）"
-errors.provider_rpc_exited: "%{provider} RPC 已退出（%{status}）"
-errors.read_provider_exit_status: "无法读取 %{provider} 的退出状态：%{error}"
-errors.initialize_provider: "无法初始化 %{provider}：%{error}"
-errors.provider_no_session_id: "%{provider} 未返回会话 ID"
 errors.provider_rejected_prompt_detail: "%{provider} 拒绝了消息：%{error}"
 errors.stop_provider: "无法停止 %{provider}：%{error}"
 errors.switch_provider_model: "无法切换 %{provider} 模型：%{error}"
@@ -609,16 +576,12 @@ errors.select_model: "无法选择模型：%{error}"
 errors.read_provider_event_stream: "无法读取 %{provider} 事件流：%{error}"
 errors.answer_provider_permission: "无法响应 %{provider} 的权限请求：%{error}"
 errors.answer_provider_question: "无法回答 %{provider} 的问题：%{error}"
-errors.initialize_codex_app_server: 无法初始化 Codex app-server
-errors.codex_thread_open_incomplete: Codex 未能完成线程打开操作
-errors.provider_receive_prompt: "%{provider} 未能接收消息"
 errors.provider_start_turn: "%{provider} 未能开始本轮"
 errors.provider_rejected_steer: "%{provider} 拒绝了补充指示：%{error}"
 errors.provider_stopped_receiving: "%{provider} 已停止接收消息"
 errors.provider_initialize_session: "%{provider} 未能初始化此任务"
 errors.provider_rejected_prompt: "%{provider} 在开始处理前拒绝了消息"
 errors.provider_complete_turn: "%{provider} 未能完成本轮任务"
-errors.pi_reported_error: Pi 报告了错误
 session.response_unavailable: 该回复已不可用
 session.response_cannot_fork: 目前无法从该回复派生任务
 session.response_fork_in_progress: 请等待任务派生完成后再移除原任务
@@ -671,7 +634,7 @@ commit.pushing: 正在推送…
 commit.no_task: 没有可提交的任务
 commit.no_workspace: 当前任务没有工作区
 commit.no_changes: 没有可提交的更改
-commit.agent_unavailable: 当前智能体命令行不可用，无法生成提交信息
+commit.agent_unavailable: 当前智能体不可用，无法生成提交信息
 commit.committed: 已提交更改
 commit.committed_and_pushed: 已提交并推送更改
 commit.pushed: 已推送更改

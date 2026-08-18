@@ -323,14 +323,14 @@ function fileTypeIconName(path: string): FileTypeIconName {
 }
 
 const PROVIDER_ICONS: Record<string, string> = {
-  amp: 'i-waku-provider-amp',
-  claude: 'i-waku-provider-claude',
-  codex: 'i-waku-provider-openai',
-  cursor: 'i-waku-provider-cursor',
-  deepseek: 'i-waku-provider-deepseek',
-  opencode: 'i-waku-provider-opencode',
-  grok: 'i-waku-provider-grok',
-  pi: 'i-waku-provider-pi',
+  anthropic: 'i-waku-provider-claude',
+  'openai-codex': 'i-waku-provider-openai',
+  'openai-responses': 'i-waku-provider-openai',
+  'openai-chat': 'i-waku-provider-openai',
+  'opencode-zen': 'i-waku-provider-opencode',
+  'opencode-go': 'i-waku-provider-opencode',
+  xai: 'i-waku-provider-grok',
+  'xai-oauth': 'i-waku-provider-grok',
 }
 
 function displayProviderName(provider: ProviderId) {
@@ -343,7 +343,7 @@ function displayProviderName(provider: ProviderId) {
 
 export function providerMeta(provider: ProviderId) {
   const name = displayProviderName(provider)
-  return { id: provider, name, shortName: name, command: provider }
+  return { id: provider, name, shortName: name }
 }
 
 export function ProviderIcon({
@@ -372,8 +372,7 @@ export function ProviderIcon({
 }
 
 function providerColor(provider: ProviderId) {
-  if (provider.toLowerCase() === 'amp') return 'text-[#f34e3f]'
-  if (provider.toLowerCase() === 'claude') return 'text-[#d97757]'
-  if (provider.toLowerCase() === 'deepseek') return 'text-[#4d6bfe]'
+  const id = provider.toLowerCase()
+  if (id === 'anthropic') return 'text-[#d97757]'
   return 'text-[#34363b] dark:text-[#f3f3f3]'
 }

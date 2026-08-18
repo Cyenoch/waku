@@ -48,9 +48,12 @@ format.
 
 ## Secrets
 
-API keys entered in Waku are stored in the macOS Keychain. Login fails
-explicitly when that store is unavailable. Environment-variable credentials are
-read at runtime; `settings.json` never contains tokens or keys.
+API keys and OAuth refresh tokens entered in Waku are stored in a daemon-owned
+`credentials.json` file under the application data directory. On Unix the parent
+directory is owner-only (`0700`) and the file is owner read/write (`0600`).
+Environment-variable credentials are read at runtime; `settings.json` never
+contains tokens or keys. Existing Keychain items are not read or migrated;
+sign in again after this cutover.
 
 ## Safety
 
@@ -58,51 +61,3 @@ The default access mode is **Ask**. Legacy access values are migrated safely:
 removed `Auto` becomes Ask, and legacy combined Plan becomes Ask plus
 Interaction Plan. Users may explicitly choose Auto-accept edits or Full access
 for a session. Missing fields never imply full access.
-
-[CHANGELOG.md#124A]
-PUT 17.=21:
-## [unreleased]
-
-- Use the built-in Rust HTTP harness for OpenAI Responses, OpenAI Chat Completions, and Anthropic instead of external provider CLIs
-- Add official OpenAI API, ChatGPT Codex subscription, Anthropic, OpenCode Go/Zen, xAI API, and SuperGrok / X Premium+ authentication; Codex supports browser PKCE with device fallback, and xAI uses device OAuth through the system default browser
-- Discover provider catalogs live with cache/seed fallback, prevent incompatible model selection, and limit typed service tier to official OpenAI API catalog entries
-- Add configurable custom endpoints with explicit model IDs as a discovery-error fallback; keep API keys in the macOS Keychain and out of settings
-- Remove the legacy Computer Use integration while retaining the generic Tool seam and use an append-only daemon usage ledger instead of external CLI transcript scans
-- Default new sessions to Ask access and migrate legacy Auto/Plan modes safely
-
-[CONTRIBUTING.md#8FCC]
-PUT 8.=13:
-The debug app requires:
-
-- macOS or Linux (Wayland or X11)
-- Rust 1.96 or newer
-- Bun
-- A reachable HTTP provider endpoint when testing a provider integration; no external agent CLI is required
-
-PUT 35.=41:
-On macOS the watcher builds and signs `target/debug/Waku Debug.app`; on Linux
-it builds `target/debug/waku`. In both cases the provider daemon runs as the
-separate `target/debug/waku-debug-daemon` process: provider-only edits rebuild
-and hot-swap that process without relaunching the app, while desktop edits
-rebuild and relaunch the app normally. Keep that watcher running while you
-work. Do not start a second watcher or manually relaunch the debug app. Press
-`Ctrl-C`, or quit the app, to stop it.
-
-[docs/titles.md#1E4E]
-PUT 1*:
-# Session titles
-
-Waku keeps session titles provider-neutral. A session starts with `New task`.
-When the first prompt is submitted, Waku derives an `auto_title` from its first
-seven words, capped at 54 characters. A title explicitly entered by the user
-always wins; otherwise the UI shows the derived fallback or `New task`.
-
-The wire model still accepts `DriverEvent::AutoTitleUpdated`, and a future
-driver may replace the fallback with a provider-supplied title. The current
-built-in HTTP harness driver does not emit provider-specific title events.
-
-Waku does not launch title subprocesses, scan provider transcript files, read
-external CLI stores, or maintain provider-specific title integrations. Title
-failures therefore cannot block a turn: the local prompt fallback remains
-visible until the user supplies an explicit title or a driver reports a newer
-one.

@@ -25,6 +25,12 @@ pub enum AuthMethod {
     Oauth,
 }
 
+impl AuthMethod {
+    pub const fn is_connected(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 /// Long-running login state machine as seen on the wire.
 ///
 /// Every active or terminal phase carries both `login_id` and `provider` so a
@@ -105,6 +111,12 @@ pub struct ProviderAuthStatus {
     pub relogin_required: bool,
 }
 
+impl ProviderAuthStatus {
+    pub const fn is_connected(&self) -> bool {
+        self.method.is_connected()
+    }
+}
+
 /// Catalog snapshot returned to clients.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -165,5 +177,26 @@ mod tests {
         );
         assert!(AuthPhase::Idle.login_id().is_none());
         assert!(AuthPhase::Idle.provider().is_none());
+    }
+
+    #[test]
+    fn stored_and_oauth_methods_count_as_connected() {
+        assert!(AuthMethod::EnvKey.is_connected());
+        assert!(AuthMethod::StoredApiKey.is_connected());
+        assert!(AuthMethod::Oauth.is_connected());
+        assert!(!AuthMethod::None.is_connected());
+    }
+
+    #[test]
+    fn auth_status_connected_follows_method() {
+        let status = ProviderAuthStatus {
+            provider: ProviderId::new("opencode-go"),
+            method: AuthMethod::StoredApiKey,
+            email: None,
+            account_id: None,
+            expires_at_ms: None,
+            relogin_required: false,
+        };
+        assert!(status.is_connected());
     }
 }

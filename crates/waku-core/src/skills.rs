@@ -1,13 +1,13 @@
 //! Agent-skill discovery and management for the Skills settings page.
 //!
-//! A skill is a directory holding a `SKILL.md` — reusable instructions any
-//! coding agent can load. Every ecosystem keeps its own skill roots (see
+//! A skill is a directory holding a `SKILL.md` — reusable instructions the
+//! built-in agent can load. Roots live under `~/.agents/skills` and each
+//! project's `.agents/skills` / `.waku/skills` trees (see
 //! [`crate::composer_complete::discover_slash_commands`] for the invocation
-//! side); this module walks all of them at once so the settings page can show
-//! one library across providers and projects.
+//! side).
 //!
-//! Installers routinely drop the same skill into several ecosystems' roots,
-//! and dotfile setups symlink one directory everywhere. The catalog therefore
+//! The same skill can appear in more than one of those roots, and dotfile
+//! setups may symlink one directory into several. The catalog therefore
 //! groups by name within a scope: one [`SkillEntry`] per skill, carrying
 //! every [`SkillInstall`] it was found at, so the library lists each skill
 //! once and mutations apply to all of its copies.
@@ -17,10 +17,10 @@
 //! actions and may run synchronously in a click handler; each is a rename,
 //! write, or mkdir per install.
 //!
-//! Disabling renames `SKILL.md` to `SKILL.md.disabled`. Every tool discovers
-//! skills by that exact filename, so the rename hides the skill from all of
-//! them at once while keeping the directory and its supporting files intact —
-//! the same move people make by hand, made reversible with one toggle.
+//! Disabling renames `SKILL.md` to `SKILL.md.disabled`. The scanner discovers
+//! skills by that exact filename, so the rename hides the skill while keeping
+//! the directory and its supporting files intact — the same move people make
+//! by hand, made reversible with one toggle.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -101,8 +101,8 @@ pub fn scan_skills(locations: &[SkillLocation]) -> SkillsCatalog {
         }
     }
 
-    // One entry per (scope group, name): the same skill installed into
-    // several ecosystems' roots — copied or symlinked — is one skill.
+    // One entry per (scope group, name): the same skill copied or
+    // symlinked into several roots is one skill.
     let mut skills: Vec<SkillEntry> = Vec::new();
     let mut by_identity: HashMap<(Option<String>, String), usize> = HashMap::new();
     for raw in raw {
@@ -356,7 +356,6 @@ pub fn trash_skills(dirs: &[PathBuf]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ProviderId;
 
     fn temp_root(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("waku-skills-{tag}-{}", std::process::id()));
@@ -421,11 +420,10 @@ mod tests {
 
     #[test]
     fn copies_across_roots_group_into_one_entry() {
-        let codex_root = temp_root("group-codex");
-        let cursor_root = temp_root("group-cursor");
-        let opencode_root = temp_root("group-opencode");
-        // The installer-drops-it-everywhere layout: same skill, three roots.
-        for root in [&codex_root, &cursor_root, &opencode_root] {
+        let user_root = temp_root("group-user");
+        let extra_root = temp_root("group-extra");
+        let third_root = temp_root("group-third");
+        for root in [&user_root, &extra_root, &third_root] {
             write_skill(
                 root,
                 "agents-sdk",
@@ -433,35 +431,24 @@ mod tests {
             );
         }
         let locations = vec![
-            user_location(SkillSource::Provider(ProviderId::new("codex")), &codex_root),
-            user_location(
-                SkillSource::Provider(ProviderId::new("cursor")),
-                &cursor_root,
-            ),
-            user_location(
-                SkillSource::Provider(ProviderId::new("opencode")),
-                &opencode_root,
-            ),
+            user_location(SkillSource::Shared, &user_root),
+            user_location(SkillSource::Shared, &extra_root),
+            user_location(SkillSource::Shared, &third_root),
         ];
         let catalog = scan_skills(&locations);
         assert_eq!(catalog.skills.len(), 1, "one row, not one per root");
 
         let skill = &catalog.skills[0];
         assert_eq!(skill.installs.len(), 3);
-        assert_eq!(
-            skill.primary().source,
-            SkillSource::Provider(ProviderId::new("codex"))
-        );
-        assert_eq!(skill.sources_label(), "codex · cursor · opencode");
+        assert_eq!(skill.primary().source, SkillSource::Shared);
         assert_eq!(skill.duplicates, 0, "grouped copies are not duplicates");
 
-        // A disabled copy next to live ones keeps the skill enabled.
-        set_skill_enabled(&cursor_root.join("agents-sdk"), false).unwrap();
+        set_skill_enabled(&extra_root.join("agents-sdk"), false).unwrap();
         let catalog = scan_skills(&locations);
         assert!(catalog.skills[0].enabled);
         assert_eq!(catalog.skills[0].installs.len(), 3);
 
-        for root in [&codex_root, &cursor_root, &opencode_root] {
+        for root in [&user_root, &extra_root, &third_root] {
             let _ = std::fs::remove_dir_all(root);
         }
     }
@@ -477,7 +464,7 @@ mod tests {
         let locations = vec![
             user_location(SkillSource::Shared, &user_root),
             SkillLocation {
-                source: SkillSource::Provider(ProviderId::new("anthropic")),
+                source: SkillSource::Shared,
                 scope: SkillScope::Project,
                 root: project_root.clone(),
                 project: Some("waku".into()),

@@ -101,21 +101,20 @@ pub fn capture_turn(cwd: &Path, session_id: Uuid, turn_count: usize) -> anyhow::
         Vec::new()
     } else {
         let start_ref = turn_start_ref(session_id, turn_count);
-        let legacy_ref = checkpoint_ref(session_id, turn_count - 1);
-        let diff_base = if has_ref(cwd, &start_ref) {
-            prepare_turn_diff_base(
+        if has_ref(cwd, &start_ref) {
+            let diff_base = prepare_turn_diff_base(
                 cwd,
                 session_id,
                 turn_count,
                 &start_ref,
                 end_head.as_deref(),
                 end_branch.as_deref(),
-            )?
-        } else {
-            legacy_ref
-        };
-        if has_ref(cwd, &diff_base) {
-            diff_files(cwd, &diff_base, &git_ref)?
+            )?;
+            if has_ref(cwd, &diff_base) {
+                diff_files(cwd, &diff_base, &git_ref)?
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
         }
@@ -955,6 +954,7 @@ mod tests {
         let baseline = capture_turn(&directory, session_id, 0).unwrap();
         assert_eq!(baseline.status, CheckpointStatus::Ready);
 
+        crate::checkpoint::capture_turn_start(&directory, session_id, 1).unwrap();
         fs::write(directory.join("tracked.txt"), "changed\n").unwrap();
         fs::write(directory.join("new.txt"), "new\n").unwrap();
         fs::write(directory.join("already-staged.txt"), "staged\n").unwrap();

@@ -51,10 +51,6 @@ enum Command {
         options: Box<SessionOptions>,
         response: Sender<bool>,
     },
-    Rollback {
-        turns: usize,
-        response: Sender<Result<(), String>>,
-    },
     Snapshot {
         response: Sender<waku_harness::SessionSnapshot>,
     },
@@ -455,21 +451,6 @@ fn option_text(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-fn rewind_completed_turns(session: &mut Session, turns: usize) -> anyhow::Result<()> {
-    let keep = session
-        .completed_turn_count()
-        .checked_sub(turns)
-        .ok_or_else(|| {
-            anyhow!(
-                "cannot remove {turns} turns from a session with {} settled turns",
-                session.completed_turn_count()
-            )
-        })?;
-    session
-        .truncate_completed_turns(keep)
-        .map_err(|error| anyhow!(error.to_string()))
-}
-
 impl EmbeddedDriver {
     pub(super) fn start(
         provider_id: ProviderId,
@@ -553,22 +534,6 @@ impl EmbeddedDriver {
             .lock()
             .map(|active| active.is_some())
             .unwrap_or(true)
-    }
-
-    pub(super) fn rewind(&self, turns: usize) -> anyhow::Result<()> {
-        if self.is_active() {
-            bail!("cannot change embedded history while a turn is running");
-        }
-
-        let (response, receiver) = bounded(1);
-        let command = Command::Rollback { turns, response };
-        self.commands
-            .send(command)
-            .map_err(|_| anyhow!("embedded provider runtime is not running"))?;
-        receiver
-            .recv_timeout(Duration::from_secs(30))
-            .map_err(|_| anyhow!("embedded provider runtime did not confirm the history update"))?
-            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -738,12 +703,6 @@ fn worker(mut worker: Worker) {
                 }
                 let _ = response.send(result.is_ok());
             }
-            Command::Rollback { turns, response } => {
-                let _ = response.send(
-                    rewind_completed_turns(&mut worker.session, turns)
-                        .map_err(|error| error.to_string()),
-                );
-            }
             Command::Snapshot { response } => {
                 let _ = response.send(worker.session.snapshot());
             }
@@ -827,32 +786,39 @@ fn run_prompt(
     match result {
         Ok(outcome) => emit_outcome(&worker.events, outcome, &worker.session),
         Err(error) => {
-            if !matches!(error, HarnessError::Cancelled) {
-                let _ = worker.events.send(DriverEvent::Error(error.to_string()));
+            let cancelled = matches!(error, HarnessError::Cancelled);
+            let summary = (!cancelled).then(|| error.to_string());
+            if let Some(message) = summary.as_ref() {
+                let _ = worker.events.send(DriverEvent::Error(message.clone()));
             }
             let _ = worker.events.send(DriverEvent::TurnFinished {
                 success: false,
-                summary: None,
+                summary,
             });
         }
     }
 }
 
 fn emit_outcome(events: &DriverEventSender, outcome: RunOutcome, session: &Session) {
-    let success = match &outcome {
-        RunOutcome::Completed => true,
-        RunOutcome::Aborted => false,
+    let (success, failure) = match &outcome {
+        RunOutcome::Completed => (true, None),
+        RunOutcome::Aborted => (false, None),
         RunOutcome::Failed { error_message } => {
-            if let Some(error) = error_message.as_deref().filter(|error| !error.is_empty()) {
-                let _ = events.send(DriverEvent::Error(error.to_owned()));
+            let failure = error_message
+                .as_deref()
+                .filter(|error| !error.is_empty())
+                .map(str::to_owned);
+            if let Some(error) = failure.as_ref() {
+                let _ = events.send(DriverEvent::Error(error.clone()));
             }
-            false
+            (false, failure)
         }
     };
     let summary = session
         .transcript()
         .last()
-        .and_then(|message| message.as_assistant().and_then(assistant_text));
+        .and_then(|message| message.as_assistant().and_then(assistant_text))
+        .or(failure);
     let _ = events.send(DriverEvent::TurnFinished { success, summary });
 }
 
@@ -1108,6 +1074,30 @@ mod tests {
     use super::*;
     use crate::driver::test_event_channel;
     use waku_harness::ApprovalRequest;
+
+    #[test]
+    fn failed_run_surfaces_provider_error_as_turn_summary() {
+        let (events, rx) = test_event_channel();
+        let session = Session::new(None);
+        emit_outcome(
+            &events,
+            RunOutcome::Failed {
+                error_message: Some("connection reset by peer".into()),
+            },
+            &session,
+        );
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            DriverEvent::Error(message) if message.contains("connection reset")
+        ));
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            DriverEvent::TurnFinished {
+                success: false,
+                summary: Some(summary),
+            } => assert!(summary.contains("connection reset"), "{summary}"),
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
 
     fn call(name: &str) -> ToolCall {
         ToolCall {
