@@ -7965,7 +7965,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "317211a0dc0ceedd78fb2ca9a44aed3d7b9b26f81870d485c07122b4350673b7"
 
 [[package]]
-name = "waku"
+name = "wakuwaku"
 version = "0.1.2"
 dependencies = [
  "alacritty_terminal",
@@ -8004,13 +8004,13 @@ dependencies = [
  "unicode-segmentation",
  "url",
  "uuid",
- "waku-client",
- "waku-protocol",
+ "wakuwaku-client",
+ "wakuwaku-protocol",
  "wry",
 ]
 
 [[package]]
-name = "waku-client"
+name = "wakuwaku-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -8025,11 +8025,11 @@ dependencies = [
  "tungstenite",
  "url",
  "uuid",
- "waku-protocol",
+ "wakuwaku-protocol",
 ]
 
 [[package]]
-name = "waku-core"
+name = "wakuwaku-core"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
@@ -8059,25 +8059,25 @@ dependencies = [
  "tungstenite",
  "url",
  "uuid",
- "waku-client",
- "waku-harness",
- "waku-protocol",
- "waku-provider",
+ "wakuwaku-client",
+ "wakuwaku-harness",
+ "wakuwaku-protocol",
+ "wakuwaku-provider",
 ]
 
 [[package]]
-name = "waku-daemon"
+name = "wakuwaku-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
  "serde_json",
- "waku-core",
- "waku-protocol",
+ "wakuwaku-core",
+ "wakuwaku-protocol",
 ]
 
 [[package]]
-name = "waku-harness"
+name = "wakuwaku-harness"
 version = "0.1.0"
 dependencies = [
  "event-listener",
@@ -8092,11 +8092,11 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "url",
- "waku-provider",
+ "wakuwaku-provider",
 ]
 
 [[package]]
-name = "waku-protocol"
+name = "wakuwaku-protocol"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -8109,11 +8109,11 @@ dependencies = [
  "serde_json",
  "ts-rs",
  "uuid",
- "waku-provider",
+ "wakuwaku-provider",
 ]
 
 [[package]]
-name = "waku-provider"
+name = "wakuwaku-provider"
 version = "0.1.0"
 dependencies = [
  "serde",

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import type { AgentSession, Project } from '@waku/client'
+import type { AgentSession, Project } from '@wakuwaku/client'
 import { useEffect, useState, type RefObject } from 'react'
 import { toast } from 'sonner'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
@@ -225,7 +225,7 @@ function CommitActionRow({
 }
 
 function requireClient<T>(client: T | null): T {
-  if (!client) throw new Error('Waku daemon is disconnected')
+  if (!client) throw new Error('WakuWaku daemon is disconnected')
   return client
 }
 

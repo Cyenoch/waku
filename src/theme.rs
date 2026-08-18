@@ -1,6 +1,6 @@
 use gpui::{App, Global, Hsla, Window, WindowAppearance, hsla, rgb, transparent_black};
 
-pub use waku_client::theme::ThemePreference;
+pub use wakuwaku_client::theme::ThemePreference;
 
 fn resolves_to_dark(preference: ThemePreference, system_appearance: WindowAppearance) -> bool {
     match preference {
@@ -21,7 +21,7 @@ fn native_override(preference: ThemePreference) -> Option<bool> {
     }
 }
 
-/// Waku's visual language, take two: neutral graphite surfaces in the spirit
+/// WakuWaku's visual language, take two: neutral graphite surfaces in the spirit
 /// of Cursor — color is reserved for meaning. On macOS the sidebar's semantic
 /// tint is installed as a native layer above Sidebar vibrancy; keeping this
 /// GPUI surface clear avoids incorrectly accumulating the alpha of nested Metal

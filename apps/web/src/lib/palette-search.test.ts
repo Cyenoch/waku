@@ -3,11 +3,11 @@ import { fuzzyScore, shouldKeepPreviousPaletteItems } from './palette-search'
 
 describe('command palette search parity', () => {
   test('ranks contiguous and boundary matches above loose subsequences', () => {
-    expect(fuzzyScore('waku', 'Waku daemon')!).toBeGreaterThan(
+    expect(fuzzyScore('wakuwaku', 'WakuWaku daemon')!).toBeGreaterThan(
       fuzzyScore('waku', 'workspace asks kernel utilities')!,
     )
-    expect(fuzzyScore('wd', 'Waku daemon')).not.toBeNull()
-    expect(fuzzyScore('missing', 'Waku daemon')).toBeNull()
+    expect(fuzzyScore('wd', 'WakuWaku daemon')).not.toBeNull()
+    expect(fuzzyScore('missing', 'WakuWaku daemon')).toBeNull()
   })
 
   test('keeps useful rows during a pending transcript search', () => {

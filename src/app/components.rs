@@ -355,7 +355,7 @@ pub(super) struct MessageRender<'a> {
     pub(super) attachment_menus: Vec<ContextMenuHandle>,
     pub(super) attachment_images: Vec<Option<Arc<gpui::Image>>>,
     /// Captured from the selected daemon before the virtualized row is built.
-    /// A row is laid out while the root `Waku` entity is already updating, so
+    /// A row is laid out while the root `WakuWaku` entity is already updating, so
     /// it must not read that entity again just to decide whether Finder reveal
     /// is available.
     pub(super) attachments_can_reveal: bool,
@@ -1674,7 +1674,7 @@ mod message_time_tests {
         )
         .with_arguments(Some(
             serde_json::json!({
-                "patch": "*** Begin Patch\n*** Update File: /tmp/waku/src/app.rs\n@@\n-old\n+new\n+more\n*** End Patch"
+                "patch": "*** Begin Patch\n*** Update File: /tmp/wakuwaku/src/app.rs\n@@\n-old\n+new\n+more\n*** End Patch"
             })
             .to_string(),
         ));
@@ -1721,7 +1721,7 @@ mod message_time_tests {
             false,
         )
         .with_arguments(Some(
-            serde_json::json!({"filePath": "/tmp/waku/src/model.rs"}).to_string(),
+            serde_json::json!({"filePath": "/tmp/wakuwaku/src/model.rs"}).to_string(),
         ));
         assert_eq!(activity_display_title(&read), "Reading model.rs");
         read.complete = true;
@@ -1752,7 +1752,7 @@ mod message_time_tests {
             false,
         )
         .with_arguments(Some(
-            serde_json::json!({"path": "/tmp/waku/src"}).to_string(),
+            serde_json::json!({"path": "/tmp/wakuwaku/src"}).to_string(),
         ));
         assert_eq!(activity_display_title(&list), "Listing files in src");
 

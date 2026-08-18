@@ -29,14 +29,14 @@ const USAGE_PROJECT_ROW_HEIGHT: f32 = 96.0;
 const USAGE_RESCAN_AFTER: Duration = Duration::from_secs(120);
 
 fn provider_label(provider: &ProviderId) -> String {
-    waku_client::ProviderPreset::parse_id(provider.as_str())
+    wakuwaku_client::ProviderPreset::parse_id(provider.as_str())
         .map(|preset| preset.display_name().to_owned())
         .unwrap_or_else(|| provider.as_str().to_owned())
 }
 
 impl Waku {
     fn usage_provider_label(&self, provider: &ProviderId) -> String {
-        if let Some(preset) = waku_client::ProviderPreset::parse_id(provider.as_str()) {
+        if let Some(preset) = wakuwaku_client::ProviderPreset::parse_id(provider.as_str()) {
             return preset.display_name().to_owned();
         }
         self.configured_provider(provider)
@@ -112,9 +112,9 @@ impl Waku {
                     match daemon.request(
                         Uuid::nil(),
                         Uuid::nil(),
-                        waku_client::Command::LoadUsageHistory { window },
+                        wakuwaku_client::Command::LoadUsageHistory { window },
                     )? {
-                        waku_client::ResponsePayload::UsageHistory { history } => Ok(history),
+                        wakuwaku_client::ResponsePayload::UsageHistory { history } => Ok(history),
                         _ => anyhow::bail!("the daemon returned an invalid usage response"),
                     }
                 })
@@ -2950,16 +2950,16 @@ mod tests {
         let home = Path::new("/Users/developer");
 
         assert_eq!(
-            usage_project_path(Path::new("/Users/developer/dev/waku"), Some(home)),
+            usage_project_path(Path::new("/Users/developer/dev/wakuwaku"), Some(home)),
             "~/dev/waku"
         );
         assert_eq!(usage_project_path(home, Some(home)), "~");
         assert_eq!(
-            usage_project_path(Path::new("/Users/developer-2/waku"), Some(home)),
+            usage_project_path(Path::new("/Users/developer-2/wakuwaku"), Some(home)),
             "/Users/developer-2/waku"
         );
         assert_eq!(
-            usage_project_path(Path::new("/Volumes/work/waku"), Some(home)),
+            usage_project_path(Path::new("/Volumes/work/wakuwaku"), Some(home)),
             "/Volumes/work/waku"
         );
     }

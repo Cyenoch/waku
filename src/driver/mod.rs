@@ -1,23 +1,23 @@
-//! Desktop proxy for the provider runtime owned by `waku-daemon`.
+//! Desktop proxy for the provider runtime owned by `wakuwaku-daemon`.
 
 use crate::model::RuntimeEventCursor;
 
-pub use waku_client::driver::{
+pub use wakuwaku_client::driver::{
     DriverEventSender, DriverHandle, DriverStartOptions, SessionOptions, event_channel,
 };
 
 pub(crate) fn start_remote(
-    client: waku_client::DaemonClient,
+    client: wakuwaku_client::DaemonClient,
     session_id: uuid::Uuid,
     options: DriverStartOptions,
-    task: Option<waku_client::StartTask>,
+    task: Option<wakuwaku_client::StartTask>,
     events: DriverEventSender,
 ) -> anyhow::Result<DriverHandle> {
     DriverHandle::start_restoring(client, session_id, options, task, events)
 }
 
 pub(crate) fn attach_remote(
-    client: waku_client::DaemonClient,
+    client: wakuwaku_client::DaemonClient,
     session_id: uuid::Uuid,
     runtime_id: uuid::Uuid,
     supports_steer: bool,

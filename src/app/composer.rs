@@ -703,13 +703,13 @@ impl Waku {
         }
         let tier = session
             .service_tier
-            .unwrap_or(waku_client::ServiceTier::Default);
-        let next = waku_client::ServiceTier::ALL[(waku_client::ServiceTier::ALL
+            .unwrap_or(wakuwaku_client::ServiceTier::Default);
+        let next = wakuwaku_client::ServiceTier::ALL[(wakuwaku_client::ServiceTier::ALL
             .iter()
             .position(|candidate| *candidate == tier)
             .unwrap_or(0)
             + 1)
-            % waku_client::ServiceTier::ALL.len()];
+            % wakuwaku_client::ServiceTier::ALL.len()];
         let weak = cx.entity().downgrade();
         let key_weak = weak.clone();
         Some(
@@ -1086,9 +1086,9 @@ impl Waku {
                         let response = daemon.client().request(
                             Uuid::nil(),
                             Uuid::nil(),
-                            waku_client::Command::ImportAttachment { name, upload },
+                            wakuwaku_client::Command::ImportAttachment { name, upload },
                         )?;
-                        let waku_client::ResponsePayload::AttachmentStored { attachment } =
+                        let wakuwaku_client::ResponsePayload::AttachmentStored { attachment } =
                             response
                         else {
                             anyhow::bail!("the daemon returned an invalid attachment response");
@@ -1202,13 +1202,13 @@ impl Waku {
                                 .request(
                                     Uuid::nil(),
                                     Uuid::nil(),
-                                    waku_client::Command::StoreBlob {
+                                    wakuwaku_client::Command::StoreBlob {
                                         mime_type: preview_image.format.mime_type().to_owned(),
                                         bytes,
                                     },
                                 )
                                 .map_err(|error| error.to_string())?;
-                            let waku_client::ResponsePayload::BlobStored { reference, path } =
+                            let wakuwaku_client::ResponsePayload::BlobStored { reference, path } =
                                 response
                             else {
                                 return Err("the daemon returned an invalid blob response".into());
@@ -2547,7 +2547,7 @@ pub(super) fn visible_branch_entries(
 // Base64 keeps the authenticated JSON transport browser-compatible but adds
 // one third of wire overhead. Stay comfortably below tungstenite's default
 // message limit until uploads move to a streaming content endpoint.
-const MAX_ATTACHMENT_BYTES: u64 = waku_client::attachments::MAX_ATTACHMENT_BYTES as u64;
+const MAX_ATTACHMENT_BYTES: u64 = wakuwaku_client::attachments::MAX_ATTACHMENT_BYTES as u64;
 
 /// Reads a client-local drop into an upload payload. This is the explicit
 /// client/daemon boundary: none of these source paths are persisted or handed
@@ -2556,7 +2556,7 @@ fn attachment_upload_from_path(
     source: &Path,
 ) -> anyhow::Result<(
     String,
-    waku_client::attachments::AttachmentUpload,
+    wakuwaku_client::attachments::AttachmentUpload,
     Option<Vec<u8>>,
 )> {
     let metadata = std::fs::symlink_metadata(source)
@@ -2582,7 +2582,7 @@ fn attachment_upload_from_path(
         let is_image = is_image_attachment_path(source);
         return Ok((
             name,
-            waku_client::attachments::AttachmentUpload::File {
+            wakuwaku_client::attachments::AttachmentUpload::File {
                 data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
             },
             is_image.then_some(bytes),
@@ -2618,10 +2618,10 @@ fn attachment_upload_from_path(
             if !metadata.is_file() {
                 continue;
             }
-            if entries.len() >= waku_client::attachments::MAX_ATTACHMENT_FILES {
+            if entries.len() >= wakuwaku_client::attachments::MAX_ATTACHMENT_FILES {
                 anyhow::bail!(
                     "attachment directory contains more than {} files",
-                    waku_client::attachments::MAX_ATTACHMENT_FILES
+                    wakuwaku_client::attachments::MAX_ATTACHMENT_FILES
                 );
             }
             total_bytes = total_bytes.saturating_add(metadata.len());
@@ -2634,7 +2634,7 @@ fn attachment_upload_from_path(
                 .to_path_buf();
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("could not read attachment {}", path.display()))?;
-            entries.push(waku_client::attachments::AttachmentUploadEntry {
+            entries.push(wakuwaku_client::attachments::AttachmentUploadEntry {
                 relative_path,
                 data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
             });
@@ -2642,7 +2642,7 @@ fn attachment_upload_from_path(
     }
     Ok((
         name,
-        waku_client::attachments::AttachmentUpload::Directory { entries },
+        wakuwaku_client::attachments::AttachmentUpload::Directory { entries },
         None,
     ))
 }
@@ -2748,10 +2748,10 @@ pub(super) fn model_picker_list_height(row_count: usize) -> f32 {
 /// is not catalog availability — callers still have to list/refresh models.
 pub(super) fn picker_provider_endpoints(
     customs: &[ExternalProvider],
-    statuses: &HashMap<ProviderId, waku_client::ProviderAuthStatus>,
+    statuses: &HashMap<ProviderId, wakuwaku_client::ProviderAuthStatus>,
 ) -> Vec<ExternalProvider> {
     let mut providers = Vec::new();
-    for preset in waku_client::ProviderPreset::ALL {
+    for preset in wakuwaku_client::ProviderPreset::ALL {
         let id = preset.provider_id();
         if statuses
             .get(&id)
@@ -2761,7 +2761,7 @@ pub(super) fn picker_provider_endpoints(
         }
     }
     for custom in customs {
-        if waku_client::ProviderPreset::parse_id(custom.id.as_str()).is_none() {
+        if wakuwaku_client::ProviderPreset::parse_id(custom.id.as_str()).is_none() {
             providers.push(custom.clone());
         }
     }
@@ -2770,7 +2770,7 @@ pub(super) fn picker_provider_endpoints(
 
 pub(super) fn catalog_refresh_providers(
     customs: &[ExternalProvider],
-    statuses: &HashMap<ProviderId, waku_client::ProviderAuthStatus>,
+    statuses: &HashMap<ProviderId, wakuwaku_client::ProviderAuthStatus>,
 ) -> Vec<ProviderId> {
     picker_provider_endpoints(customs, statuses)
         .into_iter()
@@ -2794,7 +2794,7 @@ pub(super) fn suggested_picker_provider(
 
 fn preferred_supported_model(
     provider: &ExternalProvider,
-    catalog: Option<&waku_client::ModelCatalog>,
+    catalog: Option<&wakuwaku_client::ModelCatalog>,
 ) -> Option<String> {
     let catalog = catalog?;
     let default = provider.default_model.as_str();
@@ -2814,7 +2814,7 @@ fn preferred_supported_model(
 
 fn first_compatible_picker_model(
     providers: &[ExternalProvider],
-    catalogs: &HashMap<ProviderId, waku_client::ModelCatalog>,
+    catalogs: &HashMap<ProviderId, wakuwaku_client::ModelCatalog>,
 ) -> Option<(ProviderId, String)> {
     providers.iter().find_map(|provider| {
         preferred_supported_model(provider, catalogs.get(&provider.id))
@@ -2823,7 +2823,7 @@ fn first_compatible_picker_model(
 }
 
 pub(super) fn catalog_supports_model(
-    catalog: Option<&waku_client::ModelCatalog>,
+    catalog: Option<&wakuwaku_client::ModelCatalog>,
     model: &str,
 ) -> bool {
     let model = model.trim();
@@ -2839,7 +2839,7 @@ pub(super) fn catalog_supports_model(
 pub(super) fn send_provider_model(
     provider: &ProviderId,
     model: Option<&str>,
-    catalogs: &HashMap<ProviderId, waku_client::ModelCatalog>,
+    catalogs: &HashMap<ProviderId, wakuwaku_client::ModelCatalog>,
 ) -> Option<(ProviderId, String)> {
     let model = model.map(str::trim).filter(|value| !value.is_empty())?;
     catalog_supports_model(catalogs.get(provider), model)
@@ -2851,7 +2851,7 @@ pub(super) fn suggested_picker_selection(
     last_provider: &ProviderId,
     last_model: Option<&str>,
     providers: &[ExternalProvider],
-    catalogs: &HashMap<ProviderId, waku_client::ModelCatalog>,
+    catalogs: &HashMap<ProviderId, wakuwaku_client::ModelCatalog>,
 ) -> Option<(ProviderId, String)> {
     let configured = |id: &ProviderId| providers.iter().any(|provider| &provider.id == id);
     let resolve = |id: &ProviderId, model: Option<&str>| {
@@ -2894,7 +2894,7 @@ pub(super) fn suggested_picker_selection(
 /// authoritative even when empty. Missing catalogs fall back to a custom
 /// endpoint's manual list only — never to a built-in default model.
 pub(super) fn catalog_model_ids(
-    catalog: Option<&waku_client::ModelCatalog>,
+    catalog: Option<&wakuwaku_client::ModelCatalog>,
     manual: &[String],
     default_model: &str,
 ) -> Vec<String> {
@@ -2914,13 +2914,13 @@ pub(super) fn catalog_model_ids(
     }
 }
 
-pub(super) fn catalog_entry_selectable(entry: Option<&waku_client::ModelCatalogEntry>) -> bool {
+pub(super) fn catalog_entry_selectable(entry: Option<&wakuwaku_client::ModelCatalogEntry>) -> bool {
     entry.is_none_or(|entry| entry.supported)
 }
 
 pub(super) fn visible_picker_models(
     providers: &[ExternalProvider],
-    catalogs: &HashMap<ProviderId, waku_client::ModelCatalog>,
+    catalogs: &HashMap<ProviderId, wakuwaku_client::ModelCatalog>,
     favorites: &[FavoriteModel],
     locked_provider: Option<&ProviderId>,
     selected_tab: &ModelPickerTab,
@@ -2933,7 +2933,7 @@ pub(super) fn visible_picker_models(
         .flat_map(|provider| {
             let catalog = catalogs.get(&provider.id);
             let allow_manual =
-                waku_client::ProviderPreset::parse_id(provider.id.as_str()).is_none();
+                wakuwaku_client::ProviderPreset::parse_id(provider.id.as_str()).is_none();
             let ids = if catalog.is_some() || allow_manual {
                 catalog_model_ids(catalog, &provider.models, &provider.default_model)
             } else {
@@ -3053,7 +3053,7 @@ fn cached_model_picker_rows(
 
 fn labeled_model_picker_rows(
     providers: &[ExternalProvider],
-    catalogs: &HashMap<ProviderId, waku_client::ModelCatalog>,
+    catalogs: &HashMap<ProviderId, wakuwaku_client::ModelCatalog>,
     favorites: &[FavoriteModel],
     locked_provider: Option<&ProviderId>,
     selected_tab: &ModelPickerTab,
@@ -3115,7 +3115,7 @@ mod catalog_picker_behavior_tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
-    use waku_client::{
+    use wakuwaku_client::{
         ApiFormat, AuthMethod, CatalogSource, ModelCapabilities, ModelCatalog, ModelCatalogEntry,
         ProviderAuthStatus, ProviderId, ProviderPreset, TransportProfile,
     };
@@ -3379,7 +3379,7 @@ mod catalog_picker_behavior_tests {
     fn connected_xai_oauth_seed_search_gr_lists_supported_grok() {
         let statuses = HashMap::from([connected(ProviderId::XAI_OAUTH, AuthMethod::Oauth)]);
         let providers = picker_provider_endpoints(&[], &statuses);
-        let seed = waku_client::xai_oauth_seed(&providers[0].base_url);
+        let seed = wakuwaku_client::xai_oauth_seed(&providers[0].base_url);
         assert!(
             seed.iter()
                 .any(|entry| entry.id.contains("grok") && entry.supported)
@@ -3415,7 +3415,7 @@ mod catalog_picker_behavior_tests {
             connected(ProviderId::XAI_OAUTH, AuthMethod::Oauth),
         ]);
         let providers = picker_provider_endpoints(&[], &statuses);
-        let seed = waku_client::xai_oauth_seed("https://api.x.ai/v1");
+        let seed = wakuwaku_client::xai_oauth_seed("https://api.x.ai/v1");
         let mut catalogs = HashMap::new();
         catalogs.insert(
             ProviderId::new(ProviderId::OPENCODE_GO),

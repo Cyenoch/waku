@@ -1,6 +1,6 @@
-# Contributing to Waku
+# Contributing to WakuWaku
 
-Thanks for helping improve Waku. Bug reports, focused fixes, tests, and
+Thanks for helping improve WakuWaku. Bug reports, focused fixes, tests, and
 well-scoped features are welcome.
 
 ## Development setup
@@ -31,9 +31,9 @@ bun install
 bun run dev
 ```
 
-On macOS the watcher builds and signs `target/debug/Waku Debug.app`; on Linux
-it builds `target/debug/waku`. In both cases the provider daemon remains an
-external `target/debug/waku-debug-daemon`: provider-only edits rebuild and
+On macOS the watcher builds and signs `target/debug/WakuWaku Debug.app`; on Linux
+it builds `target/debug/wakuwaku`. In both cases the provider daemon remains an
+external `target/debug/wakuwaku-debug-daemon`: provider-only edits rebuild and
 hot-swap that process without relaunching the app, while desktop edits rebuild
 and relaunch the app normally. Keep that watcher running while you work. Do
 not start a second watcher or manually relaunch the debug app. Press `Ctrl-C`,
@@ -56,12 +56,12 @@ The archive is written under `target/release` with an install-prefix layout
 not bundle system graphics libraries; distribution packages should declare
 those runtime dependencies normally.
 
-`website/public/install.sh` (served at `https://waku.sh/install.sh`) is what
+`website/public/install.sh` (served at `https://wakuwaku.bingzi.dev/install.sh`) is what
 users run to install that archive. Point it at a local build to exercise it
 without publishing:
 
 ```sh
-WAKU_BUNDLE_PATH=target/release/waku-<version>-<target>.tar.gz \
+WAKUWAKU_BUNDLE_PATH=target/release/wakuwaku-<version>-<target>.tar.gz \
   sh website/public/install.sh
 ```
 
@@ -88,16 +88,16 @@ Run the focused checks relevant to your change, then run the full baseline
 before opening a pull request:
 
 ```sh
-cargo fmt --package waku --package waku-protocol --package waku-client --package waku-core --package waku-daemon -- --check
+cargo fmt --package wakuwaku --package wakuwaku-protocol --package wakuwaku-client --package wakuwaku-core --package wakuwaku-daemon -- --check
 cargo check
 cargo test
 bun run protocol:check
-bun run --filter @waku/client check
-bun run --filter @waku/client test
+bun run --filter @wakuwaku/client check
+bun run --filter @wakuwaku/client test
 ```
 
 When a Rust wire type changes, run `bun run protocol:generate` and commit the
-updated files under `packages/waku-client/src/generated`.
+updated files under `packages/wakuwaku-client/src/generated`.
 
 For user-visible changes, wait for the watcher to report a successful rebuild
 and validate the freshly relaunched app. Include screenshots or a short

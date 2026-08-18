@@ -91,7 +91,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
-          path: target/release/waku-*-x86_64-unknown-linux-gnu.tar.gz
+          path: target/release/wakuwaku-*-x86_64-unknown-linux-gnu.tar.gz
           if-no-files-found: error
 
   linux-arm64:
@@ -137,7 +137,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: linux-arm64
-          path: target/release/waku-*-aarch64-unknown-linux-gnu.tar.gz
+          path: target/release/wakuwaku-*-aarch64-unknown-linux-gnu.tar.gz
           if-no-files-found: error
 
   macos:
@@ -197,9 +197,9 @@ jobs:
 
       - name: Release
         env:
-          WAKU_SIGNING_IDENTITY: ${{ secrets.WAKU_SIGNING_IDENTITY }}
-          WAKU_ANALYTICS_ENDPOINT: ${{ secrets.WAKU_ANALYTICS_ENDPOINT }}
-          WAKU_ANALYTICS_WEBSITE_ID: ${{ secrets.WAKU_ANALYTICS_WEBSITE_ID }}
+          WAKUWAKU_SIGNING_IDENTITY: ${{ secrets.WAKUWAKU_SIGNING_IDENTITY }}
+          WAKUWAKU_ANALYTICS_ENDPOINT: ${{ secrets.WAKUWAKU_ANALYTICS_ENDPOINT }}
+          WAKUWAKU_ANALYTICS_WEBSITE_ID: ${{ secrets.WAKUWAKU_ANALYTICS_WEBSITE_ID }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: bun run release --local
 
@@ -207,9 +207,9 @@ jobs:
         with:
           name: macos
           path: |
-            dist/Waku-*.dmg
-            dist/Waku-*.md
-            dist/Waku-*.zip
+            dist/WakuWaku-*.dmg
+            dist/WakuWaku-*.md
+            dist/WakuWaku-*.zip
             dist/appcast.xml
           if-no-files-found: error
 

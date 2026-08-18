@@ -1225,7 +1225,7 @@ impl Waku {
     fn daemon_exposure_from_fields(
         &self,
         cx: &App,
-    ) -> Result<waku_client::DaemonExposureSettings, String> {
+    ) -> Result<wakuwaku_client::DaemonExposureSettings, String> {
         let port = self
             .daemon_port_input
             .read(cx)
@@ -1241,7 +1241,7 @@ impl Waku {
         settings.port = port;
         settings
             .with_allowed_origins_text(&origins)
-            .and_then(waku_client::DaemonExposureSettings::validate)
+            .and_then(wakuwaku_client::DaemonExposureSettings::validate)
             .map_err(|error| error.to_string())
     }
 
@@ -1296,14 +1296,14 @@ impl Waku {
                 return;
             }
         };
-        settings.token = waku_client::DaemonExposureSettings::new_token();
+        settings.token = wakuwaku_client::DaemonExposureSettings::new_token();
         self.daemon_token_revealed = false;
         self.apply_daemon_exposure(settings, cx);
     }
 
     fn apply_daemon_exposure(
         &mut self,
-        settings: waku_client::DaemonExposureSettings,
+        settings: wakuwaku_client::DaemonExposureSettings,
         cx: &mut Context<Self>,
     ) {
         if self.daemon_reconfigure_pending || settings == self.state.daemon_exposure {
@@ -1644,7 +1644,7 @@ impl Waku {
     fn render_builtin_provider_cards(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let mut group = settings_group(theme);
-        for (index, preset) in waku_client::ProviderPreset::ALL.into_iter().enumerate() {
+        for (index, preset) in wakuwaku_client::ProviderPreset::ALL.into_iter().enumerate() {
             if index > 0 {
                 group = group.child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border));
             }
@@ -1721,7 +1721,7 @@ impl Waku {
                     );
                 }
                 ProviderRowActions::Pending => {
-                    if let Some(login_id) = phase.and_then(waku_client::AuthPhase::login_id) {
+                    if let Some(login_id) = phase.and_then(wakuwaku_client::AuthPhase::login_id) {
                         actions = actions.child(
                             settings_row_action(
                                 SharedString::from(format!(
@@ -1767,7 +1767,7 @@ impl Waku {
                         .child(actions),
                 );
             if let Some(phase) = phase {
-                if let waku_client::AuthPhase::AwaitingApiKey { .. } = phase {
+                if let wakuwaku_client::AuthPhase::AwaitingApiKey { .. } = phase {
                     let api_provider = provider.clone();
                     let api_key_provider = provider.clone();
                     row = row.child(
@@ -1859,7 +1859,7 @@ impl Waku {
             .external_providers
             .iter()
             .find(|provider| provider.id == provider_id);
-        let api_formats = waku_client::ApiFormat::ALL;
+        let api_formats = wakuwaku_client::ApiFormat::ALL;
         let format = self.provider_api_format;
         let format_button = div()
             .flex()
@@ -2552,7 +2552,7 @@ impl Waku {
                 }
                 this.auth_pending.clear();
                 match result {
-                    Ok(waku_client::ResponsePayload::AuthStatus { statuses, phases }) => {
+                    Ok(wakuwaku_client::ResponsePayload::AuthStatus { statuses, phases }) => {
                         this.auth_statuses = statuses
                             .into_iter()
                             .map(|status| (status.provider.clone(), status))
@@ -2631,7 +2631,7 @@ impl Waku {
                             client.list_models(provider.clone())
                         };
                         match response {
-                            Ok(waku_client::ResponsePayload::Models { catalog }) => {
+                            Ok(wakuwaku_client::ResponsePayload::Models { catalog }) => {
                                 catalogs.push(catalog);
                             }
                             Ok(_) => errors.push((provider, "invalid models response".into())),
@@ -2675,7 +2675,7 @@ impl Waku {
     fn start_provider_login(
         &mut self,
         provider: ProviderId,
-        method: waku_client::LoginMethod,
+        method: wakuwaku_client::LoginMethod,
         cx: &mut Context<Self>,
     ) {
         self.auth_generation = self.auth_generation.wrapping_add(1);
@@ -2697,10 +2697,10 @@ impl Waku {
                     return;
                 }
                 match result {
-                    Ok(waku_client::ResponsePayload::Login { phase }) => {
+                    Ok(wakuwaku_client::ResponsePayload::Login { phase }) => {
                         match &phase {
-                            waku_client::AuthPhase::AwaitingBrowser { url, .. }
-                            | waku_client::AuthPhase::AwaitingDevice {
+                            wakuwaku_client::AuthPhase::AwaitingBrowser { url, .. }
+                            | wakuwaku_client::AuthPhase::AwaitingDevice {
                                 verification_url: url,
                                 ..
                             } => cx.open_url(url),
@@ -2751,7 +2751,7 @@ impl Waku {
             return;
         }
         let Some(login_id) = self.auth_phases.iter().find_map(|phase| {
-            let waku_client::AuthPhase::AwaitingApiKey {
+            let wakuwaku_client::AuthPhase::AwaitingApiKey {
                 login_id,
                 provider: phase_provider,
                 ..
@@ -2772,7 +2772,7 @@ impl Waku {
                     client.complete_api_key_login(
                         login_id,
                         provider,
-                        waku_client::SecretString::new(key),
+                        wakuwaku_client::SecretString::new(key),
                     )
                 })
                 .await;
@@ -2879,15 +2879,15 @@ fn settings_row_action(
 
 const AUTH_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-fn auth_phase_needs_status_poll(phase: &waku_client::AuthPhase) -> bool {
+fn auth_phase_needs_status_poll(phase: &wakuwaku_client::AuthPhase) -> bool {
     matches!(
         phase,
-        waku_client::AuthPhase::AwaitingBrowser { .. }
-            | waku_client::AuthPhase::AwaitingDevice { .. }
+        wakuwaku_client::AuthPhase::AwaitingBrowser { .. }
+            | wakuwaku_client::AuthPhase::AwaitingDevice { .. }
     )
 }
 
-fn auth_status_should_poll(phases: &[waku_client::AuthPhase]) -> bool {
+fn auth_status_should_poll(phases: &[wakuwaku_client::AuthPhase]) -> bool {
     phases.iter().any(auth_phase_needs_status_poll)
 }
 
@@ -2899,47 +2899,47 @@ enum ProviderRowActions {
 }
 
 fn provider_row_actions(
-    method: Option<waku_client::AuthMethod>,
-    phase: Option<&waku_client::AuthPhase>,
+    method: Option<wakuwaku_client::AuthMethod>,
+    phase: Option<&wakuwaku_client::AuthPhase>,
     login_in_flight: bool,
 ) -> ProviderRowActions {
     if login_in_flight
         || matches!(
             phase,
             Some(
-                waku_client::AuthPhase::AwaitingBrowser { .. }
-                    | waku_client::AuthPhase::AwaitingDevice { .. }
-                    | waku_client::AuthPhase::AwaitingApiKey { .. }
+                wakuwaku_client::AuthPhase::AwaitingBrowser { .. }
+                    | wakuwaku_client::AuthPhase::AwaitingDevice { .. }
+                    | wakuwaku_client::AuthPhase::AwaitingApiKey { .. }
             )
         )
     {
         return ProviderRowActions::Pending;
     }
-    if matches!(phase, Some(waku_client::AuthPhase::Failed { .. })) {
+    if matches!(phase, Some(wakuwaku_client::AuthPhase::Failed { .. })) {
         return ProviderRowActions::Login;
     }
-    if matches!(phase, Some(waku_client::AuthPhase::Completed { .. })) {
+    if matches!(phase, Some(wakuwaku_client::AuthPhase::Completed { .. })) {
         return ProviderRowActions::Logout;
     }
     match method {
         Some(
-            waku_client::AuthMethod::EnvKey
-            | waku_client::AuthMethod::StoredApiKey
-            | waku_client::AuthMethod::Oauth,
+            wakuwaku_client::AuthMethod::EnvKey
+            | wakuwaku_client::AuthMethod::StoredApiKey
+            | wakuwaku_client::AuthMethod::Oauth,
         ) => ProviderRowActions::Logout,
-        Some(waku_client::AuthMethod::None) | None => ProviderRowActions::Login,
+        Some(wakuwaku_client::AuthMethod::None) | None => ProviderRowActions::Login,
     }
 }
 
-fn auth_status_label(status: Option<&waku_client::ProviderAuthStatus>) -> String {
+fn auth_status_label(status: Option<&wakuwaku_client::ProviderAuthStatus>) -> String {
     let Some(status) = status else {
         return tr!("providers.not_authenticated");
     };
     match status.method {
-        waku_client::AuthMethod::None => tr!("providers.not_authenticated"),
-        waku_client::AuthMethod::EnvKey
-        | waku_client::AuthMethod::StoredApiKey
-        | waku_client::AuthMethod::Oauth => {
+        wakuwaku_client::AuthMethod::None => tr!("providers.not_authenticated"),
+        wakuwaku_client::AuthMethod::EnvKey
+        | wakuwaku_client::AuthMethod::StoredApiKey
+        | wakuwaku_client::AuthMethod::Oauth => {
             if let Some(email) = status.email.as_deref().filter(|value| !value.is_empty()) {
                 return email.to_owned();
             }
@@ -2955,29 +2955,29 @@ fn auth_status_label(status: Option<&waku_client::ProviderAuthStatus>) -> String
     }
 }
 
-fn preset_login_methods(preset_id: &str) -> &'static [waku_client::LoginMethod] {
+fn preset_login_methods(preset_id: &str) -> &'static [wakuwaku_client::LoginMethod] {
     match preset_id {
-        waku_client::ProviderId::OPENAI_CODEX => &[
-            waku_client::LoginMethod::OauthBrowser,
-            waku_client::LoginMethod::OauthDevice,
+        wakuwaku_client::ProviderId::OPENAI_CODEX => &[
+            wakuwaku_client::LoginMethod::OauthBrowser,
+            wakuwaku_client::LoginMethod::OauthDevice,
         ],
-        waku_client::ProviderId::XAI_OAUTH => &[waku_client::LoginMethod::OauthDevice],
-        _ => &[waku_client::LoginMethod::ApiKey],
+        wakuwaku_client::ProviderId::XAI_OAUTH => &[wakuwaku_client::LoginMethod::OauthDevice],
+        _ => &[wakuwaku_client::LoginMethod::ApiKey],
     }
 }
 
-fn login_method_label(method: waku_client::LoginMethod) -> String {
+fn login_method_label(method: wakuwaku_client::LoginMethod) -> String {
     match method {
-        waku_client::LoginMethod::ApiKey => tr!("providers.connect"),
-        waku_client::LoginMethod::OauthBrowser => tr!("providers.sign_in"),
-        waku_client::LoginMethod::OauthDevice => tr!("providers.use_device_code"),
+        wakuwaku_client::LoginMethod::ApiKey => tr!("providers.connect"),
+        wakuwaku_client::LoginMethod::OauthBrowser => tr!("providers.sign_in"),
+        wakuwaku_client::LoginMethod::OauthDevice => tr!("providers.use_device_code"),
     }
 }
 
-fn auth_phase_summary(phase: &waku_client::AuthPhase) -> String {
+fn auth_phase_summary(phase: &wakuwaku_client::AuthPhase) -> String {
     match phase {
-        waku_client::AuthPhase::AwaitingBrowser { .. } => tr!("providers.browser_waiting"),
-        waku_client::AuthPhase::AwaitingDevice {
+        wakuwaku_client::AuthPhase::AwaitingBrowser { .. } => tr!("providers.browser_waiting"),
+        wakuwaku_client::AuthPhase::AwaitingDevice {
             user_code,
             verification_url,
             ..
@@ -2986,10 +2986,10 @@ fn auth_phase_summary(phase: &waku_client::AuthPhase) -> String {
             code = user_code.as_str(),
             url = verification_url.as_str()
         ),
-        waku_client::AuthPhase::AwaitingApiKey { instructions, .. } => instructions.clone(),
-        waku_client::AuthPhase::Completed { .. } => String::new(),
-        waku_client::AuthPhase::Failed { message, .. } => message.clone(),
-        waku_client::AuthPhase::Idle => String::new(),
+        wakuwaku_client::AuthPhase::AwaitingApiKey { instructions, .. } => instructions.clone(),
+        wakuwaku_client::AuthPhase::Completed { .. } => String::new(),
+        wakuwaku_client::AuthPhase::Failed { message, .. } => message.clone(),
+        wakuwaku_client::AuthPhase::Idle => String::new(),
     }
 }
 struct ProviderDraftPolicy<'a> {
@@ -3081,10 +3081,10 @@ fn parse_provider_draft_policy(
 }
 
 #[cfg(test)]
-fn auth_phase_url(phase: &waku_client::AuthPhase) -> Option<&str> {
+fn auth_phase_url(phase: &wakuwaku_client::AuthPhase) -> Option<&str> {
     match phase {
-        waku_client::AuthPhase::AwaitingBrowser { url, .. }
-        | waku_client::AuthPhase::AwaitingDevice {
+        wakuwaku_client::AuthPhase::AwaitingBrowser { url, .. }
+        | wakuwaku_client::AuthPhase::AwaitingDevice {
             verification_url: url,
             ..
         } => Some(url),
@@ -3104,16 +3104,16 @@ mod auth_behavior_tests {
         auth_status_label, auth_status_should_poll, preset_login_methods, provider_row_actions,
     };
     use uuid::Uuid;
-    use waku_client::{AuthMethod, LoginMethod, ProviderAuthStatus, ProviderId};
+    use wakuwaku_client::{AuthMethod, LoginMethod, ProviderAuthStatus, ProviderId};
 
     #[test]
     fn browser_and_device_phases_provide_system_urls() {
-        let browser = waku_client::AuthPhase::AwaitingBrowser {
+        let browser = wakuwaku_client::AuthPhase::AwaitingBrowser {
             login_id: Uuid::nil(),
             provider: ProviderId::new("openai-codex"),
             url: "https://browser".into(),
         };
-        let device = waku_client::AuthPhase::AwaitingDevice {
+        let device = wakuwaku_client::AuthPhase::AwaitingDevice {
             login_id: Uuid::nil(),
             provider: ProviderId::new("openai-codex"),
             user_code: "CODE".into(),
@@ -3132,7 +3132,7 @@ mod auth_behavior_tests {
 
     #[test]
     fn secret_material_is_redacted_from_debug_and_display() {
-        let secret = waku_client::SecretString::new("not-persisted");
+        let secret = wakuwaku_client::SecretString::new("not-persisted");
         assert!(!format!("{secret:?}").contains("not-persisted"));
         assert!(!secret.to_string().contains("not-persisted"));
     }
@@ -3140,14 +3140,14 @@ mod auth_behavior_tests {
     #[test]
     fn codex_exposes_explicit_browser_and_device_login() {
         assert_eq!(
-            preset_login_methods(waku_client::ProviderId::OPENAI_CODEX),
+            preset_login_methods(wakuwaku_client::ProviderId::OPENAI_CODEX),
             [LoginMethod::OauthBrowser, LoginMethod::OauthDevice]
         );
     }
 
     #[test]
     fn auth_phases_are_scoped_to_the_login_owner() {
-        let phase = waku_client::AuthPhase::AwaitingDevice {
+        let phase = wakuwaku_client::AuthPhase::AwaitingDevice {
             login_id: Uuid::nil(),
             provider: ProviderId::new("openai-codex"),
             user_code: "CODE".into(),
@@ -3163,7 +3163,7 @@ mod auth_behavior_tests {
 
     #[test]
     fn failed_login_always_carries_login_id_and_provider() {
-        let phase = waku_client::AuthPhase::Failed {
+        let phase = wakuwaku_client::AuthPhase::Failed {
             login_id: Uuid::nil(),
             provider: ProviderId::new("openai-codex"),
             message: "loopback unavailable".into(),
@@ -3225,7 +3225,7 @@ mod auth_behavior_tests {
 
     #[test]
     fn browser_phase_uses_localized_waiting_copy() {
-        let phase = waku_client::AuthPhase::AwaitingBrowser {
+        let phase = wakuwaku_client::AuthPhase::AwaitingBrowser {
             login_id: Uuid::nil(),
             provider: ProviderId::new("openai-codex"),
             url: "https://browser.example".into(),
@@ -3237,7 +3237,7 @@ mod auth_behavior_tests {
 
     #[test]
     fn device_phase_uses_localized_code_and_url() {
-        let phase = waku_client::AuthPhase::AwaitingDevice {
+        let phase = wakuwaku_client::AuthPhase::AwaitingDevice {
             login_id: Uuid::nil(),
             provider: ProviderId::new("openai-codex"),
             user_code: "WXYZ".into(),
@@ -3258,7 +3258,7 @@ mod auth_behavior_tests {
 
     #[test]
     fn completed_phase_contributes_no_duplicate_secondary_text() {
-        let phase = waku_client::AuthPhase::Completed {
+        let phase = wakuwaku_client::AuthPhase::Completed {
             login_id: Uuid::nil(),
             provider: ProviderId::new("xai-oauth"),
         };
@@ -3299,7 +3299,7 @@ mod auth_behavior_tests {
 
     #[test]
     fn awaiting_device_phase_is_pending_without_start_or_logout() {
-        let phase = waku_client::AuthPhase::AwaitingDevice {
+        let phase = wakuwaku_client::AuthPhase::AwaitingDevice {
             login_id: Uuid::nil(),
             provider: ProviderId::new("xai-oauth"),
             user_code: "WXYZ".into(),
@@ -3322,7 +3322,7 @@ mod auth_behavior_tests {
 
     #[test]
     fn failed_phase_is_retryable_login_even_if_previously_connected() {
-        let phase = waku_client::AuthPhase::Failed {
+        let phase = wakuwaku_client::AuthPhase::Failed {
             login_id: Uuid::nil(),
             provider: ProviderId::new("openai-codex"),
             message: "loopback unavailable".into(),
@@ -3333,8 +3333,8 @@ mod auth_behavior_tests {
         );
     }
 
-    fn awaiting_device() -> waku_client::AuthPhase {
-        waku_client::AuthPhase::AwaitingDevice {
+    fn awaiting_device() -> wakuwaku_client::AuthPhase {
+        wakuwaku_client::AuthPhase::AwaitingDevice {
             login_id: Uuid::nil(),
             provider: ProviderId::new("xai-oauth"),
             user_code: "WXYZ".into(),
@@ -3350,7 +3350,7 @@ mod auth_behavior_tests {
 
     #[test]
     fn awaiting_browser_keeps_auth_status_poll_armed() {
-        let phase = waku_client::AuthPhase::AwaitingBrowser {
+        let phase = wakuwaku_client::AuthPhase::AwaitingBrowser {
             login_id: Uuid::nil(),
             provider: ProviderId::new("openai-codex"),
             url: "https://browser.example".into(),
@@ -3360,7 +3360,7 @@ mod auth_behavior_tests {
 
     #[test]
     fn awaiting_api_key_does_not_arm_auth_status_poll() {
-        let phase = waku_client::AuthPhase::AwaitingApiKey {
+        let phase = wakuwaku_client::AuthPhase::AwaitingApiKey {
             login_id: Uuid::nil(),
             provider: ProviderId::new("xai"),
             instructions: "key".into(),
@@ -3370,25 +3370,27 @@ mod auth_behavior_tests {
 
     #[test]
     fn completed_and_failed_stop_auth_status_poll() {
-        let completed = waku_client::AuthPhase::Completed {
+        let completed = wakuwaku_client::AuthPhase::Completed {
             login_id: Uuid::nil(),
             provider: ProviderId::new("xai-oauth"),
         };
-        let failed = waku_client::AuthPhase::Failed {
+        let failed = wakuwaku_client::AuthPhase::Failed {
             login_id: Uuid::nil(),
             provider: ProviderId::new("xai-oauth"),
             message: "expired".into(),
         };
         assert!(!auth_status_should_poll(&[completed]));
         assert!(!auth_status_should_poll(&[failed]));
-        assert!(!auth_status_should_poll(&[waku_client::AuthPhase::Idle]));
+        assert!(!auth_status_should_poll(&[
+            wakuwaku_client::AuthPhase::Idle
+        ]));
     }
 
     #[test]
     fn terminal_phase_stops_poll_without_settings_reentry() {
         let mut phases = vec![awaiting_device()];
         assert!(auth_status_should_poll(&phases));
-        phases[0] = waku_client::AuthPhase::Completed {
+        phases[0] = wakuwaku_client::AuthPhase::Completed {
             login_id: Uuid::nil(),
             provider: ProviderId::new("xai-oauth"),
         };
@@ -3397,7 +3399,7 @@ mod auth_behavior_tests {
 
     #[test]
     fn completed_phase_offers_logout_before_status_refresh() {
-        let phase = waku_client::AuthPhase::Completed {
+        let phase = wakuwaku_client::AuthPhase::Completed {
             login_id: Uuid::nil(),
             provider: ProviderId::new("xai-oauth"),
         };

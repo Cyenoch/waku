@@ -53,7 +53,7 @@ impl Waku {
             Query::Pending => fallback,
             Query::Missing(token) => {
                 let fetch_path = workspace_path.clone();
-                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+                let workspace = wakuwaku_client::WorkspaceClient::new(self.daemon.client());
                 cx.spawn(async move |waku, cx| {
                     let result = cx
                         .background_executor()
@@ -61,11 +61,11 @@ impl Waku {
                             let fetch_path = fetch_path.clone();
                             async move {
                                 match workspace.request(
-                                    waku_client::WorkspaceOperation::InspectBranches {
+                                    wakuwaku_client::WorkspaceOperation::InspectBranches {
                                         cwd: fetch_path.clone(),
                                     },
                                 ) {
-                                    Ok(waku_client::WorkspaceResult::Branches { snapshot }) => {
+                                    Ok(wakuwaku_client::WorkspaceResult::Branches { snapshot }) => {
                                         Ok(snapshot)
                                     }
                                     Ok(_) => {
@@ -258,7 +258,7 @@ impl Waku {
     }
 
     /// Apply the keyboard-selected action, returning whether the caller should
-    /// dismiss the picker after releasing its `Waku` update lease.
+    /// dismiss the picker after releasing its `WakuWaku` update lease.
     pub(super) fn confirm_branch_picker_action(
         &mut self,
         actions: &[BranchPickerAction],
@@ -293,7 +293,7 @@ impl Waku {
         }
         self.branch_operation_pending = true;
         cx.notify();
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let workspace = wakuwaku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
@@ -305,13 +305,13 @@ impl Waku {
                             BranchOperation::Create(branch) => (branch, true),
                         };
                         match workspace.request(
-                            waku_client::WorkspaceOperation::CheckoutBranch {
+                            wakuwaku_client::WorkspaceOperation::CheckoutBranch {
                                 cwd: path,
                                 branch,
                                 create,
                             },
                         )? {
-                            waku_client::WorkspaceResult::BranchChanged { snapshot } => {
+                            wakuwaku_client::WorkspaceResult::BranchChanged { snapshot } => {
                                 Ok(snapshot)
                             }
                             _ => anyhow::bail!("the daemon returned an invalid branch response"),

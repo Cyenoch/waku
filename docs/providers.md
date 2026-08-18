@@ -1,6 +1,6 @@
 # Provider endpoints
 
-Waku uses the built-in Rust harness to connect directly to configured HTTP
+WakuWaku uses the built-in Rust harness to connect directly to configured HTTP
 model endpoints. It supports OpenAI Responses, OpenAI Chat Completions, and
 Anthropic wire formats. It never launches, detects, installs, or authenticates
 third-party CLIs.
@@ -30,7 +30,7 @@ Open **Settings → Providers** for a configurable endpoint:
 
 - **ID**, **Name**, and **Base URL** (including `/v1`)
 - **API format**: OpenAI Responses, OpenAI Chat Completions, or Anthropic
-- **API-key environment**: daemon environment-variable name; Waku never stores the secret
+- **API-key environment**: daemon environment-variable name; WakuWaku never stores the secret
 - **Headers**: non-secret only
 - **Models**: explicit IDs used only after live discovery returns an error
 
@@ -48,7 +48,7 @@ format.
 
 ## Secrets
 
-API keys and OAuth refresh tokens entered in Waku are stored in a daemon-owned
+API keys and OAuth refresh tokens entered in WakuWaku are stored in a daemon-owned
 `credentials.json` file under the application data directory. On Unix the parent
 directory is owner-only (`0700`) and the file is owner read/write (`0600`).
 Environment-variable credentials are read at runtime; `settings.json` never

@@ -2,7 +2,7 @@ import type {
   FileEntry,
   ReportedCommand,
   SlashCommand,
-} from '@waku/client'
+} from '@wakuwaku/client'
 import { fuzzyScore } from './palette-search'
 
 export const COMPOSER_AUTOCOMPLETE_CAP = 64

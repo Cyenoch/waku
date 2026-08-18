@@ -1,5 +1,5 @@
 import { useQueries, useQuery } from '@tanstack/react-query'
-import type { ModelCatalog, ProviderId } from '@waku/client'
+import type { ModelCatalog, ProviderId } from '@wakuwaku/client'
 import { useDaemon } from '@/lib/daemon-context'
 import {
   authStatusPollIntervalMs,
@@ -164,6 +164,6 @@ export function useUsageHistory(
 }
 
 function requireClient<T>(client: T | null): T {
-  if (!client) throw new Error('Waku daemon is disconnected')
+  if (!client) throw new Error('WakuWaku daemon is disconnected')
   return client
 }

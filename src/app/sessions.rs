@@ -103,7 +103,7 @@ impl Waku {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    match waku_client::persistence::hydrate_session(&daemon, session_id)? {
+                    match wakuwaku_client::persistence::hydrate_session(&daemon, session_id)? {
                         Some(session) => Ok(session),
                         None => {
                             anyhow::bail!("the task no longer exists")
@@ -192,6 +192,9 @@ impl Waku {
             self.restore_selected_composer_draft(cx);
             self.sync_user_input_answer(cx);
             self.restore_right_panel_state(session_id, cx);
+            if self.active_right_panel_surface() == Some(&RightPanelSurface::Trajectory) {
+                self.ensure_trajectory_session_state(session_id, cx);
+            }
         } else {
             self.ensure_right_panel_terminals(cx);
         }
@@ -297,6 +300,7 @@ impl Waku {
         self.reset_session_runtime(session_id);
         self.background_work.remove(&session_id);
         self.remove_right_panel_session_state(session_id);
+        self.trajectory_sessions.borrow_mut().remove(&session_id);
         self.remove_composer_draft(composer_draft_key, cx);
         self.state.sessions.remove(index);
         if let Err(error) = self.store.remove_session(session_id) {
@@ -327,13 +331,14 @@ impl Waku {
             }
         }
         if let Some(project_path) = project_path {
-            let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+            let workspace = wakuwaku_client::WorkspaceClient::new(self.daemon.client());
             cx.background_executor()
                 .spawn(async move {
-                    let _ = workspace.request(waku_client::WorkspaceOperation::DeleteSessionRefs {
-                        cwd: project_path,
-                        session_id,
-                    });
+                    let _ =
+                        workspace.request(wakuwaku_client::WorkspaceOperation::DeleteSessionRefs {
+                            cwd: project_path,
+                            session_id,
+                        });
                 })
                 .detach();
         }
@@ -844,7 +849,7 @@ impl Waku {
 
     pub(super) fn set_service_tier(
         &mut self,
-        tier: waku_client::ServiceTier,
+        tier: wakuwaku_client::ServiceTier,
         cx: &mut Context<Self>,
     ) {
         let Some(session) = self.selected_session() else {
@@ -1073,11 +1078,11 @@ impl Waku {
         if let Some(previous_kinds) = previous_kinds.as_deref() {
             self.splice_active_transcript_rows_after_visibility_change(previous_kinds);
         }
-        // A provider runtime owns its Waku JavaScript REPL and Computer Use
+        // A provider runtime owns its WakuWaku JavaScript REPL and Computer Use
         // descendants. Normally Stop closes that process tree and the next
         // prompt resumes the same provider thread with a fresh runtime. A
         // detached process or subagent is the exception: its provider must
-        // remain resident so Waku can keep observing and stopping it.
+        // remain resident so WakuWaku can keep observing and stopping it.
         if retain_runtime && keep_runtime {
             if let Some(runtime) = runtime.take() {
                 self.runtimes.insert(session_id, runtime);
@@ -1355,17 +1360,17 @@ impl Waku {
             return;
         }
 
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let workspace = wakuwaku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     match workspace.request(
-                        waku_client::WorkspaceOperation::CreateProjectlessWorkspace {
+                        wakuwaku_client::WorkspaceOperation::CreateProjectlessWorkspace {
                             prompt: None,
                         },
                     )? {
-                        waku_client::WorkspaceResult::ProjectlessWorkspace { cwd } => Ok(cwd),
+                        wakuwaku_client::WorkspaceResult::ProjectlessWorkspace { cwd } => Ok(cwd),
                         _ => anyhow::bail!("the daemon returned an invalid projectless response"),
                     }
                 })

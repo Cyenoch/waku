@@ -1,4 +1,11 @@
-import { MAX_WIRE_MESSAGE_BYTES, type MessageAttachment, type WakuClient } from '@waku/client'
+import {
+  MAX_WIRE_MESSAGE_BYTES,
+  type MessageAttachment,
+  type PromptAttachmentSource,
+  type PromptImageRef,
+  type PromptInput,
+  type WakuClient,
+} from '@wakuwaku/client'
 
 const MAX_UPLOAD_BYTES = Math.floor((MAX_WIRE_MESSAGE_BYTES * 3) / 4) - 1024 * 1024
 
@@ -56,13 +63,52 @@ export async function importDaemonPathAttachment(
   }
 }
 
+export function promptInputFromAttachments(
+  text: string,
+  attachments: MessageAttachment[],
+  displayText?: string,
+): PromptInput {
+  const sources: PromptAttachmentSource[] = attachments.map((attachment) => {
+    const reference = attachment.blob_reference
+    const stored = reference?.startsWith('wakuwaku-blob:') || reference?.startsWith('wakuwaku-attachment:')
+      ? reference
+      : null
+    return {
+      reference: stored ?? null,
+      mention: attachment.mention,
+      name: attachment.name,
+      isDir: attachment.is_dir,
+      isImage: attachment.is_image,
+      mime: attachment.is_image ? sourceImageMime(attachment.name) : null,
+    }
+  })
+  const imageAttachments: PromptImageRef[] = attachments.flatMap((attachment) => {
+    if (!attachment.is_image) return []
+    const reference = attachment.blob_reference
+    if (!reference) return []
+    if (reference.startsWith('wakuwaku-blob:')) {
+      return [{ kind: 'blob' as const, reference }]
+    }
+    if (reference.startsWith('wakuwaku-attachment:')) {
+      return [{ kind: 'attachment' as const, reference }]
+    }
+    return []
+  })
+  return {
+    text,
+    ...(displayText !== undefined && displayText !== text ? { displayText } : {}),
+    ...(imageAttachments.length > 0 ? { attachments: imageAttachments } : {}),
+    ...(sources.length > 0 ? { sources } : {}),
+  }
+}
+
 export async function readAttachmentImage(
   client: WakuClient,
   attachment: MessageAttachment,
 ): Promise<string> {
   const reference = attachment.blob_reference
   if (!reference) throw new Error('This attachment has no daemon reference')
-  const command = reference.startsWith('waku-blob:')
+  const command = reference.startsWith('wakuwaku-blob:')
     ? ({ type: 'readBlob', reference } as const)
     : ({ type: 'readAttachment', reference, path: attachment.path } as const)
   const response = await client.request(command)
@@ -86,6 +132,11 @@ function imageMimeType(name: string): string {
       webp: 'image/webp',
     }[extension ?? ''] ?? 'application/octet-stream'
   )
+}
+
+function sourceImageMime(name: string): string | null {
+  const mime = imageMimeType(name)
+  return mime === 'application/octet-stream' ? null : mime
 }
 
 function fileBase64(file: File): Promise<string> {

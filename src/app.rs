@@ -511,6 +511,7 @@ fn fitted_panel_widths(
 enum RightPanelSurface {
     Browser(Uuid),
     Terminal(Uuid),
+    Trajectory,
     BackgroundWork {
         key: BackgroundWorkKey,
         title: String,
@@ -547,13 +548,13 @@ struct PreparedSubmission {
 struct DriverStartRequest {
     session_id: Uuid,
     options: DriverStartOptions,
-    task: waku_client::StartTask,
+    task: wakuwaku_client::StartTask,
     event_wake: smol::channel::Sender<()>,
-    daemon_client: waku_client::DaemonClient,
+    daemon_client: wakuwaku_client::DaemonClient,
 }
 
 /// A daemon-owned runtime that has started off-thread but is not installed
-/// into Waku's runtime map yet. Its event receiver safely buffers early events.
+/// into WakuWaku's runtime map yet. Its event receiver safely buffers early events.
 struct PreparedDriver {
     handle: DriverHandle,
     events: Receiver<DriverEvent>,
@@ -640,7 +641,7 @@ enum EventPumpSchedule {
 }
 
 /// One cached island of the root view: a region rendered by delegating back
-/// into [`Waku`] under its own view identity.
+/// into [`WakuWaku`] under its own view identity.
 ///
 /// All state stays on the root entity; what the island buys is scope for
 /// gpui's cached-view machinery. The pulse clock and the streaming veil lease
@@ -925,7 +926,7 @@ pub struct Waku {
     /// Owns the local daemon for exactly as long as the desktop app entity.
     /// Debug builds can replace it independently after a rebuild; all live
     /// driver handles below are lightweight RPC proxies.
-    daemon: waku_client::DaemonSupervisor,
+    daemon: wakuwaku_client::DaemonSupervisor,
     /// Cached once at construction for the Daemon settings connection URL;
     /// rendering must not query account or network configuration.
     daemon_hostname: String,
@@ -982,16 +983,16 @@ pub struct Waku {
     provider_context_window_input: Entity<ComposerInput>,
     provider_max_output_tokens_input: Entity<ComposerInput>,
     provider_default_model_input: Entity<ComposerInput>,
-    provider_api_format: waku_client::ApiFormat,
+    provider_api_format: wakuwaku_client::ApiFormat,
     auth_api_key_input: Entity<ComposerInput>,
-    auth_statuses: HashMap<ProviderId, waku_client::ProviderAuthStatus>,
-    auth_phases: Vec<waku_client::AuthPhase>,
+    auth_statuses: HashMap<ProviderId, wakuwaku_client::ProviderAuthStatus>,
+    auth_phases: Vec<wakuwaku_client::AuthPhase>,
     auth_generation: u64,
     auth_status_inflight: bool,
     auth_status_queued: bool,
     auth_pending: HashSet<ProviderId>,
     auth_error: HashMap<ProviderId, String>,
-    model_catalogs: HashMap<ProviderId, waku_client::ModelCatalog>,
+    model_catalogs: HashMap<ProviderId, wakuwaku_client::ModelCatalog>,
     model_catalog_pending: HashSet<ProviderId>,
     model_catalog_generation: u64,
     model_catalog_error: HashMap<ProviderId, String>,
@@ -1375,6 +1376,7 @@ pub struct Waku {
     sidebar_pane: Entity<WakuPane>,
     transcript_pane: Entity<WakuPane>,
     right_panel_pane: Entity<WakuPane>,
+    trajectory_sessions: RefCell<HashMap<Uuid, trajectory::TrajectorySessionState>>,
     /// The unix second the pending time-label wake-up targets, or `None` when
     /// none is armed. See `schedule_time_label_wake`.
     time_label_wake: Cell<Option<u64>>,
@@ -1404,8 +1406,12 @@ mod settings;
 mod sidebar;
 mod skills_page;
 mod streaming;
+mod trajectory;
+mod trajectory_inspector;
+mod trajectory_view;
 mod transcript;
 mod transcript_view;
+
 mod usage_meter;
 mod usage_page;
 mod window_chrome;
@@ -1658,7 +1664,7 @@ impl Waku {
     pub fn new(
         window: &mut Window,
         cx: &mut App,
-        daemon: waku_client::DaemonSupervisor,
+        daemon: wakuwaku_client::DaemonSupervisor,
     ) -> Entity<Self> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let store = StateStore::remote(daemon.clone());
@@ -2387,7 +2393,7 @@ impl Waku {
                 provider_context_window_input,
                 provider_max_output_tokens_input,
                 provider_default_model_input,
-                provider_api_format: waku_client::ApiFormat::OpenAiResponses,
+                provider_api_format: wakuwaku_client::ApiFormat::OpenAiResponses,
                 auth_api_key_input,
                 auth_statuses: HashMap::new(),
                 auth_phases: Vec::new(),
@@ -2584,6 +2590,7 @@ impl Waku {
                 sidebar_pane: sidebar_pane.clone(),
                 transcript_pane: transcript_pane.clone(),
                 right_panel_pane: right_panel_pane.clone(),
+                trajectory_sessions: RefCell::new(HashMap::new()),
                 time_label_wake: Cell::new(None),
                 time_label_wake_generation: Cell::new(0),
                 fps_last_frame: Instant::now(),
@@ -2620,3 +2627,24 @@ impl Waku {
 
 #[cfg(test)]
 mod tests;
+
+impl Waku {
+    pub(super) fn apply_trajectory_live_update(
+        &mut self,
+        session_id: Uuid,
+        update: wakuwaku_protocol::TrajectoryLiveUpdate,
+        cx: &mut Context<Self>,
+    ) {
+        let mut sessions = self.trajectory_sessions.borrow_mut();
+        let state = sessions
+            .entry(session_id)
+            .or_insert_with(|| trajectory::TrajectorySessionState::new(session_id));
+        state.apply_live_update(update);
+        if self.state.selected_session == Some(session_id)
+            && self.right_panel_visible
+            && self.active_right_panel_surface() == Some(&RightPanelSurface::Trajectory)
+        {
+            cx.notify();
+        }
+    }
+}

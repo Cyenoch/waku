@@ -41,7 +41,7 @@ fn line_fragment(fragment: &str) -> bool {
 
 /// Removes the `:line`, `:line:column`, or `#LlineCcolumn` suffixes Codex uses
 /// in clickable local-file references. The location is not yet consumed by
-/// Waku's compact editor, but it must not become part of the filesystem path.
+/// WakuWaku's compact editor, but it must not become part of the filesystem path.
 fn strip_file_location(target: &str) -> &str {
     if let Some((path, fragment)) = target.rsplit_once('#')
         && line_fragment(fragment)
@@ -191,7 +191,7 @@ pub(super) fn file_icon_for_path(path: &str) -> &'static str {
 fn review_diff_gap_icon_path(direction: crate::review_diff::ExpansionDirection) -> &'static str {
     match direction {
         // Pierre's direction attributes and rendered chevrons are inverted by
-        // CSS. Waku names the data operation directly, so encode the resulting
+        // CSS. WakuWaku names the data operation directly, so encode the resulting
         // visual here: reveal-from-start points down; reveal-from-end points up.
         crate::review_diff::ExpansionDirection::Start => "icons/chevron-down.svg",
         crate::review_diff::ExpansionDirection::End => "icons/chevron-up.svg",
@@ -665,17 +665,17 @@ fn file_highlighter_language(relative_path: &str) -> &'static str {
 /// Reads a file for the editor, returning its text and whether it can be saved.
 ///
 /// One unbounded `read_to_string`, so callers keep it off the UI thread; the
-/// only caller is [`Waku::read_right_panel_file_into_editor`].
+/// only caller is [`WakuWaku::read_right_panel_file_into_editor`].
 fn read_right_panel_file(
-    workspace: &waku_client::WorkspaceClient,
+    workspace: &wakuwaku_client::WorkspaceClient,
     project_path: &Path,
     relative_path: &str,
 ) -> (String, bool) {
-    match workspace.request(waku_client::WorkspaceOperation::ReadTextFile {
+    match workspace.request(wakuwaku_client::WorkspaceOperation::ReadTextFile {
         root: project_path.to_path_buf(),
         relative_path: PathBuf::from(relative_path),
     }) {
-        Ok(waku_client::WorkspaceResult::TextFile { content }) => (content, true),
+        Ok(wakuwaku_client::WorkspaceResult::TextFile { content }) => (content, true),
         Ok(_) => (
             tr!(
                 "files.unable_to_edit",
@@ -717,6 +717,7 @@ impl RightPanelSurface {
         match self {
             Self::Browser(_) => tr!("right_panel.browser"),
             Self::Terminal(_) => tr!("right_panel.terminal"),
+            Self::Trajectory => tr!("right_panel.trajectory"),
             Self::BackgroundWork { key, title } => {
                 if title.is_empty() {
                     match key.kind {
@@ -738,6 +739,7 @@ impl RightPanelSurface {
         match self {
             Self::Browser(_) => "icons/globe.svg",
             Self::Terminal(_) => "icons/terminal.svg",
+            Self::Trajectory => "icons/git-commit-horizontal.svg",
             Self::BackgroundWork { key, .. } => work_kind_icon(key.kind),
             Self::Files => "icons/folder.svg",
             Self::Diff => "icons/file-diff.svg",
@@ -779,7 +781,10 @@ fn reusable_surface_index(
         RightPanelSurface::BackgroundWork { key, .. } => surfaces.iter().position(|surface| {
             matches!(surface, RightPanelSurface::BackgroundWork { key: candidate, .. } if candidate == key)
         }),
-        RightPanelSurface::Files | RightPanelSurface::Diff | RightPanelSurface::File(_) => {
+        RightPanelSurface::Trajectory
+        | RightPanelSurface::Files
+        | RightPanelSurface::Diff
+        | RightPanelSurface::File(_) => {
             surfaces.iter().position(|surface| surface == requested)
         }
     }
@@ -914,28 +919,28 @@ mod tests {
 
         assert_eq!(
             transcript_link_route(
-                "/Users/egoist/dev/waku/src/app/right_panel.rs:1596",
+                "/Users/egoist/dev/wakuwaku/src/app/right_panel.rs:1596",
                 Some(workspace),
             ),
             TranscriptLinkRoute::ProjectFile("src/app/right_panel.rs".into())
         );
         assert_eq!(
             transcript_link_route(
-                "/Users/egoist/dev/waku/src/app/right_panel.rs:1596:8",
+                "/Users/egoist/dev/wakuwaku/src/app/right_panel.rs:1596:8",
                 Some(workspace),
             ),
             TranscriptLinkRoute::ProjectFile("src/app/right_panel.rs".into())
         );
         assert_eq!(
             transcript_link_route(
-                "file:///Users/egoist/dev/waku/My%20File.rs#L12C4",
+                "file:///Users/egoist/dev/wakuwaku/My%20File.rs#L12C4",
                 Some(workspace),
             ),
             TranscriptLinkRoute::ProjectFile("My File.rs".into())
         );
         assert_eq!(
             transcript_link_route(
-                "/Users/egoist/dev/waku/../kero/src/app.rs:20",
+                "/Users/egoist/dev/wakuwaku/../kero/src/app.rs:20",
                 Some(workspace),
             ),
             TranscriptLinkRoute::Finder(PathBuf::from("/Users/egoist/dev/kero/src/app.rs"))
@@ -1202,7 +1207,7 @@ mod tests {
 
     #[test]
     fn working_tree_only_descends_into_expanded_directories() {
-        let root = std::env::temp_dir().join(format!("waku-working-tree-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("wakuwaku-working-tree-{}", Uuid::new_v4()));
         std::fs::create_dir_all(root.join("src/nested")).unwrap();
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
@@ -1401,6 +1406,94 @@ mod tests {
     }
 
     #[test]
+    fn trajectory_tab_uses_trajectory_label_icon_and_reusable_index() {
+        let trajectory = RightPanelSurface::Trajectory;
+        assert_eq!(right_panel_tab_label(&trajectory, None), "Trajectory");
+        assert_eq!(
+            right_panel_tab_icon(&trajectory, None),
+            "icons/git-commit-horizontal.svg"
+        );
+
+        let surfaces = vec![
+            RightPanelSurface::new_terminal(),
+            RightPanelSurface::Trajectory,
+            RightPanelSurface::Files,
+        ];
+        assert_eq!(
+            reusable_surface_index(&surfaces, &RightPanelSurface::Trajectory),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn trajectory_right_panel_session_isolation_and_restoration() {
+        let session_with_trajectory = Uuid::new_v4();
+        let session_with_files = Uuid::new_v4();
+        let empty_session = Uuid::new_v4();
+
+        let mut states = HashMap::new();
+
+        // 1. Session A has Trajectory surface open and active
+        let mut traj_state = RightPanelSessionState::empty(true);
+        traj_state.surfaces = vec![RightPanelSurface::Trajectory];
+        traj_state.active_surface = Some(0);
+        states.insert(session_with_trajectory, traj_state);
+
+        // 2. Session B has Files surface open
+        let mut files_state = RightPanelSessionState::empty(true);
+        files_state.surfaces = vec![RightPanelSurface::Files];
+        files_state.active_surface = Some(0);
+        states.insert(session_with_files, files_state);
+
+        // 3. Switch to empty session: starts closed, no surfaces
+        let other_state = RightPanelSessionState::take_or_closed(&mut states, empty_session);
+        assert!(!other_state.visible);
+        assert!(other_state.surfaces.is_empty());
+        assert_eq!(other_state.active_surface, None);
+
+        // 4. Restore Session A: Trajectory surface is preserved and active
+        let restored_a =
+            RightPanelSessionState::take_or_closed(&mut states, session_with_trajectory);
+        assert!(restored_a.visible);
+        assert_eq!(restored_a.surfaces, vec![RightPanelSurface::Trajectory]);
+        assert_eq!(restored_a.active_surface, Some(0));
+
+        // 5. Restore Session B: Files surface is preserved and active
+        let restored_b = RightPanelSessionState::take_or_closed(&mut states, session_with_files);
+        assert!(restored_b.visible);
+        assert_eq!(restored_b.surfaces, vec![RightPanelSurface::Files]);
+        assert_eq!(restored_b.active_surface, Some(0));
+    }
+
+    #[test]
+    fn trajectory_panel_close_and_reopen_preserves_surface_state() {
+        let session_id = Uuid::new_v4();
+        let mut states = HashMap::new();
+
+        // Initially open with Trajectory
+        let mut state = RightPanelSessionState::empty(true);
+        state.surfaces = vec![
+            RightPanelSurface::new_terminal(),
+            RightPanelSurface::Trajectory,
+        ];
+        state.active_surface = Some(1);
+        states.insert(session_id, state);
+
+        // Close right panel
+        let mut closed = RightPanelSessionState::take_or_closed(&mut states, session_id);
+        assert!(closed.visible);
+        closed.visible = false;
+        states.insert(session_id, closed);
+
+        // Reopen right panel
+        let reopened = RightPanelSessionState::take_or_closed(&mut states, session_id);
+        assert!(!reopened.visible); // was closed
+        assert_eq!(reopened.surfaces.len(), 2);
+        assert_eq!(reopened.surfaces[1], RightPanelSurface::Trajectory);
+        assert_eq!(reopened.active_surface, Some(1));
+    }
+
+    #[test]
     fn right_panel_state_isolated_by_session() {
         let session_with_terminal = Uuid::new_v4();
         let other_session = Uuid::new_v4();
@@ -1524,6 +1617,9 @@ impl Waku {
         self.reset_file_search_for_session(cx);
         self.reload_clean_right_panel_file_editors(cx);
         self.state.right_panel_visible = self.right_panel_visible;
+        if self.active_right_panel_surface() == Some(&RightPanelSurface::Trajectory) {
+            self.ensure_trajectory_session_state(session_id, cx);
+        }
         if self.active_right_panel_surface() == Some(&RightPanelSurface::Diff) {
             self.refresh_right_panel_diff(cx);
         }
@@ -1615,7 +1711,7 @@ impl Waku {
         self.right_panel_tabs_scroll_handle.scroll_to_item(index);
     }
 
-    fn active_right_panel_surface(&self) -> Option<&RightPanelSurface> {
+    pub(super) fn active_right_panel_surface(&self) -> Option<&RightPanelSurface> {
         self.right_panel_active_surface
             .and_then(|index| self.right_panel_surfaces.get(index))
     }
@@ -1678,6 +1774,11 @@ impl Waku {
         let reusable_index = reusable_surface_index(&self.right_panel_surfaces, &surface);
         if matches!(&surface, RightPanelSurface::File(_)) {
             self.ensure_initial_right_panel_file_editor_width();
+        }
+        if surface == RightPanelSurface::Trajectory {
+            if let Some(session) = self.selected_session() {
+                self.ensure_trajectory_session_state(session.id, cx);
+            }
         }
         if surface == RightPanelSurface::Diff {
             if reusable_index.is_none() {
@@ -1887,6 +1988,9 @@ impl Waku {
             Some(RightPanelSurface::BackgroundWork { key, .. }) => self
                 .render_background_work_surface(&key, cx)
                 .into_any_element(),
+            Some(RightPanelSurface::Trajectory) => {
+                self.render_trajectory(width, window, cx).into_any_element()
+            }
             Some(RightPanelSurface::Files) => self
                 .render_right_panel_files(width, window, cx)
                 .into_any_element(),
@@ -2237,6 +2341,7 @@ impl Waku {
             let options = [
                 RightPanelSurface::new_browser(),
                 RightPanelSurface::new_terminal(),
+                RightPanelSurface::Trajectory,
                 RightPanelSurface::Files,
                 RightPanelSurface::Diff,
             ];
@@ -2344,8 +2449,8 @@ impl Waku {
                             .flex()
                             .gap(px(8.0))
                             .child(self.render_right_panel_card(
-                                RightPanelSurface::Files,
-                                tr!("right_panel.files_description"),
+                                RightPanelSurface::Trajectory,
+                                tr!("right_panel.trajectory_description"),
                                 cx,
                             ))
                             .child(self.render_right_panel_card(
@@ -2353,7 +2458,14 @@ impl Waku {
                                 tr!("right_panel.diff_description"),
                                 cx,
                             )),
-                    ),
+                    )
+                    .child(div().mt(px(8.0)).w_full().flex().gap(px(8.0)).child(
+                        self.render_right_panel_card(
+                            RightPanelSurface::Files,
+                            tr!("right_panel.files_description"),
+                            cx,
+                        ),
+                    )),
             )
     }
 
@@ -2737,7 +2849,7 @@ impl Waku {
         editor.reading = true;
         editor.read_epoch += 1;
         let epoch = editor.read_epoch;
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let workspace = wakuwaku_client::WorkspaceClient::new(self.daemon.client());
 
         cx.spawn(async move |waku, cx| {
             let read = cx
@@ -2998,7 +3110,7 @@ impl Waku {
         } else {
             return;
         };
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let workspace = wakuwaku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
@@ -3007,12 +3119,14 @@ impl Waku {
                     let relative_path = relative_path.clone();
                     let content = content.clone();
                     async move {
-                        match workspace.request(waku_client::WorkspaceOperation::WriteTextFile {
-                            root: project_path,
-                            relative_path: PathBuf::from(relative_path),
-                            content,
-                        })? {
-                            waku_client::WorkspaceResult::Ack => Ok(()),
+                        match workspace.request(
+                            wakuwaku_client::WorkspaceOperation::WriteTextFile {
+                                root: project_path,
+                                relative_path: PathBuf::from(relative_path),
+                                content,
+                            },
+                        )? {
+                            wakuwaku_client::WorkspaceResult::Ack => Ok(()),
                             _ => anyhow::bail!("the daemon returned an invalid file response"),
                         }
                     }
@@ -3966,6 +4080,11 @@ impl Waku {
     pub(super) fn refresh_workspace_surfaces(&mut self, cx: &mut Context<Self>) {
         match self.active_right_panel_surface() {
             Some(RightPanelSurface::Diff) => self.refresh_right_panel_diff(cx),
+            Some(RightPanelSurface::Trajectory) => {
+                if let Some(session) = self.selected_session() {
+                    self.ensure_trajectory_session_state(session.id, cx);
+                }
+            }
             Some(RightPanelSurface::Files | RightPanelSurface::File(_)) => {
                 self.refresh_right_panel_working_tree(cx)
             }
@@ -3995,32 +4114,34 @@ impl Waku {
             Query::Pending => {}
             Query::Missing(token) => {
                 let expanded = self.right_panel_expanded_paths.clone();
-                let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+                let workspace = wakuwaku_client::WorkspaceClient::new(self.daemon.client());
                 cx.spawn(async move |waku, cx| {
                     let entries = cx
                         .background_executor()
                         .spawn({
                             let path = project_path.clone();
                             async move {
-                                match workspace.request(waku_client::WorkspaceOperation::ListTree {
-                                    root: path,
-                                    expanded_paths: expanded.into_iter().collect(),
-                                }) {
-                                    Ok(waku_client::WorkspaceResult::WorkingTree { entries }) => {
-                                        entries
-                                            .into_iter()
-                                            .map(|entry| WorkingTreeEntry {
-                                                file_icon: (!entry.is_dir)
-                                                    .then(|| file_icon_for_name(&entry.name)),
-                                                relative_path: entry.relative_path,
-                                                absolute_path: entry.absolute_path,
-                                                name: entry.name,
-                                                is_dir: entry.is_dir,
-                                                expanded: entry.expanded,
-                                                depth: entry.depth,
-                                            })
-                                            .collect()
-                                    }
+                                match workspace.request(
+                                    wakuwaku_client::WorkspaceOperation::ListTree {
+                                        root: path,
+                                        expanded_paths: expanded.into_iter().collect(),
+                                    },
+                                ) {
+                                    Ok(wakuwaku_client::WorkspaceResult::WorkingTree {
+                                        entries,
+                                    }) => entries
+                                        .into_iter()
+                                        .map(|entry| WorkingTreeEntry {
+                                            file_icon: (!entry.is_dir)
+                                                .then(|| file_icon_for_name(&entry.name)),
+                                            relative_path: entry.relative_path,
+                                            absolute_path: entry.absolute_path,
+                                            name: entry.name,
+                                            is_dir: entry.is_dir,
+                                            expanded: entry.expanded,
+                                            depth: entry.depth,
+                                        })
+                                        .collect(),
                                     Ok(_) | Err(_) => Vec::new(),
                                 }
                             }
@@ -4143,7 +4264,7 @@ impl Waku {
         self.right_panel_diff_error = None;
         cx.notify();
 
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let workspace = wakuwaku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let result = cx
                 .background_executor()
@@ -4151,12 +4272,12 @@ impl Waku {
                     let project_path = project_path.clone();
                     async move {
                         match workspace.request(
-                            waku_client::WorkspaceOperation::CollectReviewDiff {
+                            wakuwaku_client::WorkspaceOperation::CollectReviewDiff {
                                 cwd: project_path,
                                 source: crate::review_diff::wire_source(source),
                             },
                         )? {
-                            waku_client::WorkspaceResult::ReviewDiff { data } => {
+                            wakuwaku_client::WorkspaceResult::ReviewDiff { data } => {
                                 Ok(crate::review_diff::parse_collected(
                                     source,
                                     &data.numstat,

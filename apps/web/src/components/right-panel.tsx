@@ -1,6 +1,6 @@
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Editor } from '@pierre/diffs/edit'
-import type { AgentSession, Project, ReviewDiffSource, WorkingTreeEntry } from '@waku/client'
+import type { AgentSession, Project, ReviewDiffSource, WorkingTreeEntry } from '@wakuwaku/client'
 import { GhosttyCore } from '@wterm/ghostty'
 import { Terminal, useTerminal } from '@wterm/react'
 import {
@@ -596,7 +596,7 @@ function FilesPanel({
   const treeList = useRef<VirtuosoHandle>(null)
   const buffersRef = useRef(buffers)
   buffersRef.current = buffers
-  const [treeWidth, setTreeWidth] = useState(() => readStoredWidth('waku.fileTreeWidth', 184, 140, 360))
+  const [treeWidth, setTreeWidth] = useState(() => readStoredWidth('wakuwaku.fileTreeWidth', 184, 140, 360))
   const treeWidthRef = useRef(treeWidth)
   treeWidthRef.current = treeWidth
   const root = session && project ? sessionCwd(session, project) : undefined
@@ -965,7 +965,7 @@ function ChangesPanel({
   const [focusedDiffRow, setFocusedDiffRow] = useState<string | null>(null)
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
   const [filter, setFilter] = useState('')
-  const [treeWidth, setTreeWidth] = useState(() => readStoredWidth('waku.diffTreeWidth', 184, 140, 360))
+  const [treeWidth, setTreeWidth] = useState(() => readStoredWidth('wakuwaku.diffTreeWidth', 184, 140, 360))
   const root = session && project ? sessionCwd(session, project) : undefined
   const maxTreeWidth = Math.max(140, Math.min(360, panelWidth - 140))
   const fittedTreeWidth = clamp(treeWidth, 140, maxTreeWidth)
@@ -1717,7 +1717,7 @@ function stripAnsi(value: string) {
 }
 
 function requireClient<T>(client: T | null): T {
-  if (!client) throw new Error('Waku daemon is disconnected')
+  if (!client) throw new Error('WakuWaku daemon is disconnected')
   return client
 }
 

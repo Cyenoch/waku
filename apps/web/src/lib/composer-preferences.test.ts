@@ -48,7 +48,7 @@ describe('composer preferences', () => {
 
   test('rejects unknown persisted service-tier values', () => {
     const storage = memoryStorage()
-    storage.setItem('waku.composer-preferences.v2', JSON.stringify({
+    storage.setItem('wakuwaku.composer-preferences.v2', JSON.stringify({
       'ws://first': {
         lastProvider: 'custom-endpoint',
         lastModel: 'model-a',

@@ -1,5 +1,5 @@
 [package]
-name = "waku"
+name = "wakuwaku"
 version = "0.1.2"
 edition = "2024"
 description = "A fast native coding agent with a built-in Rust harness"
@@ -7,21 +7,21 @@ license = "GPL-3.0-only"
 
 [workspace]
 members = [
-    "crates/waku-client",
-    "crates/waku-core",
-    "crates/waku-daemon",
-    "crates/waku-harness",
-    "crates/waku-protocol",
-    "crates/waku-provider",
+    "crates/wakuwaku-client",
+    "crates/wakuwaku-core",
+    "crates/wakuwaku-daemon",
+    "crates/wakuwaku-harness",
+    "crates/wakuwaku-protocol",
+    "crates/wakuwaku-provider",
 ]
 default-members = [
     ".",
-    "crates/waku-client",
-    "crates/waku-core",
-    "crates/waku-daemon",
-    "crates/waku-harness",
-    "crates/waku-protocol",
-    "crates/waku-provider",
+    "crates/wakuwaku-client",
+    "crates/wakuwaku-core",
+    "crates/wakuwaku-daemon",
+    "crates/wakuwaku-harness",
+    "crates/wakuwaku-protocol",
+    "crates/wakuwaku-provider",
 ]
 resolver = "2"
 
@@ -49,8 +49,8 @@ serde_json = "1.0"
 unicode-segmentation = "1.12"
 url = "2"
 uuid = { version = "1.18", features = ["v4", "serde"] }
-waku-client = { path = "crates/waku-client" }
-waku-protocol = { path = "crates/waku-protocol" }
+wakuwaku-client = { path = "crates/wakuwaku-client" }
+wakuwaku-protocol = { path = "crates/wakuwaku-protocol" }
 pulldown-cmark = "0.13"
 regex = "1"
 rust-i18n = "4"

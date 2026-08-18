@@ -10,7 +10,7 @@ const CHANGED_FILES_EXPANDED_LIMIT: usize = 12;
 #[derive(Clone, Debug)]
 struct ConversationNavigationRailSnapshot {
     visible: bool,
-    /// Shared with the `Waku` cache: the turns only change when the row-kinds
+    /// Shared with the `WakuWaku` cache: the turns only change when the row-kinds
     /// fingerprint moves, so the per-frame equality check here is a pointer
     /// comparison rather than a walk over every turn's snippets.
     turns: Rc<Vec<TranscriptNavigationTurn>>,
@@ -979,16 +979,16 @@ impl Waku {
             .collect::<Vec<_>>();
         self.checkpoint_ref_prefetch
             .set(Some((session_id, generation)));
-        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let workspace = wakuwaku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |this, cx| {
             let existing = cx
                 .background_executor()
                 .spawn(async move {
-                    match workspace.request(waku_client::WorkspaceOperation::SessionTurnRefs {
+                    match workspace.request(wakuwaku_client::WorkspaceOperation::SessionTurnRefs {
                         cwd: project_path,
                         session_id,
                     }) {
-                        Ok(waku_client::WorkspaceResult::TurnRefs { turn_counts }) => {
+                        Ok(wakuwaku_client::WorkspaceResult::TurnRefs { turn_counts }) => {
                             turn_counts.into_iter().collect::<HashSet<_>>()
                         }
                         Ok(_) | Err(_) => HashSet::new(),
@@ -2261,7 +2261,7 @@ fn activity_scroll_follow_state(
     }
 }
 
-/// Pure window arithmetic behind [`Waku::live_reasoning_window_start`]:
+/// Pure window arithmetic behind [`WakuWaku::live_reasoning_window_start`]:
 /// given the cached start and the current content, the byte offset the
 /// window should render from. Every returned offset is a character boundary
 /// of `content`, so callers may slice with it directly.
@@ -2416,8 +2416,8 @@ fn render_activity_image(
             .object_fit(ObjectFit::Contain)
             .into_any_element();
     }
-    if waku_protocol::blob::is_reference(image_url)
-        || image_url.starts_with(waku_protocol::attachments::ATTACHMENT_SCHEME)
+    if wakuwaku_protocol::blob::is_reference(image_url)
+        || image_url.starts_with(wakuwaku_protocol::attachments::ATTACHMENT_SCHEME)
     {
         return div()
             .id(id)

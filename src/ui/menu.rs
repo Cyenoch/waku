@@ -60,7 +60,7 @@ const TRIGGER_GAP: f32 = 4.0;
 /// be claimed from under the focused field, and only a binding can do that:
 /// `enter`, `tab`, and the arrows reach the field as *actions*, and an action
 /// consumes the keystroke before any `on_key_down` listener above it ever runs.
-const PANEL_FIELD_CONTEXT: &str = "WakuMenu > ComposerInput";
+const PANEL_FIELD_CONTEXT: &str = "WakuWakuMenu > ComposerInput";
 
 /// Bind the menu's own keys. Called once at startup.
 ///
@@ -69,7 +69,7 @@ const PANEL_FIELD_CONTEXT: &str = "WakuMenu > ComposerInput";
 /// That is what lets `enter` here beat the field's submit.
 pub fn init(cx: &mut App) {
     use gpui::KeyBinding;
-    const MODEL_PICKER_FIELD_CONTEXT: &str = "WakuMenu > ModelPicker > ComposerInput";
+    const MODEL_PICKER_FIELD_CONTEXT: &str = "WakuWakuMenu > ModelPicker > ComposerInput";
     cx.bind_keys([
         KeyBinding::new("escape", DismissMenu, Some(MENU_CONTEXT)),
         KeyBinding::new("down", SelectNextEntry, Some(PANEL_FIELD_CONTEXT)),

@@ -1,4 +1,4 @@
-import type { ProviderId } from '@waku/client'
+import type { ProviderId } from '@wakuwaku/client'
 
 export interface ModelPickerRow {
   provider: ProviderId

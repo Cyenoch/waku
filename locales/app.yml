@@ -62,7 +62,7 @@ updater.checking:
 updater.updating:
   en: Updating…
 updater.up_to_date:
-  en: Waku is up to date
+  en: WakuWaku is up to date
 updater.failed:
   en: "Update failed: %{error}"
 
@@ -106,7 +106,7 @@ language.title:
 language.system:
   en: System
 language.description:
-  en: Choose the language used throughout Waku
+  en: Choose the language used throughout WakuWaku
 
 settings.general:
   en: General
@@ -139,7 +139,7 @@ settings.search:
 daemon.expose_title:
   en: Expose managed daemon
 daemon.expose_description:
-  en: Listen beyond this Mac so another Waku client can connect. Changing this restarts only the daemon.
+  en: Listen beyond this Mac so another WakuWaku client can connect. Changing this restarts only the daemon.
 daemon.status_local:
   en: Local only
 daemon.status_exposed:
@@ -153,7 +153,7 @@ daemon.connection_description:
 daemon.port:
   en: Port
 daemon.port_description:
-  en: Waku listens on all network interfaces at this port while exposure is enabled.
+  en: WakuWaku listens on all network interfaces at this port while exposure is enabled.
 daemon.port_placeholder:
   en: "34123"
 daemon.allowed_origins:
@@ -161,7 +161,7 @@ daemon.allowed_origins:
 daemon.allowed_origins_description:
   en: Exact http:// or https:// origins allowed to open the WebSocket.
 daemon.allowed_origins_placeholder:
-  en: https://waku.example.com, http://localhost:3001
+  en: https://wakuwaku.example.com, http://localhost:3001
 daemon.apply:
   en: Apply
 daemon.restarting:
@@ -169,7 +169,7 @@ daemon.restarting:
 daemon.credentials_title:
   en: Connection details
 daemon.credentials_description:
-  en: Enter these in Waku Web. The URL uses this Mac’s local network hostname.
+  en: Enter these in WakuWaku Web. The URL uses this Mac’s local network hostname.
 daemon.websocket_url:
   en: WebSocket URL
 daemon.token:
@@ -185,9 +185,9 @@ daemon.security_warning:
 daemon.external_title:
   en: External daemon
 daemon.external_description:
-  en: This desktop is connected to a daemon managed outside Waku. Configure its listener, browser origins, and token on that host.
+  en: This desktop is connected to a daemon managed outside WakuWaku. Configure its listener, browser origins, and token on that host.
 daemon.web_external_description:
-  en: Waku Web connects to a daemon managed outside this browser. Configure its listener, browser origins, and token on that host.
+  en: WakuWaku Web connects to a daemon managed outside this browser. Configure its listener, browser origins, and token on that host.
 daemon.web_connection_description:
   en: This browser never starts or stops the daemon.
 daemon.not_configured:
@@ -225,7 +225,7 @@ daemon.url_copied:
 daemon.token_copied:
   en: Daemon token copied
 web.connect_title:
-  en: Connect to Waku daemon
+  en: Connect to WakuWaku daemon
 web.connect_description:
   en: Enter the remote listener URL and token from Desktop Settings → Daemon.
 web.token_placeholder:
@@ -241,13 +241,13 @@ web.connecting:
 web.security_warning:
   en: The browser sends the token only to this WebSocket. Use WSS through a trusted TLS proxy outside a private network.
 web.starting:
-  en: Starting Waku…
+  en: Starting WakuWaku…
 web.starting_label:
-  en: Starting Waku
+  en: Starting WakuWaku
 web.start_failed_label:
-  en: Waku could not start
+  en: WakuWaku could not start
 web.load_failed:
-  en: Couldn’t load Waku
+  en: Couldn’t load WakuWaku
 web.try_again:
   en: Try again
 web.daemon_connection_closed:
@@ -263,7 +263,7 @@ web.error_daemon_url_scheme:
 web.error_daemon_url_host:
   en: The daemon URL must contain a host and no credentials
 web.error_secure_websocket_required:
-  en: A secure Waku Web page can only connect through wss://
+  en: A secure WakuWaku Web page can only connect through wss://
 web.error_daemon_token_required:
   en: Enter the daemon token
 settings.theme:
@@ -355,7 +355,7 @@ settings.local_by_default:
 settings.local_by_default_description:
   en: Projects, conversations, and settings are stored on this Mac
 settings.local_by_default_web_description:
-  en: Projects, conversations, and attachments stay on the connected daemon host. Waku Web preferences stay in this browser.
+  en: Projects, conversations, and attachments stay on the connected daemon host. WakuWaku Web preferences stay in this browser.
 settings.automatic_updates:
   en: Automatic updates
 settings.automatic_updates_description:
@@ -363,12 +363,12 @@ settings.automatic_updates_description:
 settings.share_anonymous_usage_data:
   en: Share anonymous usage data
 settings.share_anonymous_usage_data_description:
-  en: Help improve Waku by sharing feature usage and reliability data. Prompts, responses, project names, file paths, and other personal data are never included
+  en: Help improve WakuWaku by sharing feature usage and reliability data. Prompts, responses, project names, file paths, and other personal data are never included
 
 providers.description:
-  en: Configure model endpoints directly. API key values are never displayed or stored by Waku.
+  en: Configure model endpoints directly. API key values are never displayed or stored by WakuWaku.
 providers.web_description:
-  en: Configure model endpoints directly on the daemon host. API key values are never displayed or stored by Waku.
+  en: Configure model endpoints directly on the daemon host. API key values are never displayed or stored by WakuWaku.
 providers.catalog_models:
   en: Models from live catalog
 providers.not_authenticated:
@@ -472,7 +472,7 @@ project.your_project:
 onboarding.open_project_to_begin:
   en: Open a project to begin
 onboarding.description:
-  en: Waku runs the built-in agent in folders you choose. Your code, sessions, and history stay on this Mac
+  en: WakuWaku runs the built-in agent in folders you choose. Your code, sessions, and history stay on this Mac
 onboarding.web_description:
   en: Choose a path on the daemon host, or start without a project.
 onboarding.open_project_folder:
@@ -963,7 +963,7 @@ skills.toggle_failed:
 skills.empty_title:
   en: No skills yet
 skills.empty_description:
-  en: A skill is a folder with a SKILL.md — reusable instructions the agent can load, like a deploy runbook or a review checklist. Skills in ~/.agents/skills and the project .waku/skills tree show up here, invoked as /name.
+  en: A skill is a folder with a SKILL.md — reusable instructions the agent can load, like a deploy runbook or a review checklist. Skills in ~/.agents/skills and the project .wakuwaku/skills tree show up here, invoked as /name.
 skills.library:
   en: Skills library
 skills.details:
@@ -1009,7 +1009,7 @@ composer.message:
 composer.queue_placeholder:
   en: Queue a follow-up…
 composer.prompt_placeholder:
-  en: Ask Waku to build something…
+  en: Ask WakuWaku to build something…
 composer.attach_daemon:
   en: Attach a file or folder from the daemon host
 composer.attach_daemon_title:
@@ -1087,7 +1087,7 @@ session.agent_stopped_reason:
 errors.open_session:
   en: "Could not open that session: %{error}"
 errors.create_projectless_task:
-  en: "Could not create a task beneath ~/.waku/projects: %{error}"
+  en: "Could not create a task beneath ~/.wakuwaku/projects: %{error}"
 errors.remote_host_path:
   en: This path belongs to the daemon host and cannot be opened by the desktop
 errors.change_branch:
@@ -1129,7 +1129,7 @@ errors.no_live_runtime:
 errors.unexpected_daemon_response:
   en: "Expected %{expected}, received %{actual} from the daemon"
 errors.daemon_disconnected:
-  en: Waku daemon is disconnected
+  en: WakuWaku daemon is disconnected
 errors.path_outside_workspace:
   en: This path is outside the active workspace on the daemon host
 errors.rename_task:
@@ -1234,6 +1234,8 @@ right_panel.files:
   en: Files
 right_panel.diff:
   en: Review
+right_panel.trajectory:
+  en: Trajectory
 right_panel.toggle:
   en: Toggle right panel
 right_panel.open_surface:
@@ -1248,6 +1250,8 @@ right_panel.files_description:
   en: Browse and read workspace files
 right_panel.diff_description:
   en: Review file changes
+right_panel.trajectory_description:
+  en: View execution steps and tool timeline
 right_panel.terminal_unavailable:
   en: Terminal unavailable
 right_panel.terminal_unavailable_description:
@@ -1877,3 +1881,78 @@ providers.invalid_header_format:
   en: "Each header must use Name: value"
 providers.invalid_headers:
   en: "Headers must be non-empty, unique, and cannot use reserved names: Authorization, x-api-key, Host, Content-Length, Content-Type, Anthropic-Version"
+
+trajectory.tab_chat:
+  en: Chat
+trajectory.tab_trajectory:
+  en: Trajectory
+trajectory.search_placeholder:
+  en: Filter trajectory (AND tokens)...
+trajectory.duration_projection:
+  en: Duration projection
+trajectory.unfold_all_turns:
+  en: Unfold all turns
+trajectory.fold_all_turns:
+  en: Fold all turns
+trajectory.calls:
+  en: Calls
+trajectory.no_timing_data:
+  en: No timing data
+trajectory.loading:
+  en: Loading trajectory...
+trajectory.legacy_partial_banner:
+  en: Showing partial trajectory from earlier session version
+trajectory.missing_snapshot_banner:
+  en: Continuation snapshot unavailable; trajectory may be partial
+trajectory.error_banner:
+  en: Failed to load trajectory
+trajectory.retry:
+  en: Retry
+trajectory.empty:
+  en: No trajectory events
+trajectory.empty_description:
+  en: Agent execution events and steps will appear here.
+trajectory.turn_divider:
+  en: "Turn %{turn}"
+trajectory.step:
+  en: "Step %{step}"
+trajectory.context_steering:
+  en: Context Steering
+trajectory.system_prompt:
+  en: System Prompt
+trajectory.tool_placeholder:
+  en: Tool Assistant
+trajectory.back:
+  en: Back
+trajectory.close_inspector:
+  en: Close Inspector
+trajectory.load_more:
+  en: Load more
+trajectory.tab_summary:
+  en: Summary
+trajectory.tab_preview:
+  en: Preview
+trajectory.tab_raw:
+  en: Raw
+trajectory.tab_source:
+  en: Source
+trajectory.tab_system_prompt:
+  en: System Prompt
+trajectory.tab_tools:
+  en: Tools
+trajectory.tab_diff:
+  en: Diff
+trajectory.tab_options:
+  en: Options
+trajectory.tab_usage:
+  en: Usage
+trajectory.tab_timing:
+  en: Timing
+trajectory.tab_payload:
+  en: Payload
+trajectory.tab_result:
+  en: Result
+trajectory.tab_schema:
+  en: Schema
+trajectory.bytes_loaded:
+  en: "Loaded %{loaded} / %{total} bytes"

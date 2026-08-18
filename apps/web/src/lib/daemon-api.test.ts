@@ -2,7 +2,7 @@ import { activeAuthPhase, isActiveAuthPhase, isAllowedExternalUrl } from '@/comp
 import { explicitModelFallback, resolvedSessionModel } from '@/components/model-picker'
 import { authStatusPollIntervalMs } from '@/lib/daemon-api'
 import { describe, expect, test } from 'bun:test'
-import type { ComposerDraftChange, Project, WakuClient } from '@waku/client'
+import type { ComposerDraftChange, Project, WakuClient } from '@wakuwaku/client'
 import {
   applyComposerDraftChanges,
   beginTurn,
@@ -187,12 +187,12 @@ describe('turn checkpoints', () => {
       },
     } as unknown as WakuClient
 
-    await expect(captureTurnStart(client, '/srv/waku', 'session', 2)).resolves.toBeUndefined()
+    await expect(captureTurnStart(client, '/srv/wakuwaku', 'session', 2)).resolves.toBeUndefined()
     expect(command).toEqual({
       type: 'workspace',
       operation: {
         type: 'captureTurnStart',
-        cwd: '/srv/waku',
+        cwd: '/srv/wakuwaku',
         session_id: 'session',
         turn_count: 2,
       },
@@ -203,7 +203,7 @@ describe('turn checkpoints', () => {
     let command: unknown
     const checkpoint = {
       turn_count: 2,
-      git_ref: 'refs/waku/session-session-turn-2',
+      git_ref: 'refs/wakuwaku/session-session-turn-2',
       status: 'ready' as const,
       files: [],
       additions: 0,
@@ -217,13 +217,13 @@ describe('turn checkpoints', () => {
       },
     } as unknown as WakuClient
 
-    await expect(captureTurnCheckpoint(client, '/srv/waku', 'session', 2))
+    await expect(captureTurnCheckpoint(client, '/srv/wakuwaku', 'session', 2))
       .resolves.toEqual(checkpoint)
     expect(command).toEqual({
       type: 'workspace',
       operation: {
         type: 'captureTurn',
-        cwd: '/srv/waku',
+        cwd: '/srv/wakuwaku',
         session_id: 'session',
         turn_count: 2,
       },
@@ -242,13 +242,13 @@ describe('writeWorkspaceTextFile', () => {
     } as unknown as WakuClient
 
     await expect(
-      writeWorkspaceTextFile(client, '/srv/waku', 'src/app.ts', 'export const ready = true\n'),
+      writeWorkspaceTextFile(client, '/srv/wakuwaku', 'src/app.ts', 'export const ready = true\n'),
     ).resolves.toBeUndefined()
     expect(command).toEqual({
       type: 'workspace',
       operation: {
         type: 'writeTextFile',
-        root: '/srv/waku',
+        root: '/srv/wakuwaku',
         relative_path: 'src/app.ts',
         content: 'export const ready = true\n',
       },
@@ -259,8 +259,8 @@ describe('writeWorkspaceTextFile', () => {
 describe('createProject', () => {
   test('normalizes a remote absolute path without collapsing the root', () => {
     expect(createProject('/').path).toBe('/')
-    expect(createProject('/srv/waku/').path).toBe('/srv/waku')
-    expect(createProject('/srv/waku/').name).toBe('waku')
+    expect(createProject('/srv/wakuwaku/').path).toBe('/srv/wakuwaku')
+    expect(createProject('/srv/wakuwaku/').name).toBe('wakuwaku')
   })
 
   test('rejects paths that depend on the browser process cwd', () => {
@@ -271,7 +271,7 @@ describe('createProject', () => {
 describe('persistProject', () => {
   test('adds a daemon-host project without creating a session', async () => {
     const existing = project('existing', 'existing', '/srv/existing')
-    const candidate = project('new', 'waku', '/srv/waku')
+    const candidate = project('new', 'wakuwaku', '/srv/wakuwaku')
     const commands: unknown[] = []
     const client = {
       request: async (command: unknown) => {
@@ -282,7 +282,7 @@ describe('persistProject', () => {
             projects: [existing],
             sessions: [{ id: 'session' }],
             defaultCwd: '/srv',
-            projectlessRoot: '/srv/.waku/projects',
+            projectlessRoot: '/srv/.wakuwaku/projects',
           }
         }
         return { type: 'taskStateSaved', sessions: [] }
@@ -305,7 +305,7 @@ describe('persistProject', () => {
   })
 
   test('reuses a project already persisted for the same daemon path', async () => {
-    const existing = project('existing', 'waku', '/srv/waku')
+    const existing = project('existing', 'wakuwaku', '/srv/wakuwaku')
     const commands: unknown[] = []
     const client = {
       request: async (command: unknown) => {
@@ -315,12 +315,12 @@ describe('persistProject', () => {
           projects: [existing],
           sessions: [],
           defaultCwd: '/srv',
-          projectlessRoot: '/srv/.waku/projects',
+          projectlessRoot: '/srv/.wakuwaku/projects',
         }
       },
     } as unknown as WakuClient
 
-    const result = await persistProject(client, project('duplicate', 'waku', '/srv/waku'))
+    const result = await persistProject(client, project('duplicate', 'wakuwaku', '/srv/wakuwaku'))
 
     expect(result.project).toEqual(existing)
     expect(commands).toEqual([{ type: 'loadTaskState' }])
@@ -350,9 +350,9 @@ describe('persistSession', () => {
 
 describe('selectableProjects', () => {
   test('represents projectless tasks as one choice while preserving the selected workspace', () => {
-    const ordinary = project('repo', 'waku', '/srv/waku')
-    const first = project('one', 'No project', '/home/me/.waku/projects/one')
-    const selected = project('two', 'No project', '/home/me/.waku/projects/two')
+    const ordinary = project('repo', 'wakuwaku', '/srv/wakuwaku')
+    const first = project('one', 'No project', '/home/me/.wakuwaku/projects/one')
+    const selected = project('two', 'No project', '/home/me/.wakuwaku/projects/two')
 
     expect(selectableProjects([ordinary, first, selected], selected)).toEqual([
       selected,
@@ -376,7 +376,7 @@ describe('removeSession', () => {
             projects: [],
             sessions: [{ id: 'keep' }],
             defaultCwd: '/srv',
-            projectlessRoot: '/srv/.waku/projects',
+            projectlessRoot: '/srv/.wakuwaku/projects',
           }
         }
         throw new Error('unexpected command')

@@ -45,7 +45,7 @@ export function ConnectionPanel({ title }: { title?: string } = {}) {
       <div className="w-full max-w-[520px]">
         <div className="text-center">
           <img
-            alt="Waku"
+            alt="WakuWaku"
             className="mx-auto size-8 rounded-[8px]"
             draggable={false}
             src={wakuAppIconUrl}
@@ -65,7 +65,7 @@ export function ConnectionPanel({ title }: { title?: string } = {}) {
                 autoCorrect="off"
                 className="bg-card"
                 inputMode="url"
-                placeholder="wss://waku.example.com"
+                placeholder="wss://wakuwaku.example.com"
                 value={address}
                 onChange={(event) => setAddress(event.target.value)}
               />

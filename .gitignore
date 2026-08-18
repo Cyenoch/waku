@@ -1,5 +1,5 @@
 target
-.waku-cache
+.wakuwaku-cache
 .DS_Store
 *.log
 .env

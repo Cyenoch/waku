@@ -1,4 +1,4 @@
-import type { AgentSession, SessionMessageMatch } from '@waku/client'
+import type { AgentSession, SessionMessageMatch } from '@wakuwaku/client'
 import { useEffect, useRef, useState } from 'react'
 import { ProviderIcon, WakuIcon, type WakuIconName } from '@/components/waku-icon'
 import type { SettingsPageId } from '@/components/settings-view'

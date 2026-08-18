@@ -1,4 +1,4 @@
-//! Immutable, render-ready Git diffs for Waku's Review surface.
+//! Immutable, render-ready Git diffs for WakuWaku's Review surface.
 //!
 //! The daemon captures Git output. This desktop module only parses and expands
 //! that returned data off the UI thread; a frame only indexes stored rows.
@@ -266,22 +266,22 @@ pub fn parse_collected(
     snapshot
 }
 
-pub fn wire_source(source: Source) -> waku_client::workspace::ReviewDiffSource {
+pub fn wire_source(source: Source) -> wakuwaku_client::workspace::ReviewDiffSource {
     match source {
         Source::LastTurn {
             session_id,
             turn_id,
             turn_count,
-        } => waku_client::workspace::ReviewDiffSource::LastTurn {
+        } => wakuwaku_client::workspace::ReviewDiffSource::LastTurn {
             session_id,
             turn_id,
             turn_count,
         },
-        Source::Uncommitted => waku_client::workspace::ReviewDiffSource::Uncommitted,
-        Source::Unstaged => waku_client::workspace::ReviewDiffSource::Unstaged,
-        Source::Staged => waku_client::workspace::ReviewDiffSource::Staged,
-        Source::Committed => waku_client::workspace::ReviewDiffSource::Committed,
-        Source::Branch => waku_client::workspace::ReviewDiffSource::Branch,
+        Source::Uncommitted => wakuwaku_client::workspace::ReviewDiffSource::Uncommitted,
+        Source::Unstaged => wakuwaku_client::workspace::ReviewDiffSource::Unstaged,
+        Source::Staged => wakuwaku_client::workspace::ReviewDiffSource::Staged,
+        Source::Committed => wakuwaku_client::workspace::ReviewDiffSource::Committed,
+        Source::Branch => wakuwaku_client::workspace::ReviewDiffSource::Branch,
     }
 }
 

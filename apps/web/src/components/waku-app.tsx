@@ -10,7 +10,7 @@ import type {
   MessageAttachment,
   Project,
   ReviewDiffSource,
-} from '@waku/client'
+} from '@wakuwaku/client'
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -967,7 +967,7 @@ export function WakuApp() {
           project={activeProject}
           session={activeSession}
           sidebarVisible={sidebarVisible}
-          title={newTaskMode ? t('menu.new_task') : current ? displayTitle(current) : 'Waku'}
+          title={newTaskMode ? t('menu.new_task') : current ? displayTitle(current) : 'WakuWaku'}
         />
 
         {newTaskMode ? (

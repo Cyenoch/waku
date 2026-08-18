@@ -1,4 +1,4 @@
-import type { ProviderId } from '@waku/client'
+import type { ProviderId } from '@wakuwaku/client'
 
 export const WAKU_ICONS = {
   alert: 'i-waku-alert',
@@ -323,14 +323,14 @@ function fileTypeIconName(path: string): FileTypeIconName {
 }
 
 const PROVIDER_ICONS: Record<string, string> = {
-  anthropic: 'i-waku-provider-claude',
-  'openai-codex': 'i-waku-provider-openai',
-  'openai-responses': 'i-waku-provider-openai',
-  'openai-chat': 'i-waku-provider-openai',
-  'opencode-zen': 'i-waku-provider-opencode',
-  'opencode-go': 'i-waku-provider-opencode',
-  xai: 'i-waku-provider-grok',
-  'xai-oauth': 'i-waku-provider-grok',
+  anthropic: 'i-wakuwaku-provider-claude',
+  'openai-codex': 'i-wakuwaku-provider-openai',
+  'openai-responses': 'i-wakuwaku-provider-openai',
+  'openai-chat': 'i-wakuwaku-provider-openai',
+  'opencode-zen': 'i-wakuwaku-provider-opencode',
+  'opencode-go': 'i-wakuwaku-provider-opencode',
+  xai: 'i-wakuwaku-provider-grok',
+  'xai-oauth': 'i-wakuwaku-provider-grok',
 }
 
 function displayProviderName(provider: ProviderId) {

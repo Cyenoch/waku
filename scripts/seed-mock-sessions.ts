@@ -13,23 +13,35 @@
  * Every id it writes starts with `9e5e0000-`, so a reseed can delete precisely
  * what a previous run added and never touch real sessions.
  *
- *   bun ./scripts/seed-mock-sessions.ts            # (re)seed all profiles
- *   bun ./scripts/seed-mock-sessions.ts --scale 2  # twice the volume
- *   bun ./scripts/seed-mock-sessions.ts --only tool-storm
+ *   bun ./scripts/seed-mock-sessions.ts --only trajectory # deterministic ledger fixture
+ *   bun ./scripts/seed-mock-sessions.ts --only trajectory --clean # remove ledger fixture only
  *   bun ./scripts/seed-mock-sessions.ts --clean    # remove them again
+ *
+ * The trajectory profile also writes the daemon-owned continuation snapshot to
+ * `snapshots/{session_id}.json`; it never embeds a harness snapshot in the
+ * session-details JSON.
  *
  * The app reads sessions once at startup, so a running debug build only shows
  * these after its next relaunch.
  */
 
+import { createHash } from "node:crypto";
+import { mkdirSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
-import { readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 
 /** Shared prefix of every id this script owns; `--clean` matches on it. */
 const MOCK_ID_PREFIX = "9e5e0000-";
+/** Fixed ids keep the trajectory profile idempotent across repeated runs. */
+const TRAJECTORY_SESSION_ID = `${MOCK_ID_PREFIX}0000-4000-8000-000000000001`;
+const TRAJECTORY_BASE_MS = 1_760_000_000_000;
+
+function trajectoryUuid(index: number): string {
+  const suffix = index.toString(16).padStart(12, "0");
+  return `${MOCK_ID_PREFIX}1000-4000-8000-${suffix}`;
+}
 
 type Options = {
   databasePath: string;
@@ -270,7 +282,7 @@ const CODE_SAMPLES: { language: string; lines: string[] }[] = [
     language: "bash",
     lines: [
       "cargo build --profile dev 2>&1 | tail -20",
-      "hyperfine --warmup 3 'target/debug/waku --bench transcript'",
+      "hyperfine --warmup 3 'target/debug/wakuwaku --bench transcript'",
       "rg -n 'fn render' src/app | wc -l",
       "sqlite3 temp/app.db 'EXPLAIN QUERY PLAN SELECT * FROM sessions ORDER BY updated_at'",
     ],
@@ -429,7 +441,7 @@ function buildLog(random: Random, lines: number): string {
       out.push("   |         ^^^^ help: if this is intentional, prefix it with an underscore");
     } else if (roll < 0.2) {
       out.push(
-        `   Compiling ${pick(random, ["gpui", "waku", "rusqlite", "pulldown-cmark", "smol"])} v${int(random, 0, 3)}.${int(random, 0, 40)}.${int(random, 0, 9)}`,
+        `   Compiling ${pick(random, ["gpui", "wakuwaku", "rusqlite", "pulldown-cmark", "smol"])} v${int(random, 0, 3)}.${int(random, 0, 40)}.${int(random, 0, 9)}`,
       );
     } else {
       out.push(
@@ -616,7 +628,7 @@ function blobReferences(databasePath: string): string[] {
       continue;
     }
     for (const file of files) {
-      if (/\.(png|jpe?g|gif|webp)$/i.test(file)) references.push(`waku-blob:${file}`);
+      if (/\.(png|jpe?g|gif|webp)$/i.test(file)) references.push(`wakuwaku-blob:${file}`);
     }
   }
   return references;
@@ -847,7 +859,7 @@ function buildSession(
             turn_count: turnIndex + 1,
             // No such ref exists, so the rewind affordance stays hidden —
             // `prefetch_checkpoint_refs` only offers it for refs git resolves.
-            git_ref: `refs/waku/session-${sessionId}-turn-${turnIndex + 1}`,
+            git_ref: `refs/wakuwaku/session-${sessionId}-turn-${turnIndex + 1}`,
             status: "ready",
             files: Array.from({ length: int(random, 0, 5) }, () => ({
               path: pick(random, FILES),
@@ -895,6 +907,186 @@ function buildSession(
   };
 }
 
+type TrajectoryRecordSeed = {
+  recordId: string;
+  sequence: number;
+  requestId: string | null;
+  parentRecordId: string | null;
+  promptId: string | null;
+  turnCount: number;
+  step: number;
+  kind: "System" | "User" | "Context" | "Request" | "Assistant" | "Tool";
+  lane: "Input" | "Model" | "Tools";
+  status: "pending" | "running" | "completed" | "failed" | "cancelled" | "unavailable";
+  title: string;
+  preview: string;
+  searchText: string;
+  startedAtMs: number | null;
+  firstTokenAtMs: number | null;
+  completedAtMs: number | null;
+  durationMs: number | null;
+  ttftMs: number | null;
+  detailJson: string;
+};
+
+type BuiltTrajectoryFixture = {
+  session: BuiltSession;
+  prompt: {
+    promptId: string;
+    sequence: number;
+    fingerprint: string;
+    systemPrompt: string;
+    toolsJson: string;
+    optionsJson: string;
+    modelHint: string;
+    createdAtMs: number;
+  };
+  records: TrajectoryRecordSeed[];
+  snapshot: string;
+};
+
+const TRAJECTORY_SYSTEM_PROMPT = `You are WakuWaku, a coding assistant working in the user's workspace.
+
+Use the available tools to inspect and change files. Prefer precise, minimal edits. Do not invent file contents or command results you have not observed.
+
+Interaction modes:
+- Build: implement the requested change. You may edit files and, when permitted, run shell commands.
+- Plan: analyze the request and propose an approach. Do not edit files or run mutating shell commands; use read-only inspection only.
+
+Follow the user's instructions. Ask when a required choice is ambiguous.`;
+const TRAJECTORY_PROVIDER = "openai-responses";
+const TRAJECTORY_MODEL = "gpt-5.2";
+const TRAJECTORY_MODEL_HINT = `${TRAJECTORY_PROVIDER}/${TRAJECTORY_MODEL}`;
+const TRAJECTORY_TOOLS = [
+  { name: "read_file", description: "Read a UTF-8 file.", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
+  { name: "run_tests", description: "Run focused tests.", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
+];
+const TRAJECTORY_OPTIONS = { max_tokens: 4096, temperature: null, reasoning: "medium", service_tier: "default" };
+const TRAJECTORY_USAGE = { input: 1874, output: 638, cache_read: 512, cache_write: 128, reasoning: 244 };
+
+function boundedTrajectoryText(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+}
+
+function trajectoryDetail(kind: string, detail: Record<string, unknown>): string {
+  return JSON.stringify({ v: 1, kind, ...detail });
+}
+
+function makeTrajectorySnapshot(): string {
+  const budget = { max_messages: null, max_tokens: null };
+  const queueMode = "OneAtATime";
+  const callId = "call_trajectory_read_001";
+  const messages = [
+    { User: { parts: [{ Text: "Trace the request pipeline and run the focused tests." }] } },
+    { Assistant: { content: [
+      { Thinking: { thinking: "I will inspect the request path before running the focused checks.", signature: null, redacted: false } },
+      { ToolCall: { id: callId, name: "read_file", arguments: { path: "crates/wakuwaku-core/src/trajectory_store.rs" }, thought_signature: null } },
+    ], model: TRAJECTORY_MODEL, provider: TRAJECTORY_PROVIDER, response_id: "resp_trajectory_001", usage: { ...TRAJECTORY_USAGE, total_tokens: 3024 }, stop_reason: "ToolUse", error_message: null } },
+    { ToolResult: { tool_call_id: callId, tool_name: "read_file", content: [{ Text: "The trajectory writer commits one revision per batch." }], is_error: false } },
+    { Assistant: { content: [{ Text: "The request path is ready; the focused checks can run next." }], model: TRAJECTORY_MODEL, provider: TRAJECTORY_PROVIDER, response_id: "resp_trajectory_002", usage: { ...TRAJECTORY_USAGE, input: 2240, output: 284, reasoning: 96, total_tokens: 2772 }, stop_reason: "Stop", error_message: null } },
+  ];
+  return JSON.stringify({ system_prompt: TRAJECTORY_SYSTEM_PROMPT, messages, queue_mode: queueMode, budget, checkpoints: [{ message_count: messages.length, queue_mode: queueMode, budget }], initial_checkpoint: { message_count: 0, queue_mode: queueMode, budget } });
+}
+
+function buildTrajectoryFixture(projectId: string): BuiltTrajectoryFixture {
+  const createdAt = Math.floor((TRAJECTORY_BASE_MS - 1_000) / 1000);
+  const updatedAt = Math.floor((TRAJECTORY_BASE_MS + 7_000) / 1000);
+  const turnId = trajectoryUuid(500);
+  const promptId = trajectoryUuid(1);
+  const toolsJson = JSON.stringify(TRAJECTORY_TOOLS);
+  const optionsJson = JSON.stringify(TRAJECTORY_OPTIONS);
+  const fingerprint = createHash("sha256").update(`${TRAJECTORY_SYSTEM_PROMPT}\0${toolsJson}\0${optionsJson}\0${TRAJECTORY_MODEL_HINT}`).digest("hex");
+  const messages: MessageRow[] = [
+    { id: trajectoryUuid(501), turn_id: turnId, position: 0, role: "user", content: "Trace the request pipeline and run the focused tests.", created_at: createdAt + 1 },
+    { id: trajectoryUuid(502), turn_id: turnId, position: 1, role: "assistant", content: "The request path is ready; the focused checks can run next.", created_at: updatedAt },
+  ];
+  const detail = JSON.stringify({ id: TRAJECTORY_SESSION_ID, title: "Trajectory · deterministic request ledger", project_id: projectId, provider: TRAJECTORY_PROVIDER, model: TRAJECTORY_MODEL, runtime_mode: "fullAccess", interaction_mode: "build", status: "idle", created_at: createdAt, updated_at: updatedAt, last_reply_at: updatedAt, runtime_event_cursor: null, turns: [{ id: turnId, turn_count: 1, status: "completed", provider_turn_started: true, started_at: createdAt + 1, completed_at: updatedAt, checkpoint: null }], transcript_blocks: [] });
+  const records: TrajectoryRecordSeed[] = [];
+  const addRecord = (record: Omit<TrajectoryRecordSeed, "recordId" | "sequence">): string => {
+    const sequence = records.length + 2;
+    const recordId = trajectoryUuid(sequence);
+    records.push({ ...record, recordId, sequence });
+    return recordId;
+  };
+  const addStatic = (kind: TrajectoryRecordSeed["kind"], lane: TrajectoryRecordSeed["lane"], title: string, preview: string, searchText: string, turnCount: number, step: number, value: Record<string, unknown>): void => {
+    addRecord({ requestId: null, parentRecordId: null, promptId, turnCount, step, kind, lane, status: "completed", title, preview: boundedTrajectoryText(preview, 512), searchText: boundedTrajectoryText(searchText, 2560), startedAtMs: null, firstTokenAtMs: null, completedAtMs: null, durationMs: null, ttftMs: null, detailJson: trajectoryDetail(kind.toLowerCase(), value) });
+  };
+  addStatic("System", "Input", "System prompt", TRAJECTORY_SYSTEM_PROMPT, TRAJECTORY_SYSTEM_PROMPT, 0, 0, { model_hint: TRAJECTORY_MODEL_HINT, text: TRAJECTORY_SYSTEM_PROMPT });
+  addStatic("User", "Input", "User request", messages[0]!.content, messages[0]!.content, 1, 0, { text: messages[0]!.content, display_text: messages[0]!.content, has_image: false, source_metadata_missing: false, attachments: [] });
+  addStatic("Context", "Input", "Request context", "Focused trajectory fixture with two provider steps", "trajectory fixture provider steps", 1, 0, { steering_id: null, forked_from: null });
+
+  const addRequest = (step: number, started: number, duration: number, input: number, output: number, reasoning: number, title: string): string => {
+    const requestId = trajectoryUuid(records.length + 2);
+    addRecord({ requestId, parentRecordId: null, promptId, turnCount: 1, step, kind: "Request", lane: "Model", status: "completed", title, preview: `${TRAJECTORY_MODEL_HINT} · exact usage · completed`, searchText: `${title} ${TRAJECTORY_MODEL_HINT}`, startedAtMs: started, firstTokenAtMs: started + (step === 1 ? 180 : 160), completedAtMs: started + duration, durationMs: duration, ttftMs: step === 1 ? 180 : 160, detailJson: trajectoryDetail("request", { model: TRAJECTORY_MODEL, provider: TRAJECTORY_PROVIDER, options: TRAJECTORY_OPTIONS, usage: { ...TRAJECTORY_USAGE, input, output, reasoning }, timing: { started_at_ms: started, first_token_at_ms: started + (step === 1 ? 180 : 160), completed_at_ms: started + duration, duration_ms: duration, ttft_ms: step === 1 ? 180 : 160 }, error: null }) });
+    return requestId;
+  };
+  const request1Started = TRAJECTORY_BASE_MS + 1_000;
+  const request1Id = addRequest(1, request1Started, 1_200, 1874, 638, 244, "Request · inspect trajectory writer");
+  addRecord({ requestId: request1Id, parentRecordId: request1Id, promptId, turnCount: 1, step: 1, kind: "Assistant", lane: "Model", status: "completed", title: "Assistant · tool batch", preview: "I will inspect the request path before running the focused checks.", searchText: "assistant inspect request path tool batch", startedAtMs: request1Started, firstTokenAtMs: request1Started + 180, completedAtMs: request1Started + 1_200, durationMs: 1_200, ttftMs: 180, detailJson: trajectoryDetail("assistant", { model: TRAJECTORY_MODEL, provider: TRAJECTORY_PROVIDER, usage: TRAJECTORY_USAGE, stop_reason: "ToolUse", error_message: null, blocks: [{ type: "thinking", text: "I will inspect the request path before running the focused checks.", redacted: false }, { type: "tool_call", call_id: "call_trajectory_read_001", name: "read_file", arguments: { path: "crates/wakuwaku-core/src/trajectory_store.rs" } }] }) });
+  for (let index = 0; index < 54; index += 1) {
+    const started = request1Started + 1_250;
+    const duration = 120 + index * 11;
+    const path = `crates/wakuwaku-core/src/trajectory/${index % 2 === 0 ? "recording.rs" : "projection.rs"}`;
+    addRecord({ requestId: request1Id, parentRecordId: request1Id, promptId, turnCount: 1, step: 1, kind: "Tool", lane: "Tools", status: "completed", title: `read_file · ${path.split("/").pop()}`, preview: `Read ${path} (${index + 1}/54)`, searchText: `read_file ${path} parallel tool ${index + 1}`, startedAtMs: started, firstTokenAtMs: null, completedAtMs: started + duration, durationMs: duration, ttftMs: null, detailJson: trajectoryDetail("tool", { call_id: `call_parallel_read_${String(index + 1).padStart(3, "0")}`, name: "read_file", is_error: false, arguments: { path }, result: `Read ${path}; line count ${80 + index}.`, timing: { started_at_ms: started, completed_at_ms: started + duration, duration_ms: duration } }) });
+  }
+  const request2Started = TRAJECTORY_BASE_MS + 4_000;
+  const request2Id = addRequest(2, request2Started, 1_300, 2488, 782, 311, "Request · run focused checks");
+  addRecord({ requestId: request2Id, parentRecordId: request2Id, promptId, turnCount: 1, step: 2, kind: "Assistant", lane: "Model", status: "completed", title: "Assistant · focused checks", preview: "The request path is ready; the focused checks can run next.", searchText: "assistant request path focused checks", startedAtMs: request2Started, firstTokenAtMs: request2Started + 160, completedAtMs: request2Started + 1_300, durationMs: 1_300, ttftMs: 160, detailJson: trajectoryDetail("assistant", { model: TRAJECTORY_MODEL, provider: TRAJECTORY_PROVIDER, usage: { ...TRAJECTORY_USAGE, input: 2488, output: 782, reasoning: 311 }, stop_reason: "Stop", error_message: null, blocks: [{ type: "text", text: "The request path is ready; the focused checks can run next." }] }) });
+  for (let index = 0; index < 62; index += 1) {
+    const failed = index === 17;
+    const started = request2Started + 1_350;
+    const duration = 150 + index * 9;
+    const command = index % 2 === 0 ? "cargo test -p wakuwaku-core trajectory" : "cargo test -p wakuwaku-client trajectory";
+    const result = failed ? "test process exited with status 1: one assertion failed" : `tests passed (${index + 2} assertions)`;
+    addRecord({ requestId: request2Id, parentRecordId: request2Id, promptId, turnCount: 1, step: 2, kind: "Tool", lane: "Tools", status: failed ? "failed" : "completed", title: `run_tests · ${failed ? "failed" : "passed"}`, preview: boundedTrajectoryText(`${command} · ${result}`, 512), searchText: boundedTrajectoryText(`${command} ${result} parallel tool ${index + 1}`, 2560), startedAtMs: started, firstTokenAtMs: null, completedAtMs: started + duration, durationMs: duration, ttftMs: null, detailJson: trajectoryDetail("tool", { call_id: `call_parallel_test_${String(index + 1).padStart(3, "0")}`, name: "run_tests", is_error: failed, arguments: { command }, result, timing: { started_at_ms: started, completed_at_ms: started + duration, duration_ms: duration } }) });
+  }
+  return { session: { id: TRAJECTORY_SESSION_ID, title: "Trajectory · deterministic request ledger", provider: TRAJECTORY_PROVIDER, model: TRAJECTORY_MODEL, createdAt, updatedAt, lastReplyAt: updatedAt, messages, blockCount: 0, detail }, prompt: { promptId, sequence: 1, fingerprint, systemPrompt: TRAJECTORY_SYSTEM_PROMPT, toolsJson, optionsJson, modelHint: TRAJECTORY_MODEL_HINT, createdAtMs: TRAJECTORY_BASE_MS }, records, snapshot: makeTrajectorySnapshot() };
+}
+
+function trajectorySnapshotPath(databasePath: string): string {
+  return join(resolve(databasePath, ".."), "snapshots", `${TRAJECTORY_SESSION_ID}.json`);
+}
+
+function deleteTrajectoryRows(database: Database, sessionLike: string): number {
+  const sessions = database
+    .query<{ session_id: string }, [string]>("SELECT session_id FROM trajectory_sessions WHERE session_id LIKE ?")
+    .all(sessionLike)
+    .map((row) => row.session_id);
+  for (const sessionId of sessions) {
+    database.run("DELETE FROM trajectory_records WHERE session_id = ?", [sessionId]);
+    database.run("DELETE FROM trajectory_prompt_snapshots WHERE session_id = ?", [sessionId]);
+  }
+  database.run("DELETE FROM trajectory_sessions WHERE session_id LIKE ?", [sessionLike]);
+  return sessions.length;
+}
+
+function deleteTrajectorySnapshot(databasePath: string): void {
+  const path = trajectorySnapshotPath(databasePath);
+  for (const candidate of [path, `${path}.tmp`]) {
+    try {
+      unlinkSync(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+}
+
+function writeTrajectorySnapshot(databasePath: string, snapshot: string): void {
+  const path = trajectorySnapshotPath(databasePath);
+  mkdirSync(resolve(path, ".."), { recursive: true });
+  const temporary = `${path}.tmp`;
+  writeFileSync(temporary, snapshot, { encoding: "utf8", mode: 0o600 });
+  renameSync(temporary, path);
+}
+
+function deleteTrajectoryFixture(database: Database): number {
+  const removed = deleteTrajectoryRows(database, TRAJECTORY_SESSION_ID);
+  database.run("DELETE FROM messages WHERE session_id = ?", [TRAJECTORY_SESSION_ID]);
+  database.run("DELETE FROM session_details WHERE session_id = ?", [TRAJECTORY_SESSION_ID]);
+  database.run("DELETE FROM sessions WHERE id = ?", [TRAJECTORY_SESSION_ID]);
+  return removed;
+}
+
 // ---------------------------------------------------------------------------
 // Database
 // ---------------------------------------------------------------------------
@@ -904,6 +1096,7 @@ function deleteMockSessions(database: Database): number {
   const before = database
     .query<{ count: number }, [string]>("SELECT count(*) AS count FROM sessions WHERE id LIKE ?")
     .get(like)!.count;
+  deleteTrajectoryRows(database, like);
   database.run("DELETE FROM messages WHERE session_id LIKE ?", [like]);
   database.run("DELETE FROM session_details WHERE session_id LIKE ?", [like]);
   database.run("DELETE FROM sessions WHERE id LIKE ?", [like]);
@@ -933,12 +1126,15 @@ const formatBytes = (bytes: number): string =>
 function main(): void {
   const options = parseOptions(process.argv.slice(2));
   const database = new Database(options.databasePath, { create: false, readwrite: true });
-  // The debug app usually holds this database open; wait rather than fail if it
-  // happens to be mid-write.
   database.run("PRAGMA busy_timeout = 10000");
+  database.run("PRAGMA foreign_keys = ON");
 
   if (options.clean) {
-    const removed = database.transaction(() => deleteMockSessions(database))();
+    const trajectoryOnly = options.only.length === 1 && options.only[0] === "trajectory";
+    const removed = database.transaction(() =>
+      trajectoryOnly ? deleteTrajectoryFixture(database) : deleteMockSessions(database),
+    )();
+    if (trajectoryOnly || options.only.length === 0) deleteTrajectorySnapshot(options.databasePath);
     console.log(`[seed] removed ${removed} mock session(s) from ${options.databasePath}`);
     database.close();
     return;
@@ -946,84 +1142,59 @@ function main(): void {
 
   const project = resolveProject(database, options.projectRef);
   const images = blobReferences(options.databasePath);
+  const knownProfiles: Record<string, true> = Object.fromEntries(
+    [...PROFILES.map((profile) => profile.key), "trajectory"].map((profile) => [profile, true]),
+  );
+  const unknownProfiles = options.only.filter((profile) => !knownProfiles[profile]);
+  if (unknownProfiles.length > 0) {
+    throw new Error(`--only matched nothing (unknown: ${unknownProfiles.join(", ")}; have: ${Object.keys(knownProfiles).join(", ")})`);
+  }
+  const wantsTrajectory = options.only.length === 0 || options.only.includes("trajectory");
+  const trajectoryOnly = options.only.length === 1 && options.only[0] === "trajectory";
   const profiles = options.only.length
     ? PROFILES.filter((profile) => options.only.includes(profile.key))
     : PROFILES;
-  if (profiles.length === 0) {
-    throw new Error(`--only matched nothing (have: ${PROFILES.map((p) => p.key).join(", ")})`);
-  }
 
-  console.log(
-    `[seed] project ${project.name} · scale ${options.scale} · ${images.length} blob(s) available`,
-  );
+  console.log(`[seed] project ${project.name} · scale ${options.scale} · ${images.length} blob(s) available`);
+  const messageBytes = (session: BuiltSession) => session.messages.reduce((sum, message) => sum + Buffer.byteLength(message.content), 0);
+  const built = profiles.map((profile, index) => buildSession(profile, options, project.id, images, index));
+  const trajectory = wantsTrajectory ? buildTrajectoryFixture(project.id) : undefined;
+  if (trajectory) console.log(`[seed] trajectory       ${String(trajectory.records.length).padStart(6)} records · exact revision 1`);
 
-  const messageBytes = (session: BuiltSession) =>
-    session.messages.reduce((sum, message) => sum + Buffer.byteLength(message.content), 0);
-
-  const built = profiles.map((profile, index) => {
-    const session = buildSession(profile, options, project.id, images, index);
-    console.log(
-      `[seed] ${profile.key.padEnd(15)} ${String(session.messages.length).padStart(6)} messages · ` +
-        `${String(session.blockCount).padStart(6)} blocks · ` +
-        `${formatBytes(messageBytes(session)).padStart(8)} text · ` +
-        `${formatBytes(Buffer.byteLength(session.detail)).padStart(8)} detail`,
-    );
-    return session;
-  });
-
-  const insertSession = database.prepare(
-    `INSERT INTO sessions(id, project_id, title, provider, model, status, created_at, updated_at, last_reply_at)
-     VALUES (?, ?, ?, ?, ?, 'idle', ?, ?, ?)`,
-  );
-  const insertDetail = database.prepare(
-    "INSERT INTO session_details(session_id, data) VALUES (?, ?)",
-  );
-  const insertMessage = database.prepare(
-    `INSERT INTO messages(id, session_id, turn_id, position, role, content, created_at, streaming)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
-  );
+  const insertSession = database.prepare(`INSERT INTO sessions(id, project_id, title, provider, model, status, created_at, updated_at, last_reply_at) VALUES (?, ?, ?, ?, ?, 'idle', ?, ?, ?)`);
+  const insertDetail = database.prepare("INSERT INTO session_details(session_id, data) VALUES (?, ?)");
+  const insertMessage = database.prepare(`INSERT INTO messages(id, session_id, turn_id, position, role, content, created_at, streaming) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`);
+  const insertTrajectorySession = database.prepare("INSERT INTO trajectory_sessions(session_id, schema_version, generation, revision, next_sequence, availability) VALUES (?, 1, 1, 1, ?, 'exact')");
+  const insertPrompt = database.prepare("INSERT INTO trajectory_prompt_snapshots(session_id, prompt_id, sequence, fingerprint, system_prompt, tools_json, options_json, model_hint, created_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  const insertRecord = database.prepare(`INSERT INTO trajectory_records(session_id, record_id, sequence, revision, request_id, parent_record_id, prompt_id, turn_count, step, kind, lane, status, title, preview, search_text, started_at_ms, first_token_at_ms, completed_at_ms, duration_ms, ttft_ms, detail_json) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
   const write = database.transaction(() => {
-    const removed = deleteMockSessions(database);
+    const removed = trajectoryOnly ? deleteTrajectoryFixture(database) : deleteMockSessions(database);
     for (const session of built) {
-      insertSession.run(
-        session.id,
-        project.id,
-        session.title,
-        session.provider,
-        session.model,
-        session.createdAt,
-        session.updatedAt,
-        session.lastReplyAt,
-      );
+      insertSession.run(session.id, project.id, session.title, session.provider, session.model, session.createdAt, session.updatedAt, session.lastReplyAt);
       insertDetail.run(session.id, session.detail);
-      for (const message of session.messages) {
-        insertMessage.run(
-          message.id,
-          session.id,
-          message.turn_id,
-          message.position,
-          message.role,
-          message.content,
-          message.created_at,
-        );
-      }
+      for (const message of session.messages) insertMessage.run(message.id, session.id, message.turn_id, message.position, message.role, message.content, message.created_at);
+    }
+    if (trajectory) {
+      const session = trajectory.session;
+      insertSession.run(session.id, project.id, session.title, session.provider, session.model, session.createdAt, session.updatedAt, session.lastReplyAt);
+      insertDetail.run(session.id, session.detail);
+      for (const message of session.messages) insertMessage.run(message.id, session.id, message.turn_id, message.position, message.role, message.content, message.created_at);
+      insertTrajectorySession.run(session.id, trajectory.records.length + 2);
+      insertPrompt.run(session.id, trajectory.prompt.promptId, trajectory.prompt.sequence, trajectory.prompt.fingerprint, trajectory.prompt.systemPrompt, trajectory.prompt.toolsJson, trajectory.prompt.optionsJson, trajectory.prompt.modelHint, trajectory.prompt.createdAtMs);
+      for (const record of trajectory.records) insertRecord.run(session.id, record.recordId, record.sequence, record.requestId, record.parentRecordId, record.promptId, record.turnCount, record.step, record.kind, record.lane, record.status, record.title, record.preview, record.searchText, record.startedAtMs, record.firstTokenAtMs, record.completedAtMs, record.durationMs, record.ttftMs, record.detailJson);
     }
     return removed;
   });
-
   const removed = write();
+  if (trajectory) writeTrajectorySnapshot(options.databasePath, trajectory.snapshot);
+  else deleteTrajectorySnapshot(options.databasePath);
   database.run("PRAGMA wal_checkpoint(PASSIVE)");
-  const totalMessages = built.reduce((sum, session) => sum + session.messages.length, 0);
-  const totalBytes = built.reduce(
-    (sum, session) => sum + Buffer.byteLength(session.detail) + messageBytes(session),
-    0,
-  );
+  const allSessions = trajectory ? [...built, trajectory.session] : built;
+  const totalMessages = allSessions.reduce((sum, session) => sum + session.messages.length, 0);
+  const totalBytes = allSessions.reduce((sum, session) => sum + Buffer.byteLength(session.detail) + messageBytes(session), 0);
   database.close();
-
-  console.log(
-    `[seed] replaced ${removed} → wrote ${built.length} sessions · ${totalMessages} messages · ${formatBytes(totalBytes)} of transcript`,
-  );
+  console.log(`[seed] replaced ${removed} → wrote ${allSessions.length} sessions · ${totalMessages} messages · ${formatBytes(totalBytes)} of transcript`);
   console.log("[seed] relaunch the debug app to see them — sessions are read once at startup");
 }
 

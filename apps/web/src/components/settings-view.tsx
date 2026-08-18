@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query'
-import type { ApiFormat, AuthPhase, DaemonSettings, ExternalProvider, LoginMethod, Project } from '@waku/client'
+import type { ApiFormat, AuthPhase, DaemonSettings, ExternalProvider, LoginMethod, Project } from '@wakuwaku/client'
 import { useEffect, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { ControlMenu } from '@/components/control-menu'
@@ -164,7 +164,7 @@ export function SettingsView({
 
 function GeneralSettings() {
   const { t } = useI18n()
-  const [analytics, setAnalytics] = useStoredBoolean('waku.analytics-enabled', true)
+  const [analytics, setAnalytics] = useStoredBoolean('wakuwaku.analytics-enabled', true)
   return (
     <div>
       <SettingsCard>

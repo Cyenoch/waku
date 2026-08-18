@@ -6,7 +6,7 @@ import type {
   ComposerDraft,
   MessageAttachment,
   Project,
-} from '@waku/client'
+} from '@wakuwaku/client'
 import {
   useEffect,
   useRef,

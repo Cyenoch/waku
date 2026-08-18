@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=WakuWaku
+Comment=A native coding agent with a built-in Rust harness
+Exec=wakuwaku
+Icon=dev.bingzi.wakuwaku
+Terminal=false
+Categories=Development;IDE;
+StartupNotify=true
+StartupWMClass=dev.bingzi.wakuwaku

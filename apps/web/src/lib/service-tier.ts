@@ -1,4 +1,4 @@
-import type { ModelCatalogEntry, ServiceTier } from '@waku/client'
+import type { ModelCatalogEntry, ServiceTier } from '@wakuwaku/client'
 export interface ServiceTierChoice {
   value: ServiceTier
   labelKey: string

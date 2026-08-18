@@ -1,6 +1,6 @@
-import type { AgentSession, ProviderId, ServiceTier } from '@waku/client'
+import type { AgentSession, ProviderId, ServiceTier } from '@wakuwaku/client'
 
-const STORAGE_KEY = 'waku.composer-preferences.v2'
+const STORAGE_KEY = 'wakuwaku.composer-preferences.v2'
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
 
 export interface RememberedModelTraits {

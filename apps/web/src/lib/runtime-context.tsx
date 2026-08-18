@@ -4,10 +4,9 @@ import type {
   MessageAttachment,
   ModelCatalog,
   Project,
-  PromptInput,
   SequencedEvent,
   UserInputAnswer,
-} from '@waku/client'
+} from '@wakuwaku/client'
 import {
   createContext,
   useCallback,
@@ -33,6 +32,7 @@ import {
   type TaskState,
 } from './daemon-api'
 import { serviceTierForModel } from './service-tier'
+import { promptInputFromAttachments } from './attachments'
 import {
   reduceRuntimeEvent,
   type PendingPermission,
@@ -366,7 +366,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         }))
         checkpoint = {
           turn_count: turn.turn_count,
-          git_ref: `refs/waku/session-${saved.id}-turn-${turn.turn_count}`,
+          git_ref: `refs/wakuwaku/session-${saved.id}-turn-${turn.turn_count}`,
           status: 'error',
           files: [],
           additions: 0,
@@ -691,7 +691,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           setRuntimes((current) => ({ ...current, [session.id]: publicRuntime(runtime!) }))
         }
         await client.request(
-          { type: 'prompt', input: promptInput(providerPrompt, attachments) },
+          { type: 'prompt', input: promptInputFromAttachments(providerPrompt, attachments, prompt) },
           session.id,
           runtime.runtimeId,
         )
@@ -733,7 +733,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       pending.push({ providerPrompt, displayContent: prompt, attachments })
       pendingSteers.current.set(session.id, pending)
       await client.request(
-        { type: 'steer', input: promptInput(providerPrompt, attachments) },
+        { type: 'steer', input: promptInputFromAttachments(providerPrompt, attachments, prompt) },
         session.id,
         runtime.runtimeId,
       )
@@ -1338,19 +1338,6 @@ function backgroundKeyId(key: BackgroundWorkKey) {
   return `${key.kind}:${key.providerId}`
 }
 
-function promptInput(text: string, attachments: MessageAttachment[]): PromptInput {
-  return {
-    text,
-    attachments: attachments.flatMap((attachment) => {
-      const reference = attachment.blob_reference
-      if (!reference) return []
-      return [{
-        kind: reference.startsWith('waku-blob:') ? 'blob' as const : 'attachment' as const,
-        reference,
-      }]
-    }),
-  }
-}
 function sameBackgroundKey(left: BackgroundWorkKey, right: BackgroundWorkKey) {
   return left.kind === right.kind && left.providerId === right.providerId
 }

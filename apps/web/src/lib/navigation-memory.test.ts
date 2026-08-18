@@ -51,7 +51,7 @@ describe('browser route transitions', () => {
 
 describe('selected task removal', () => {
   test('opens the newest remaining task in the same project', () => {
-    const project = { ...createProject('/repos/waku'), id: 'waku' }
+    const project = { ...createProject('/repos/wakuwaku'), id: 'wakuwaku' }
     const removed = { ...createSession(project.id, 'openai-codex', false), id: 'removed' }
     const older = {
       ...createSession(project.id, 'openai-codex', false),
@@ -73,7 +73,7 @@ describe('selected task removal', () => {
   })
 
   test('opens a fresh task in the same ordinary project when history is empty', () => {
-    const project = { ...createProject('/repos/waku'), id: 'waku' }
+    const project = { ...createProject('/repos/wakuwaku'), id: 'wakuwaku' }
     const removed = createSession(project.id, 'openai-codex', false)
     expect(taskRemovalDestination([project], [project], [], removed)).toEqual({
       kind: 'newTask',
@@ -83,7 +83,7 @@ describe('selected task removal', () => {
 
   test('creates a fresh projectless workspace after deleting its last task', () => {
     const project = {
-      ...createProject('/home/user/.waku/projects/old-task'),
+      ...createProject('/home/user/.wakuwaku/projects/old-task'),
       id: 'projectless',
       name: 'No project',
     }
@@ -96,7 +96,7 @@ describe('selected task removal', () => {
 
 function memoryStorage(initial?: string) {
   const values = new Map<string, string>()
-  if (initial !== undefined) values.set('waku.navigation', initial)
+  if (initial !== undefined) values.set('wakuwaku.navigation', initial)
   return {
     getItem: (key: string) => values.get(key) ?? null,
     setItem: (key: string, value: string) => { values.set(key, value) },

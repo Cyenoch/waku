@@ -4,14 +4,14 @@
 //! this module loads it at runtime instead of linking it, so a bare `cargo
 //! run` binary simply runs without an updater. Sparkle still owns update
 //! discovery, download, signature verification, installation, and relaunch.
-//! Waku's routing user driver keeps automatic checks in the sidebar, but
+//! WakuWaku's routing user driver keeps automatic checks in the sidebar, but
 //! forwards an explicit Check for Updates action to Sparkle's standard user
 //! driver so the original updater window still appears when requested.
 //!
 //! Debug builds stay dormant so the dev watcher's app never offers to replace
-//! itself with a production build. `WAKU_PREVIEW_UPDATE=1` fakes only the
+//! itself with a production build. `WAKUWAKU_PREVIEW_UPDATE=1` fakes only the
 //! automatic sidebar result while retaining the real Sparkle flow for the
-//! Check for Updates menu; `WAKU_FORCE_UPDATER=1` exercises everything for
+//! Check for Updates menu; `WAKUWAKU_FORCE_UPDATER=1` exercises everything for
 //! real from a debug bundle.
 
 use gpui::Global;
@@ -21,7 +21,7 @@ pub struct UpdaterState(pub Option<Updater>);
 
 impl Global for UpdaterState {}
 
-/// The compact state rendered by Waku. Update details remain owned by
+/// The compact state rendered by WakuWaku. Update details remain owned by
 /// Sparkle and never enter a frame path.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum UpdateStatus {
@@ -105,7 +105,7 @@ mod macos {
 
     define_class!(
         #[unsafe(super(NSObject))]
-        #[name = "WakuSparkleUserDriver"]
+        #[name = "WakuWakuSparkleUserDriver"]
         #[thread_kind = MainThreadOnly]
         #[ivars = UserDriverIvars]
         struct UserDriver;
@@ -595,8 +595,9 @@ mod macos {
         /// running outside a bundle with an embedded framework.
         pub fn init() -> Option<Self> {
             let preview = cfg!(debug_assertions)
-                && std::env::var_os("WAKU_PREVIEW_UPDATE").is_some_and(|value| value == "1");
-            let forced = std::env::var_os("WAKU_FORCE_UPDATER").is_some_and(|value| value == "1");
+                && std::env::var_os("WAKUWAKU_PREVIEW_UPDATE").is_some_and(|value| value == "1");
+            let forced =
+                std::env::var_os("WAKUWAKU_FORCE_UPDATER").is_some_and(|value| value == "1");
             if cfg!(debug_assertions) && !forced && !preview {
                 return None;
             }
@@ -616,7 +617,7 @@ mod macos {
                         .to_string_lossy()
                         .into_owned()
                 };
-                eprintln!("Waku updater: failed to load Sparkle: {reason}");
+                eprintln!("WakuWaku updater: failed to load Sparkle: {reason}");
                 return None;
             }
 
@@ -665,7 +666,7 @@ mod macos {
                 ]
             };
             if !started {
-                eprintln!("Waku updater: Sparkle rejected its updater configuration");
+                eprintln!("WakuWaku updater: Sparkle rejected its updater configuration");
                 return None;
             }
 
@@ -776,7 +777,7 @@ mod macos {
     }
 
     /// The embedded framework's dylib next to the running executable
-    /// (Contents/MacOS/Waku → Contents/Frameworks/Sparkle.framework/Sparkle).
+    /// (Contents/MacOS/WakuWaku → Contents/Frameworks/Sparkle.framework/Sparkle).
     fn sparkle_library_path() -> Option<std::path::PathBuf> {
         let executable = std::env::current_exe().ok()?;
         let contents = executable.parent()?.parent()?;
@@ -795,7 +796,7 @@ mod macos {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
             let library = target_dir
-                .join("debug/Waku Debug.app/Contents/Frameworks/Sparkle.framework/Sparkle");
+                .join("debug/WakuWaku Debug.app/Contents/Frameworks/Sparkle.framework/Sparkle");
             if !library.exists() {
                 return;
             }

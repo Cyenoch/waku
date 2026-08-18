@@ -9,8 +9,8 @@ import type { QueryClient } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import appCss from '@/styles.css?url'
 
-const SITE_URL = 'https://waku.sh'
-const TITLE = 'Waku — a native coding agent'
+const SITE_URL = 'https://wakuwaku.bingzi.dev'
+const TITLE = 'WakuWaku — a native coding agent'
 const DESCRIPTION =
   'A fast, native coding agent with a built-in Rust harness. OpenAI, Anthropic, OpenCode, and xAI over HTTP — one timeline, entirely on your machine.'
 

@@ -62,7 +62,7 @@ impl Waku {
 
 impl Waku {
     /// Width left for the chat column once the visible panels take theirs.
-    fn chat_viewport_width(&self, window: &Window) -> f32 {
+    pub(super) fn chat_viewport_width(&self, window: &Window) -> f32 {
         let (sidebar_width, right_panel_width) = self.effective_panel_widths(window);
         f32::from(window.viewport_size().width)
             - if self.sidebar_visible {
@@ -95,16 +95,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let chat_viewport_width = self.chat_viewport_width(window);
-        // The transcript's own element sizes itself with `flex_1`, which only
-        // stretches inside a flex parent. A cached pane lays its content out
-        // as a root, so give it that parent here or its height collapses to
-        // the zero flex basis.
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .min_h_0()
-            .child(self.render_transcript(window, chat_viewport_width, cx))
+        self.render_transcript(window, chat_viewport_width, cx)
             .into_any_element()
     }
 
@@ -380,7 +371,7 @@ impl Waku {
                     .child(dismiss)
                     .child(self.toast_selection_input()),
             )
-            // Keep the toast top-centered just beneath Waku's 48px header.
+            // Keep the toast top-centered just beneath WakuWaku's 48px header.
             // GPUI's animation path honors the system reduce-motion preference
             // and resolves immediately.
             .with_animation(

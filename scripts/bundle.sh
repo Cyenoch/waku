@@ -3,10 +3,10 @@ set -eu
 
 profile="${1:-debug}"
 cargo_target_dir="${CARGO_TARGET_DIR:-target}"
-debug_identity_cache=".waku-cache/codesign/debug-identity"
+debug_identity_cache=".wakuwaku-cache/codesign/debug-identity"
 codesign_identity_from_environment=0
-if [ -n "${WAKU_CODESIGN_IDENTITY:-}" ]; then
-  codesign_identity="$WAKU_CODESIGN_IDENTITY"
+if [ -n "${WAKUWAKU_CODESIGN_IDENTITY:-}" ]; then
+  codesign_identity="$WAKUWAKU_CODESIGN_IDENTITY"
   codesign_identity_from_environment=1
 else
   if [ "$profile" = "debug" ]; then
@@ -38,13 +38,13 @@ else
 fi
 case "$profile" in
   debug)
-    app_name="Waku Debug"
-    bundle_identifier="sh.waku.dev"
+    app_name="WakuWaku Debug"
+    bundle_identifier="dev.bingzi.wakuwaku.dev"
     icon_file="AppIconDev.icns"
     ;;
   release)
-    app_name="Waku"
-    bundle_identifier="sh.waku"
+    app_name="WakuWaku"
+    bundle_identifier="dev.bingzi.wakuwaku"
     icon_file="AppIcon.icns"
     ;;
   *)
@@ -57,25 +57,25 @@ if [ "$profile" = "debug" ] && [ "$codesign_identity_from_environment" = "0" ] &
   printf '%s\n' "$codesign_identity" > "$debug_identity_cache"
 fi
 debug_adhoc_requirement="=designated => identifier \"$bundle_identifier\""
-if [ "${WAKU_SKIP_CARGO_BUILD:-0}" != "1" ]; then
+if [ "${WAKUWAKU_SKIP_CARGO_BUILD:-0}" != "1" ]; then
   if [ "$profile" = "release" ]; then
-    cargo build --release --package waku --bin waku --bin waku_js_repl --package waku-daemon --bin waku-daemon
+    cargo build --release --package wakuwaku --bin wakuwaku --bin wakuwaku_js_repl --package wakuwaku-daemon --bin wakuwaku-daemon
   else
-    cargo build --package waku --bin waku --bin waku_js_repl
+    cargo build --package wakuwaku --bin wakuwaku --bin wakuwaku_js_repl
   fi
 fi
 
 bundle="$cargo_target_dir/$profile/$app_name.app"
 contents="$bundle/Contents"
-repl_executable="$contents/Resources/waku_js_repl"
-daemon_executable="$contents/MacOS/waku-daemon"
+repl_executable="$contents/Resources/wakuwaku_js_repl"
+daemon_executable="$contents/MacOS/wakuwaku-daemon"
 # Sparkle powers in-app updates. The framework is embedded in the bundle and
 # the same distribution's bin/ tools (generate_appcast, sign_update) sign
 # releases, so both come from one pinned archive cached outside target/ where
 # `cargo clean` cannot evict it. Bump the version and checksum together.
 sparkle_version="2.9.4"
 sparkle_sha256="ce89daf967db1e1893ed3ebd67575ed82d3902563e3191ca92aaec9164fbdef9"
-sparkle_cache_root=".waku-cache/sparkle"
+sparkle_cache_root=".wakuwaku-cache/sparkle"
 sparkle_cache_entry="$sparkle_cache_root/$sparkle_version"
 sparkle_framework_source="$sparkle_cache_entry/Sparkle.framework"
 
@@ -94,11 +94,11 @@ fi
 
 rm -rf "$bundle"
 mkdir -p "$contents/MacOS" "$contents/Resources"
-cp "$cargo_target_dir/$profile/waku" "$contents/MacOS/$app_name"
-cp "$cargo_target_dir/$profile/waku_js_repl" "$repl_executable"
+cp "$cargo_target_dir/$profile/wakuwaku" "$contents/MacOS/$app_name"
+cp "$cargo_target_dir/$profile/wakuwaku_js_repl" "$repl_executable"
 chmod 755 "$repl_executable"
 if [ "$profile" = "release" ]; then
-  cp "$cargo_target_dir/$profile/waku-daemon" "$daemon_executable"
+  cp "$cargo_target_dir/$profile/wakuwaku-daemon" "$daemon_executable"
   chmod 755 "$daemon_executable"
 fi
 cp resources/Info.plist "$contents/Info.plist"
@@ -107,7 +107,7 @@ frameworks_directory="$contents/Frameworks"
 sparkle_framework="$frameworks_directory/Sparkle.framework"
 mkdir -p "$frameworks_directory"
 cp -R "$sparkle_framework_source" "$sparkle_framework"
-# Waku is not sandboxed, so Sparkle's XPC services never run; drop them along
+# WakuWaku is not sandboxed, so Sparkle's XPC services never run; drop them along
 # with the header and module folders so the shipped framework carries no dev
 # artifacts and no unsigned nested code.
 for sparkle_extra in XPCServices Headers PrivateHeaders Modules; do

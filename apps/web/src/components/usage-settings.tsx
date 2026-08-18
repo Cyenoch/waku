@@ -9,7 +9,7 @@ import type {
   ProviderSlice,
   UsageHistory,
   UsageWindow,
-} from '@waku/client'
+} from '@wakuwaku/client'
 import { useState, type ReactNode } from 'react'
 import { Virtuoso } from 'react-virtuoso'
 import { ControlMenu } from '@/components/control-menu'

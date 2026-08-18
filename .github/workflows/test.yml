@@ -68,5 +68,5 @@ jobs:
       - name: Check generated protocol and browser client
         run: |
           bun run protocol:check
-          bun run --filter @waku/client check
-          bun run --filter @waku/client test
+          bun run --filter @wakuwaku/client check
+          bun run --filter @wakuwaku/client test

@@ -1,11 +1,11 @@
 use super::*;
 
 fn workspace_ack(
-    workspace: &waku_client::WorkspaceClient,
-    operation: waku_client::WorkspaceOperation,
+    workspace: &wakuwaku_client::WorkspaceClient,
+    operation: wakuwaku_client::WorkspaceOperation,
 ) -> anyhow::Result<()> {
     match workspace.request(operation)? {
-        waku_client::WorkspaceResult::Ack => Ok(()),
+        wakuwaku_client::WorkspaceResult::Ack => Ok(()),
         _ => anyhow::bail!("the daemon returned an invalid workspace response"),
     }
 }
@@ -24,23 +24,24 @@ fn start_driver(mut request: DriverStartRequest, cwd: PathBuf) -> anyhow::Result
 }
 
 fn attach_driver(
-    daemon: waku_client::DaemonSupervisor,
+    daemon: wakuwaku_client::DaemonSupervisor,
     session_id: Uuid,
     event_wake: smol::channel::Sender<()>,
 ) -> anyhow::Result<Option<(AgentSession, PreparedDriver)>> {
-    let Some(session) = waku_client::persistence::hydrate_session(&daemon, session_id)? else {
+    let Some(session) = wakuwaku_client::persistence::hydrate_session(&daemon, session_id)? else {
         return Ok(None);
     };
-    let response =
-        daemon
-            .client()
-            .request(session_id, Uuid::nil(), waku_client::Command::AttachSession)?;
-    let waku_client::ResponsePayload::SessionRuntime {
+    let response = daemon.client().request(
+        session_id,
+        Uuid::nil(),
+        wakuwaku_client::Command::AttachSession,
+    )?;
+    let wakuwaku_client::ResponsePayload::SessionRuntime {
         runtime_id,
         supports_steer,
     } = response
     else {
-        anyhow::bail!("Waku daemon returned an invalid runtime attachment response");
+        anyhow::bail!("WakuWaku daemon returned an invalid runtime attachment response");
     };
     let Some(runtime_id) = runtime_id else {
         return Ok(None);
@@ -58,20 +59,20 @@ fn attach_driver(
 }
 
 fn load_remote_task_state(
-    client: &waku_client::DaemonClient,
+    client: &wakuwaku_client::DaemonClient,
 ) -> anyhow::Result<RemoteTaskStateSnapshot> {
     let response = client.request(
         Uuid::nil(),
         Uuid::nil(),
-        waku_client::Command::LoadTaskState,
+        wakuwaku_client::Command::LoadTaskState,
     )?;
-    let waku_client::ResponsePayload::TaskState {
+    let wakuwaku_client::ResponsePayload::TaskState {
         projects,
         mut sessions,
         ..
     } = response
     else {
-        anyhow::bail!("Waku daemon returned an invalid task-state response");
+        anyhow::bail!("WakuWaku daemon returned an invalid task-state response");
     };
     for session in &mut sessions {
         session.detail_loaded = false;
@@ -126,7 +127,7 @@ pub(super) fn merge_remote_session_catalog(
 /// starting its provider. This function is called only from the background
 /// executor; the UI thread owns applying the returned workspace afterward.
 fn prepare_submission(
-    workspace_client: waku_client::WorkspaceClient,
+    workspace_client: wakuwaku_client::WorkspaceClient,
     project: Project,
     workspace: SessionWorkspace,
     driver_start: Option<anyhow::Result<DriverStartRequest>>,
@@ -139,17 +140,18 @@ fn prepare_submission(
             if project.is_projectless() {
                 anyhow::bail!("a projectless task cannot create a Git worktree");
             }
-            let created =
-                match workspace_client.request(waku_client::WorkspaceOperation::CreateWorktree {
+            let created = match workspace_client.request(
+                wakuwaku_client::WorkspaceOperation::CreateWorktree {
                     project_path: project.path.clone(),
                     project_id: project.id,
                     session_id,
                     prompt: prompt.to_owned(),
                     base_branch,
-                })? {
-                    waku_client::WorkspaceResult::WorktreeCreated { worktree } => worktree,
-                    _ => anyhow::bail!("the daemon returned an invalid worktree response"),
-                };
+                },
+            )? {
+                wakuwaku_client::WorkspaceResult::WorktreeCreated { worktree } => worktree,
+                _ => anyhow::bail!("the daemon returned an invalid worktree response"),
+            };
             SessionWorkspace::Worktree {
                 path: created.path,
                 branch: created.branch,
@@ -164,7 +166,7 @@ fn prepare_submission(
     // made between turns to the next response.
     let checkpoint_warning = workspace_ack(
         &workspace_client,
-        waku_client::WorkspaceOperation::CaptureTurnStart {
+        wakuwaku_client::WorkspaceOperation::CaptureTurnStart {
             cwd: project_path.to_path_buf(),
             session_id,
             turn_count,
@@ -193,7 +195,7 @@ fn prepare_submission(
 /// checkpoints, and the embedded provider runtime, so the desktop submits one
 /// typed command and applies the returned session snapshot.
 struct MessageRewindRequest {
-    daemon_client: waku_client::DaemonClient,
+    daemon_client: wakuwaku_client::DaemonClient,
     session_id: Uuid,
     turn_count: usize,
 }
@@ -217,17 +219,17 @@ fn perform_message_rewind(request: MessageRewindRequest) -> Result<PreparedMessa
         .request(
             request.session_id,
             Uuid::nil(),
-            waku_client::Command::RewindSessionToMessage {
+            wakuwaku_client::Command::RewindSessionToMessage {
                 turn_count: request.turn_count,
             },
         )
         .map_err(|error| error.to_string())?;
-    let waku_client::ResponsePayload::SessionRewound {
+    let wakuwaku_client::ResponsePayload::SessionRewound {
         session,
         cleanup_warning,
     } = response
     else {
-        return Err("Waku daemon returned an invalid rewind response".to_owned());
+        return Err("WakuWaku daemon returned an invalid rewind response".to_owned());
     };
     Ok(PreparedMessageRewind {
         session: *session,
@@ -241,7 +243,7 @@ fn perform_message_rewind(request: MessageRewindRequest) -> Result<PreparedMessa
 /// provider-specific cursors is important: a `ProviderId` identifies the
 /// configured endpoint, while the daemon owns any runtime conversation state.
 struct ResponseForkRequest {
-    daemon_client: waku_client::DaemonClient,
+    daemon_client: wakuwaku_client::DaemonClient,
     session_id: Uuid,
     turn_count: usize,
 }
@@ -257,17 +259,17 @@ fn perform_response_fork(request: ResponseForkRequest) -> Result<PreparedRespons
         .request(
             request.session_id,
             Uuid::nil(),
-            waku_client::Command::ForkSessionFromResponse {
+            wakuwaku_client::Command::ForkSessionFromResponse {
                 turn_count: request.turn_count,
             },
         )
         .map_err(|error| error.to_string())?;
-    let waku_client::ResponsePayload::SessionForked {
+    let wakuwaku_client::ResponsePayload::SessionForked {
         session,
         checkpoint_warning,
     } = response
     else {
-        return Err("Waku daemon returned an invalid fork response".to_owned());
+        return Err("WakuWaku daemon returned an invalid fork response".to_owned());
     };
     Ok(PreparedResponseFork {
         session: *session,
@@ -281,7 +283,7 @@ impl Waku {
         let results = self.task_state_sync_tx.clone();
         let event_wake = self.event_wake_tx.clone();
         std::thread::Builder::new()
-            .name("waku-task-state-sync".into())
+            .name("wakuwaku-task-state-sync".into())
             .spawn(move || {
                 let Ok(mut client) = clients.recv() else {
                     return;
@@ -477,7 +479,7 @@ impl Waku {
                 };
                 if !self.runtimes.contains_key(&session_id) {
                     self.state.sessions[index] = session;
-                    self.install_prepared_driver(session_id, prepared);
+                    self.install_prepared_driver(session_id, prepared, cx);
                     if self.state.selected_session == Some(session_id) {
                         self.reset_visible_state();
                         self.reset_transcript_rows(self.transcript_row_count());
@@ -699,8 +701,8 @@ impl Waku {
             .configured_provider(provider)
             .map(|provider| provider.name.as_str())
             .or_else(|| {
-                waku_client::ProviderPreset::parse_id(provider.as_str())
-                    .map(waku_client::ProviderPreset::display_name)
+                wakuwaku_client::ProviderPreset::parse_id(provider.as_str())
+                    .map(wakuwaku_client::ProviderPreset::display_name)
             })
             .unwrap_or_else(|| provider.as_str());
         match model {
@@ -820,7 +822,7 @@ impl Waku {
             {
                 continue;
             }
-            let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+            let workspace = wakuwaku_client::WorkspaceClient::new(self.daemon.client());
             cx.spawn(async move |waku, cx| {
                 let captured = cx
                     .background_executor()
@@ -828,13 +830,13 @@ impl Waku {
                         let project_path = project_path.clone();
                         async move {
                             match workspace.request(
-                                waku_client::WorkspaceOperation::CaptureTurn {
+                                wakuwaku_client::WorkspaceOperation::CaptureTurn {
                                     cwd: project_path,
                                     session_id,
                                     turn_count,
                                 },
                             )? {
-                                waku_client::WorkspaceResult::Checkpoint { checkpoint } => {
+                                wakuwaku_client::WorkspaceResult::Checkpoint { checkpoint } => {
                                     Ok(checkpoint)
                                 }
                                 _ => anyhow::bail!(
@@ -1368,7 +1370,10 @@ impl Waku {
     }
 
     /// Resolves the options sent to the daemon-owned endpoint runtime.
-    fn service_tier_for_session(&self, session: &AgentSession) -> Option<waku_client::ServiceTier> {
+    fn service_tier_for_session(
+        &self,
+        session: &AgentSession,
+    ) -> Option<wakuwaku_client::ServiceTier> {
         let model = self.model_for_session(session)?;
         gated_service_tier(
             session.service_tier,
@@ -1494,7 +1499,7 @@ impl Waku {
                 service_tier,
                 context_window,
             },
-            task: waku_client::StartTask {
+            task: wakuwaku_client::StartTask {
                 session: session.clone(),
                 project: self
                     .state
@@ -1513,8 +1518,10 @@ impl Waku {
         &mut self,
         session_id: Uuid,
         prepared: PreparedDriver,
+        cx: &mut Context<Self>,
     ) -> DriverHandle {
         let handle = prepared.handle.clone();
+        let runtime_id = handle.runtime_id();
         self.runtimes.insert(
             session_id,
             SessionRuntime {
@@ -1535,6 +1542,29 @@ impl Waku {
         // the runtime map. Wake once after installation so those buffered
         // events cannot be stranded behind an already-consumed edge.
         signal_event_pump(&self.event_wake_tx);
+
+        let daemon_client = self.daemon.client();
+        cx.spawn(async move |waku, cx| {
+            let trajectory_client = wakuwaku_client::TrajectoryClient::new(daemon_client);
+            let rx = trajectory_client.subscribe(session_id, runtime_id);
+            loop {
+                let rx_clone = rx.clone();
+                let update = cx
+                    .background_executor()
+                    .spawn(async move { rx_clone.recv() })
+                    .await;
+                match update {
+                    Ok(update) => {
+                        let _ = waku.update(cx, |waku, cx| {
+                            waku.apply_trajectory_live_update(session_id, update, cx);
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+        .detach();
+
         handle
     }
 
@@ -1856,7 +1886,7 @@ impl Waku {
         cx.notify();
 
         let preparation_prompt = human_prompt;
-        let workspace_client = waku_client::WorkspaceClient::new(self.daemon.client());
+        let workspace_client = wakuwaku_client::WorkspaceClient::new(self.daemon.client());
         cx.spawn(async move |waku, cx| {
             let prepared = cx
                 .background_executor()
@@ -1976,7 +2006,7 @@ impl Waku {
                 .get(&session_id)
                 .map(|runtime| runtime.driver.clone())
                 .ok_or_else(|| anyhow::anyhow!(tr!("errors.prepared_runtime_unavailable"))),
-            Some(Ok(prepared)) => Ok(self.install_prepared_driver(session_id, prepared)),
+            Some(Ok(prepared)) => Ok(self.install_prepared_driver(session_id, prepared, cx)),
             Some(Err(error)) => Err(error),
         };
 
@@ -2187,10 +2217,10 @@ impl Waku {
     }
 }
 pub(crate) fn catalog_entry_for<'a>(
-    catalogs: &'a HashMap<ProviderId, waku_client::ModelCatalog>,
+    catalogs: &'a HashMap<ProviderId, wakuwaku_client::ModelCatalog>,
     provider: &ProviderId,
     model: &str,
-) -> Option<&'a waku_client::ModelCatalogEntry> {
+) -> Option<&'a wakuwaku_client::ModelCatalogEntry> {
     catalogs
         .get(provider)?
         .models
@@ -2198,43 +2228,66 @@ pub(crate) fn catalog_entry_for<'a>(
         .find(|entry| entry.id == model)
 }
 
-pub(crate) fn catalog_allows_service_tier(entry: Option<&waku_client::ModelCatalogEntry>) -> bool {
+pub(crate) fn catalog_allows_service_tier(
+    entry: Option<&wakuwaku_client::ModelCatalogEntry>,
+) -> bool {
     entry.is_some_and(|entry| entry.supported && entry.capabilities.service_tier)
 }
 
 pub(crate) fn gated_service_tier(
-    tier: Option<waku_client::ServiceTier>,
+    tier: Option<wakuwaku_client::ServiceTier>,
     catalog_allows: bool,
-) -> Option<waku_client::ServiceTier> {
+) -> Option<wakuwaku_client::ServiceTier> {
     tier.filter(|_| catalog_allows)
 }
-fn prompt_input_from_submission(submission: &ComposerSubmission) -> waku_client::PromptInput {
+fn prompt_input_from_submission(submission: &ComposerSubmission) -> wakuwaku_client::PromptInput {
     prompt_input_from_submission_with_text(submission, submission.prompt.clone())
 }
 fn prompt_input_from_submission_with_text(
     submission: &ComposerSubmission,
     text: String,
-) -> waku_client::PromptInput {
+) -> wakuwaku_client::PromptInput {
     let attachments = submission
         .attachments
         .iter()
+        .filter(|attachment| attachment.is_image)
         .filter_map(|attachment| {
             attachment
                 .blob_reference
-                .as_ref()
-                .map(|reference| waku_client::PromptImageRef::Blob {
-                    reference: reference.clone(),
-                })
+                .as_deref()
+                .and_then(wakuwaku_client::PromptImageRef::from_stored_reference)
         })
         .collect();
-    waku_client::PromptInput { text, attachments }
+    let sources = submission
+        .attachments
+        .iter()
+        .map(|attachment| {
+            wakuwaku_client::PromptAttachmentSource::from_named_attachment(
+                attachment.blob_reference.clone(),
+                attachment.mention.clone(),
+                attachment.name.clone(),
+                attachment.is_dir,
+                attachment.is_image,
+            )
+        })
+        .collect();
+    let display_text = submission
+        .display_content
+        .clone()
+        .or_else(|| (text != submission.prompt).then(|| submission.prompt.clone()));
+    wakuwaku_client::PromptInput {
+        text,
+        display_text,
+        attachments,
+        sources,
+    }
 }
 
 pub(super) fn provider_endpoint_for_start(
     provider: &ProviderId,
     customs: &[ExternalProvider],
 ) -> Option<ExternalProvider> {
-    if let Some(preset) = waku_client::ProviderPreset::parse_id(provider.as_str()) {
+    if let Some(preset) = wakuwaku_client::ProviderPreset::parse_id(provider.as_str()) {
         return Some(preset.endpoint());
     }
     customs
@@ -2246,7 +2299,7 @@ pub(super) fn provider_endpoint_for_start(
 #[cfg(test)]
 mod service_tier_tests {
     use super::{catalog_allows_service_tier, gated_service_tier};
-    use waku_client::{
+    use wakuwaku_client::{
         ApiFormat, ModelCapabilities, ModelCatalogEntry, ProviderId, ServiceTier, TransportProfile,
         UnsupportedReason,
     };
@@ -2314,7 +2367,7 @@ mod service_tier_tests {
 mod start_route_tests {
     use super::provider_endpoint_for_start;
     use crate::model::ExternalProvider;
-    use waku_client::{ProviderId, ProviderPreset};
+    use wakuwaku_client::{ProviderId, ProviderPreset};
 
     #[test]
     fn every_builtin_preset_starts_without_a_custom_endpoint() {
@@ -2351,5 +2404,116 @@ mod start_route_tests {
         let endpoint =
             provider_endpoint_for_start(&ProviderId::new("corp"), &[custom]).expect("custom");
         assert_eq!(endpoint.default_model, "local-model");
+    }
+}
+
+#[cfg(test)]
+mod prompt_input_tests {
+    use super::{
+        ComposerSubmission, prompt_input_from_submission, prompt_input_from_submission_with_text,
+    };
+    use std::path::PathBuf;
+    use wakuwaku_client::{PromptAttachmentSource, PromptImageRef};
+    use wakuwaku_protocol::model::MessageAttachment;
+    fn attachment(reference: &str, mention: &str, name: &str, is_image: bool) -> MessageAttachment {
+        MessageAttachment {
+            path: PathBuf::from("/var/wakuwaku/attachments/secret/file"),
+            mention: mention.to_owned(),
+            name: name.to_owned(),
+            is_dir: false,
+            is_image,
+            blob_reference: Some(reference.to_owned()),
+        }
+    }
+
+    #[test]
+    fn submission_keeps_display_text_and_safe_source_metadata() {
+        let submission = ComposerSubmission {
+            prompt: "see @notes.md".into(),
+            display_content: Some("see".into()),
+            attachments: vec![attachment(
+                "wakuwaku-attachment:notes",
+                "notes.md",
+                "notes.md",
+                false,
+            )],
+        };
+        let input = prompt_input_from_submission(&submission);
+        assert_eq!(input.text, "see @notes.md");
+        assert_eq!(input.display_text.as_deref(), Some("see"));
+        assert!(input.attachments.is_empty());
+        assert_eq!(
+            input.sources,
+            vec![PromptAttachmentSource {
+                reference: Some("wakuwaku-attachment:notes".into()),
+                mention: "notes.md".into(),
+                name: "notes.md".into(),
+                is_dir: false,
+                is_image: false,
+                mime: None,
+            }]
+        );
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(!json.contains("/var/waku"));
+        assert!(!json.contains("base64"));
+    }
+
+    #[test]
+    fn image_blob_stays_provider_facing_and_source_carries_mime() {
+        let submission = ComposerSubmission {
+            prompt: "inspect @shot.png".into(),
+            display_content: Some("inspect".into()),
+            attachments: vec![attachment(
+                "wakuwaku-blob:shot.png",
+                "shot.png",
+                "shot.png",
+                true,
+            )],
+        };
+        let input = prompt_input_from_submission(&submission);
+        assert_eq!(
+            input.attachments,
+            vec![PromptImageRef::Blob {
+                reference: "wakuwaku-blob:shot.png".into()
+            }]
+        );
+        assert_eq!(input.sources[0].mime.as_deref(), Some("image/png"));
+        assert_eq!(
+            input.sources[0].reference.as_deref(),
+            Some("wakuwaku-blob:shot.png")
+        );
+    }
+
+    #[test]
+    fn expanded_provider_text_keeps_typed_display_text() {
+        let submission = ComposerSubmission::plain("/review the diff".into());
+        let input = prompt_input_from_submission_with_text(
+            &submission,
+            "Review the staged diff carefully".into(),
+        );
+        assert_eq!(input.text, "Review the staged diff carefully");
+        assert_eq!(input.display_text.as_deref(), Some("/review the diff"));
+    }
+
+    #[test]
+    fn host_path_and_data_url_are_not_provider_image_refs() {
+        let submission = ComposerSubmission {
+            prompt: "bad".into(),
+            display_content: None,
+            attachments: vec![
+                attachment("/tmp/photo.png", "photo.png", "photo.png", true),
+                attachment("data:image/png;base64,aaaa", "photo.png", "photo.png", true),
+            ],
+        };
+        let input = prompt_input_from_submission(&submission);
+        assert!(input.attachments.is_empty());
+        assert!(
+            input
+                .sources
+                .iter()
+                .all(|source| source.reference.is_none())
+        );
+        assert_eq!(input.sources[0].mention, "photo.png");
+        assert_eq!(input.sources[0].mime.as_deref(), Some("image/png"));
     }
 }

@@ -1,4 +1,4 @@
-import type { AgentSession } from '@waku/client'
+import type { AgentSession } from '@wakuwaku/client'
 import { ContextMenu } from '@base-ui/react/context-menu'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Virtuoso } from 'react-virtuoso'
@@ -109,7 +109,7 @@ export function Sidebar({
       >
         <header className="flex h-12 shrink-0 items-center px-2.5">
           <img
-            alt="Waku"
+            alt="WakuWaku"
             className="size-6 rounded-md"
             draggable={false}
             src={wakuAppIconUrl}

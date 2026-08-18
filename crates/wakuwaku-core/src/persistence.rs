@@ -1,0 +1,3987 @@
+//! Daemon-owned task storage plus desktop preference/state serialization.
+//!
+//! Sessions and projects live in SQLite (`app.db`), harness continuation
+//! snapshots in `snapshots/{session_id}.json`, app-managed UI state in
+//! `state.json`, desktop preferences in `temp/app.json` for Debug or
+//! `~/.wakuwaku/app.json` for Release, daemon preferences in
+//! `~/.wakuwaku/settings.json`, and binary payloads in [`crate::blob_store`].
+//! Of the configuration documents, only the desktop file is written here;
+//! daemon settings cross the RPC boundary and are persisted by `wakuwaku-daemon`.
+//!
+//! A save writes only the rows whose contents changed, so a streaming turn
+//! costs a few kilobytes no matter how much history exists. Fields the sidebar
+//! sorts on are promoted to columns so listing sessions never has to
+//! deserialize a transcript. The schema is defined in `db/schema.ts` and
+//! applied by [`apply_migrations`].
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use parking_lot::Mutex;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::blob_store::BlobStore;
+use crate::i18n::AppLanguage;
+use crate::identity::DATA_DIRECTORY_NAME;
+use crate::model::{
+    AgentSession, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole, Project,
+    ProviderId, RuntimeMode, SessionWorkspace,
+};
+use crate::theme::ThemePreference;
+pub use wakuwaku_protocol::persistence::{
+    ComposerDraft, ComposerDraftAttachment, ComposerDraftChange, ComposerDraftKey,
+    ComposerDraftTarget, ComposerDrafts, SessionMessageMatch,
+};
+
+const STATE_VERSION: u32 = 5;
+const APP_STATE_VERSION: u32 = 1;
+const COMPOSER_DRAFTS_FILENAME: &str = "composer-drafts.json";
+/// Uploading a blob and committing the reference are separate operations. A
+/// sweep may reclaim abandoned payloads, but never ones a client could still
+/// be handing off to a draft or task save.
+const ASSET_SWEEP_GRACE_PERIOD: Duration = Duration::from_secs(60 * 60);
+const SNAPSHOTS_DIRECTORY: &str = "snapshots";
+/// Snapshot files outlive a crashed delete-vs-unlink window. Sweep only
+/// reclaims ones whose session row is gone and whose mtime is older than this.
+const SNAPSHOT_SWEEP_GRACE_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
+
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 252.0;
+pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 460.0;
+
+fn default_sidebar_visibility() -> bool {
+    true
+}
+
+fn default_right_panel_visibility() -> bool {
+    false
+}
+
+fn default_analytics_enabled() -> bool {
+    true
+}
+
+fn default_provider() -> ProviderId {
+    ProviderId::new(ProviderId::OPENAI_RESPONSES)
+}
+
+fn default_sidebar_width() -> f32 {
+    DEFAULT_SIDEBAR_WIDTH
+}
+
+fn default_right_panel_width() -> f32 {
+    DEFAULT_RIGHT_PANEL_WIDTH
+}
+
+/// Explicit trait choices remembered for one provider model.
+///
+/// Reasoning effort is a model capability, so its option id must not leak
+/// into another provider merely because that provider uses the same string.
+/// Keeping the key beside the values lets the model picker restore them
+/// when the user returns to the model that owns them.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RememberedModelTraits {
+    provider: ProviderId,
+    model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_window: Option<String>,
+}
+
+/// Small, independently persisted composer state.
+///
+/// Session storage intentionally excludes blank sessions. Keeping drafts in a
+/// separate atomic JSON document preserves that lifecycle and also lets the
+/// app debounce writes onto the background executor without cloning the
+/// transcript database state.
+#[derive(Clone)]
+pub struct ComposerDraftStore {
+    path: PathBuf,
+    latest_write: Arc<Mutex<u64>>,
+}
+
+impl ComposerDraftStore {
+    pub fn for_state_path(state_path: &Path) -> Self {
+        let directory = state_path.parent().unwrap_or_else(|| Path::new("."));
+        Self {
+            path: directory.join(COMPOSER_DRAFTS_FILENAME),
+            latest_write: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    pub fn load(&self) -> io::Result<ComposerDrafts> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(ComposerDrafts::default());
+            }
+            Err(error) => return Err(error),
+        };
+        serde_json::from_slice(&bytes).map_err(to_io_error)
+    }
+
+    /// Write a complete snapshot atomically. Older background jobs become
+    /// no-ops if a newer generation reached the store first.
+    pub fn save(&self, drafts: ComposerDrafts, generation: u64) -> io::Result<()> {
+        let data = serde_json::to_vec_pretty(&drafts).map_err(to_io_error)?;
+        let mut latest_write = self.latest_write.lock();
+        if generation < *latest_write {
+            return Ok(());
+        }
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temporary = self.path.with_extension("json.tmp");
+        fs::write(&temporary, data)?;
+        fs::rename(temporary, &self.path)?;
+        *latest_write = generation;
+        Ok(())
+    }
+
+    /// Apply only the drafts a client actually changed. The mutation and
+    /// atomic file replacement share the same lock as snapshot writes,
+    /// so concurrent clients cannot clobber unrelated draft keys.
+    pub fn apply_changes(&self, changes: Vec<ComposerDraftChange>) -> io::Result<()> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let mut latest_write = self.latest_write.lock();
+        let mut drafts = self.load()?;
+        let mut changed = false;
+        for change in changes {
+            let key = ComposerDraftKey::from(change.target);
+            changed |= match change.draft {
+                Some(draft) => drafts.set(key, draft),
+                None => drafts.remove(key),
+            };
+        }
+        if !changed {
+            return Ok(());
+        }
+        let data = serde_json::to_vec_pretty(&drafts).map_err(to_io_error)?;
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temporary = self.path.with_extension("json.tmp");
+        fs::write(&temporary, data)?;
+        fs::rename(temporary, &self.path)?;
+        *latest_write = latest_write.saturating_add(1);
+        Ok(())
+    }
+}
+
+/// Desktop-owned, user-editable configuration.
+///
+/// This deliberately excludes navigation, panel geometry, and other values
+/// that the app changes as a side effect of ordinary use. Both builds keep it
+/// at `~/.wakuwaku/app.json` without exposing app-managed state or daemon-owned
+/// provider policy.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AppSettings {
+    pub analytics_enabled: bool,
+    pub favorite_models: Vec<FavoriteModel>,
+    pub theme: ThemePreference,
+    pub language: AppLanguage,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            analytics_enabled: default_analytics_enabled(),
+            favorite_models: Vec::new(),
+            theme: ThemePreference::System,
+            language: AppLanguage::default(),
+        }
+    }
+}
+
+/// App-managed state that should never appear in the user settings file.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AppState {
+    app_state_version: u32,
+    /// Random installation-scoped analytics identity. It is deliberately
+    /// unrelated to provider accounts, projects, or session content.
+    #[serde(default = "Uuid::new_v4")]
+    analytics_id: Uuid,
+    #[serde(default)]
+    selected_project: Option<Uuid>,
+    #[serde(default)]
+    selected_session: Option<Uuid>,
+    #[serde(default = "default_provider")]
+    last_provider: ProviderId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_service_tier: Option<wakuwaku_protocol::ServiceTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_context_window: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    remembered_model_traits: Vec<RememberedModelTraits>,
+    #[serde(default = "default_sidebar_visibility")]
+    sidebar_visible: bool,
+    #[serde(default = "default_right_panel_visibility")]
+    right_panel_visible: bool,
+    #[serde(default = "default_sidebar_width")]
+    sidebar_width: f32,
+    #[serde(default = "default_right_panel_width")]
+    right_panel_width: f32,
+}
+
+/// The complete in-memory model hydrated from settings, app state, and SQLite.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PersistedState {
+    pub version: u32,
+    /// Random installation-scoped analytics identity. See [`AppState`].
+    #[serde(default = "Uuid::new_v4")]
+    pub analytics_id: Uuid,
+    #[serde(default = "default_analytics_enabled")]
+    pub analytics_enabled: bool,
+    pub projects: Vec<Project>,
+    pub sessions: Vec<AgentSession>,
+    pub selected_project: Option<Uuid>,
+    pub selected_session: Option<Uuid>,
+    pub last_provider: ProviderId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_service_tier: Option<wakuwaku_protocol::ServiceTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_context_window: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remembered_model_traits: Vec<RememberedModelTraits>,
+    #[serde(default)]
+    pub favorite_models: Vec<FavoriteModel>,
+    #[serde(default)]
+    pub theme: ThemePreference,
+    #[serde(default)]
+    pub language: AppLanguage,
+    #[serde(default = "default_sidebar_visibility")]
+    pub sidebar_visible: bool,
+    #[serde(default = "default_right_panel_visibility")]
+    pub right_panel_visible: bool,
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+    #[serde(default = "default_right_panel_width")]
+    pub right_panel_width: f32,
+    /// User-configured HTTP endpoints used by the embedded harness.
+    #[serde(default)]
+    pub external_providers: Vec<wakuwaku_protocol::ExternalProvider>,
+    /// Unknown daemon settings survive edits made by this desktop version.
+    #[serde(skip)]
+    daemon_settings_extra: BTreeMap<String, serde_json::Value>,
+    /// Sessions changed since the last save.
+    ///
+    /// The app knows what it touched, so it says so rather than making the
+    /// store rediscover it. Every `&mut AgentSession` is handed out by
+    /// [`Self::session_mut`], which records the id here; a save then writes
+    /// exactly these rows instead of re-serializing the whole history to work
+    /// out what moved.
+    #[serde(skip)]
+    dirty_sessions: HashSet<Uuid>,
+}
+
+impl PersistedState {
+    /// The only way to get a mutable session. Marks it for the next save.
+    pub fn session_mut(&mut self, id: Uuid) -> Option<&mut AgentSession> {
+        let session = self.sessions.iter_mut().find(|session| session.id == id)?;
+        self.dirty_sessions.insert(id);
+        Some(session)
+    }
+
+    /// Records a session as changed without borrowing it, for the few paths
+    /// that mutate through a slice or add a session outright.
+    pub fn mark_session_dirty(&mut self, id: Uuid) {
+        self.dirty_sessions.insert(id);
+    }
+
+    pub fn push_session(&mut self, session: AgentSession) {
+        self.dirty_sessions.insert(session.id);
+        self.sessions.push(session);
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            version: STATE_VERSION,
+            analytics_id: Uuid::new_v4(),
+            analytics_enabled: true,
+            projects: Vec::new(),
+            sessions: Vec::new(),
+            selected_project: None,
+            selected_session: None,
+            last_provider: ProviderId::new(ProviderId::OPENAI_RESPONSES),
+            last_model: None,
+            last_reasoning_effort: None,
+            last_service_tier: None,
+            last_context_window: None,
+            remembered_model_traits: Vec::new(),
+            favorite_models: Vec::new(),
+            theme: ThemePreference::System,
+            language: AppLanguage::default(),
+            sidebar_visible: true,
+            right_panel_visible: false,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            right_panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
+            external_providers: Vec::new(),
+            daemon_settings_extra: BTreeMap::new(),
+            dirty_sessions: HashSet::new(),
+        }
+    }
+
+    pub fn fresh(cwd: PathBuf) -> Self {
+        let project = Project::from_path(cwd);
+        let session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
+        Self {
+            selected_project: Some(project.id),
+            selected_session: Some(session.id),
+            projects: vec![project],
+            sessions: vec![session],
+            ..Self::empty()
+        }
+    }
+
+    pub fn new_session(&self, project_id: Uuid, provider: ProviderId) -> AgentSession {
+        let mut session = AgentSession::new(project_id, provider.clone());
+        if provider == self.last_provider {
+            session.model.clone_from(&self.last_model);
+            session
+                .reasoning_effort
+                .clone_from(&self.last_reasoning_effort);
+            session.service_tier = self.last_service_tier;
+            session.context_window.clone_from(&self.last_context_window);
+        }
+        session
+    }
+
+    pub fn remember_model_traits(
+        &mut self,
+        provider: ProviderId,
+        model: &str,
+        reasoning_effort: Option<String>,
+        context_window: Option<String>,
+    ) {
+        let existing = self
+            .remembered_model_traits
+            .iter()
+            .position(|traits| traits.provider == provider && traits.model == model);
+        if reasoning_effort.is_none() && context_window.is_none() {
+            if let Some(index) = existing {
+                self.remembered_model_traits.remove(index);
+            }
+            return;
+        }
+        if let Some(index) = existing {
+            let traits = &mut self.remembered_model_traits[index];
+            traits.reasoning_effort = reasoning_effort;
+            traits.context_window = context_window;
+        } else {
+            self.remembered_model_traits.push(RememberedModelTraits {
+                provider,
+                model: model.to_owned(),
+                reasoning_effort,
+                context_window,
+            });
+        }
+    }
+
+    pub fn model_traits_for(
+        &self,
+        provider: ProviderId,
+        model: &str,
+    ) -> (Option<String>, Option<String>) {
+        self.remembered_model_traits
+            .iter()
+            .find(|traits| traits.provider == provider && traits.model == model)
+            .map(|traits| {
+                (
+                    traits.reasoning_effort.clone(),
+                    traits.context_window.clone(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    fn app_settings(&self) -> AppSettings {
+        AppSettings {
+            analytics_enabled: self.analytics_enabled,
+            favorite_models: self.favorite_models.clone(),
+            theme: self.theme,
+            language: self.language,
+        }
+    }
+
+    pub fn daemon_settings(&self) -> crate::DaemonSettings {
+        crate::DaemonSettings {
+            external_providers: self.external_providers.clone(),
+            extra: self.daemon_settings_extra.clone(),
+        }
+    }
+
+    fn app_state(&self) -> AppState {
+        AppState {
+            app_state_version: APP_STATE_VERSION,
+            analytics_id: self.analytics_id,
+            selected_project: self.selected_project,
+            selected_session: self.persistable_selected_session(),
+            last_provider: self.last_provider.clone(),
+            last_model: self.last_model.clone(),
+            last_reasoning_effort: self.last_reasoning_effort.clone(),
+            last_service_tier: self.last_service_tier,
+            last_context_window: self.last_context_window.clone(),
+            remembered_model_traits: self.remembered_model_traits.clone(),
+            sidebar_visible: self.sidebar_visible,
+            right_panel_visible: self.right_panel_visible,
+            sidebar_width: self.sidebar_width,
+            right_panel_width: self.right_panel_width,
+        }
+    }
+
+    fn apply_app_settings(&mut self, settings: AppSettings) {
+        self.analytics_enabled = settings.analytics_enabled;
+        self.favorite_models = settings.favorite_models;
+        self.theme = settings.theme;
+        self.language = settings.language;
+    }
+
+    pub fn apply_daemon_settings(&mut self, settings: crate::DaemonSettings) {
+        self.external_providers = settings.external_providers;
+        self.daemon_settings_extra = settings.extra;
+    }
+
+    fn apply_app_state(&mut self, app_state: AppState) {
+        self.analytics_id = app_state.analytics_id;
+        self.selected_project = app_state.selected_project;
+        self.selected_session = app_state.selected_session;
+        self.last_provider = app_state.last_provider;
+        self.last_model = app_state.last_model;
+        self.last_reasoning_effort = app_state.last_reasoning_effort;
+        self.last_service_tier = app_state.last_service_tier;
+        self.last_context_window = app_state.last_context_window;
+        self.remembered_model_traits = app_state.remembered_model_traits;
+        self.sidebar_visible = app_state.sidebar_visible;
+        self.right_panel_visible = app_state.right_panel_visible;
+        self.sidebar_width = app_state.sidebar_width;
+        self.right_panel_width = app_state.right_panel_width;
+    }
+
+    /// A session only earns a row once it has started; drafts stay in memory.
+    /// A draft selection is stored as no selection at all, so relaunching
+    /// recreates a draft and lands on the new-session page the user quit from.
+    fn persistable_selected_session(&self) -> Option<Uuid> {
+        self.selected_session.filter(|selected| {
+            self.sessions
+                .iter()
+                .any(|session| session.id == *selected && session.has_started())
+        })
+    }
+
+    fn ensure_runtime_session(&mut self) {
+        if self.selected_session.is_some_and(|selected_session| {
+            self.sessions
+                .iter()
+                .any(|session| session.id == selected_session)
+        }) {
+            return;
+        }
+        self.selected_session = None;
+        let Some(project_id) = self.selected_project.filter(|selected_project| {
+            self.projects
+                .iter()
+                .any(|project| project.id == *selected_project)
+        }) else {
+            return;
+        };
+        let session = self.new_session(project_id, self.last_provider.clone());
+        self.selected_session = Some(session.id);
+        self.sessions.push(session);
+    }
+
+    fn migrate_loaded(&mut self) {
+        self.version = STATE_VERSION;
+        self.backfill_remembered_selection();
+    }
+
+    fn backfill_remembered_selection(&mut self) {
+        let Some(session) = self
+            .selected_session
+            .and_then(|selected| self.sessions.iter().find(|session| session.id == selected))
+            .cloned()
+        else {
+            return;
+        };
+        if self.last_model.is_none() {
+            self.last_model = session.model;
+        }
+        if self.last_reasoning_effort.is_none() {
+            self.last_reasoning_effort = session.reasoning_effort;
+        }
+        if self.last_service_tier.is_none() {
+            self.last_service_tier = session.service_tier;
+        }
+        if self.last_context_window.is_none() {
+            self.last_context_window = session.context_window;
+        }
+    }
+}
+
+/// Rewrites inline `data:` payloads into blob references, in place.
+///
+/// Done on the way to disk so a screenshot is written once and then dropped
+/// from memory: the transcript keeps a short reference, and rendering loads the
+/// file through GPUI's image cache instead of base64-decoding on every frame.
+fn externalize_blobs<'a>(
+    sessions: impl IntoIterator<Item = &'a mut AgentSession>,
+    blobs: &BlobStore,
+) {
+    for session in sessions {
+        for block in &mut session.transcript_blocks {
+            for activity in &mut block.activities {
+                for image in &mut activity.image_urls {
+                    if crate::blob_store::is_blob_reference(image) {
+                        continue;
+                    }
+                    let stored = blobs.store_data_url(image);
+                    if stored.len() < image.len() {
+                        *image = stored;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Every blob reference named by any stored session.
+///
+/// Read from the database rather than from memory: a session that has not been
+/// hydrated has an empty transcript in memory, and treating that as "owns no
+/// images" would delete screenshots that are still in use.
+fn live_blob_references(connection: &Connection) -> io::Result<HashSet<String>> {
+    live_references(connection, crate::blob_store::BLOB_SCHEME)
+}
+
+fn live_attachment_references(connection: &Connection) -> io::Result<HashSet<String>> {
+    live_references(connection, crate::attachments::ATTACHMENT_SCHEME)
+}
+
+fn live_references(connection: &Connection, scheme: &str) -> io::Result<HashSet<String>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT data FROM session_details
+             UNION ALL
+             SELECT attachments FROM messages WHERE attachments != '[]'",
+        )
+        .map_err(to_io_error)?;
+    let mut references = HashSet::new();
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(to_io_error)?;
+    for data in rows.filter_map(Result::ok) {
+        collect_references(&data, scheme, &mut references);
+    }
+    Ok(references)
+}
+
+/// Scanning raw JSON keeps blob retention independent of how deeply a
+/// reference is nested in transcript or composer-draft metadata.
+fn collect_blob_references(data: &str, references: &mut HashSet<String>) {
+    collect_references(data, crate::blob_store::BLOB_SCHEME, references);
+}
+
+fn collect_attachment_references(data: &str, references: &mut HashSet<String>) {
+    collect_references(data, crate::attachments::ATTACHMENT_SCHEME, references);
+}
+
+fn collect_references(data: &str, scheme: &str, references: &mut HashSet<String>) {
+    let mut rest = data;
+    while let Some(start) = rest.find(scheme) {
+        rest = &rest[start..];
+        let end = rest.find('"').unwrap_or(rest.len());
+        references.insert(rest[..end].to_owned());
+        rest = &rest[end..];
+    }
+}
+
+fn fingerprint(value: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+pub(crate) fn to_io_error(error: impl std::fmt::Display) -> io::Error {
+    io::Error::other(error.to_string())
+}
+
+/// WAL + NORMAL + foreign_keys. Every production writer/query connection
+/// goes through this so cascade deletes cannot be silently skipped.
+pub fn configure_sqlite(connection: &Connection) -> io::Result<()> {
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
+        )
+        .map_err(to_io_error)
+}
+
+pub fn configure_sqlite_read_only(connection: &Connection) -> io::Result<()> {
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(to_io_error)
+}
+
+pub fn open_sqlite_read_only(path: &Path) -> io::Result<Connection> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(to_io_error)?;
+    configure_sqlite_read_only(&connection)?;
+    Ok(connection)
+}
+
+const SESSION_SEARCH_SNIPPET_CHARS: usize = 240;
+const SESSION_SEARCH_CONTEXT_BEFORE_CHARS: usize = 72;
+
+fn build_session_search_snippet(text: &str, query: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let char_count = normalized.chars().count();
+    if char_count <= SESSION_SEARCH_SNIPPET_CHARS {
+        return normalized;
+    }
+
+    // ASCII folding preserves UTF-8 byte offsets while covering the provider
+    // and source-code text people search most often. Non-ASCII queries still
+    // match exactly, including Simplified Chinese.
+    let match_byte = normalized
+        .to_ascii_lowercase()
+        .find(&query.to_ascii_lowercase())
+        .unwrap_or(0);
+    let match_char = normalized[..match_byte].chars().count();
+    let body_chars = SESSION_SEARCH_SNIPPET_CHARS.saturating_sub(4);
+    let ideal_start = match_char.saturating_sub(SESSION_SEARCH_CONTEXT_BEFORE_CHARS);
+    let start = ideal_start.min(char_count.saturating_sub(body_chars));
+    let end = (start + body_chars).min(char_count);
+    let body = normalized
+        .chars()
+        .skip(start)
+        .take(end - start)
+        .collect::<String>();
+    format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        body,
+        if end < char_count { "…" } else { "" }
+    )
+}
+
+fn search_session_messages(
+    path: &Path,
+    query: &str,
+    limit: usize,
+) -> io::Result<Vec<SessionMessageMatch>> {
+    let query = query.trim();
+    if query.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    // The writer uses WAL, so an independent read-only connection can scan
+    // history without taking the StateStore mutex or delaying a streaming save.
+    let connection = open_sqlite_read_only(path)?;
+    let mut statement = connection
+        .prepare(
+            "WITH ranked AS (
+                 SELECT messages.session_id,
+                        messages.role,
+                        messages.content,
+                        messages.created_at,
+                        sessions.updated_at AS session_updated_at,
+                        CASE messages.role WHEN 'user' THEN 0 ELSE 1 END AS source_rank,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY messages.session_id
+                            ORDER BY CASE messages.role WHEN 'user' THEN 0 ELSE 1 END,
+                                     messages.created_at DESC,
+                                     messages.position DESC
+                        ) AS session_match_rank
+                   FROM messages
+                   INNER JOIN sessions ON sessions.id = messages.session_id
+                  WHERE messages.streaming = 0
+                    AND messages.role IN ('user', 'assistant')
+                    AND instr(lower(messages.content), lower(?1)) > 0
+             )
+             SELECT session_id, role, content
+               FROM ranked
+              WHERE session_match_rank = 1
+              ORDER BY source_rank, session_updated_at DESC, session_id
+              LIMIT ?2",
+        )
+        .map_err(to_io_error)?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = statement
+        .query_map(params![query, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(to_io_error)?;
+
+    let mut matches = Vec::new();
+    for row in rows {
+        let (session_id, role, content) = row.map_err(to_io_error)?;
+        let Ok(session_id) = Uuid::parse_str(&session_id) else {
+            continue;
+        };
+        let source = match role.as_str() {
+            "user" => MessageRole::User,
+            "assistant" => MessageRole::Assistant,
+            _ => continue,
+        };
+        matches.push(SessionMessageMatch {
+            session_id,
+            source,
+            snippet: build_session_search_snippet(&content, query),
+        });
+    }
+    Ok(matches)
+}
+
+include!(concat!(env!("OUT_DIR"), "/migrations.rs"));
+
+const MIGRATIONS_TABLE: &str = "CREATE TABLE IF NOT EXISTS migrations (
+         tag        TEXT PRIMARY KEY,
+         applied_at INTEGER NOT NULL
+     )";
+
+/// Brings a database up to the latest schema.
+///
+/// Migrations are authored in `db/schema.ts` and generated by
+/// `bun run db:generate`; `build.rs` embeds the resulting SQL in filename
+/// order. Each one that is not already named in `migrations` runs in its own
+/// transaction and is recorded, so applying is idempotent.
+pub fn apply_migrations(connection: &Connection) -> io::Result<usize> {
+    connection
+        .execute_batch(MIGRATIONS_TABLE)
+        .map_err(to_io_error)?;
+    let mut applied = 0;
+    for (tag, sql) in MIGRATIONS {
+        let already_applied: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM migrations WHERE tag = ?1)",
+                params![tag],
+                |row| row.get(0),
+            )
+            .map_err(to_io_error)?;
+        if already_applied {
+            continue;
+        }
+        let transaction = connection.unchecked_transaction().map_err(to_io_error)?;
+        transaction
+            .execute_batch(sql)
+            .map_err(|error| io::Error::other(format!("migration {tag} failed: {error}")))?;
+        transaction
+            .execute(
+                "INSERT INTO migrations(tag, applied_at) VALUES(?1, ?2)",
+                params![tag, crate::model::unix_time() as i64],
+            )
+            .map_err(to_io_error)?;
+        transaction.commit().map_err(to_io_error)?;
+        applied += 1;
+    }
+    Ok(applied)
+}
+
+struct Storage {
+    connection: Connection,
+    /// Sessions known to have a row. Used to spot deletions and to catch a
+    /// session that became persistable without being marked dirty.
+    persisted_sessions: HashSet<Uuid>,
+    /// Per session, the fingerprint of each message row as this connection last
+    /// wrote it, so a save only touches the messages that actually changed.
+    /// See [`write_messages`].
+    written_messages: HashMap<Uuid, HashMap<Uuid, u64>>,
+    saved_projects: u64,
+    saved_app_settings: u64,
+    saved_app_state: u64,
+}
+
+pub struct StateStore {
+    path: PathBuf,
+    /// Client-local navigation and layout state stored beside the preview
+    /// cache. It is never read by the daemon.
+    app_state_path: PathBuf,
+    /// Desktop-owned preferences. Debug stays isolated in the checkout while
+    /// Release uses the explicit cross-client Waku configuration directory.
+    app_settings_path: PathBuf,
+    storage: Mutex<Option<Storage>>,
+    blobs: Arc<BlobStore>,
+    desktop_files: bool,
+    harness_snapshots:
+        Mutex<std::collections::HashMap<uuid::Uuid, wakuwaku_harness::SessionSnapshot>>,
+}
+
+impl StateStore {
+    /// Where the database lives.
+    ///
+    /// Debug builds keep it in the checkout's gitignored `temp/`, so
+    /// development never touches the installed app's data and a bad state is
+    /// thrown away by deleting one directory. Release builds use the usual
+    /// per-user application support directory.
+    pub fn default_path() -> PathBuf {
+        if cfg!(debug_assertions) {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
+                .join("temp")
+                .join("app.db")
+        } else {
+            dirs::data_local_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(DATA_DIRECTORY_NAME)
+                .join("app.db")
+        }
+    }
+
+    pub fn new(path: PathBuf) -> Self {
+        let directory = path.parent().unwrap_or_else(|| Path::new(".")).to_owned();
+        let configuration_directory = dirs::home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".wakuwaku");
+        let app_settings_path = if cfg!(debug_assertions) {
+            directory.join("app.json")
+        } else {
+            configuration_directory.join("app.json")
+        };
+        Self::with_settings_paths(path, app_settings_path)
+    }
+
+    /// Local database owner used inside `wakuwaku-daemon`. It never reads or
+    /// writes desktop-only `app.json` or client navigation state.
+    pub fn daemon(path: PathBuf) -> Self {
+        let mut store = Self::new(path);
+        store.desktop_files = false;
+        store
+    }
+
+    fn with_settings_paths(path: PathBuf, app_settings_path: PathBuf) -> Self {
+        let directory = path.parent().unwrap_or_else(|| Path::new(".")).to_owned();
+        let root = directory.join("blobs");
+        let blobs = Arc::new(BlobStore::new(root));
+        Self {
+            app_state_path: directory.join("state.json"),
+            app_settings_path,
+            path,
+            storage: Mutex::new(None),
+            blobs,
+            desktop_files: true,
+            harness_snapshots: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Builds a transcript-search job for the background executor.
+    ///
+    /// Constructing the job only clones the database path; opening SQLite and
+    /// scanning message text happen when the returned closure runs off-thread.
+    pub fn session_message_search(
+        &self,
+        query: String,
+        limit: usize,
+    ) -> impl FnOnce() -> io::Result<Vec<SessionMessageMatch>> + Send + 'static {
+        let path = self.path.clone();
+        move || search_session_messages(&path, &query, limit)
+    }
+
+    pub fn harness_snapshot(&self, id: uuid::Uuid) -> Option<wakuwaku_harness::SessionSnapshot> {
+        self.harness_snapshots.lock().get(&id).cloned()
+    }
+
+    pub fn set_harness_snapshot(
+        &self,
+        id: uuid::Uuid,
+        snapshot: wakuwaku_harness::SessionSnapshot,
+    ) {
+        self.harness_snapshots.lock().insert(id, snapshot);
+    }
+
+    /// Memory first, then `{db.parent}/snapshots/{id}.json`. Start may upsert a
+    /// client-owned transcript without hydrating; that must not invent an empty
+    /// snapshot over a stored provider conversation.
+    pub fn load_harness_snapshot(
+        &self,
+        id: uuid::Uuid,
+    ) -> io::Result<Option<wakuwaku_harness::SessionSnapshot>> {
+        if let Some(snapshot) = self.harness_snapshot(id) {
+            return Ok(Some(snapshot));
+        }
+        let Some(snapshot) = read_snapshot_file(&self.snapshot_directory(), id)? else {
+            return Ok(None);
+        };
+        self.harness_snapshots.lock().insert(id, snapshot.clone());
+        Ok(Some(snapshot))
+    }
+
+    /// Atomically writes `{db.parent}/snapshots/{id}.json` and updates the
+    /// in-memory cache. UI `save` never touches this file.
+    pub fn persist_harness_snapshot(
+        &self,
+        id: uuid::Uuid,
+        snapshot: wakuwaku_harness::SessionSnapshot,
+    ) -> io::Result<()> {
+        write_snapshot_file(&self.snapshot_directory(), id, &snapshot)?;
+        self.set_harness_snapshot(id, snapshot);
+        Ok(())
+    }
+
+    /// Trajectory backfill reads the file, never the in-memory cache, so a
+    /// live driver cannot disguise a missing continuation snapshot.
+    pub fn read_snapshot_file_only(
+        &self,
+        id: uuid::Uuid,
+    ) -> io::Result<Option<wakuwaku_harness::SessionSnapshot>> {
+        read_snapshot_file(&self.snapshot_directory(), id)
+    }
+
+    /// Drops the cache entry and unlinks `{id}.json` plus a leftover `.tmp`.
+    pub fn unlink_harness_snapshot(&self, id: uuid::Uuid) {
+        self.harness_snapshots.lock().remove(&id);
+        unlink_snapshot_files(&self.snapshot_directory(), id);
+    }
+
+    fn snapshot_directory(&self) -> PathBuf {
+        self.path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(SNAPSHOTS_DIRECTORY)
+    }
+
+    /// Insert a billed usage event. `INSERT OR IGNORE` so journal replay and
+    /// duplicate driver delivery do not double-count.
+    pub fn insert_usage_event(&self, event: &crate::usage_history::UsageEvent) -> io::Result<bool> {
+        if event.token_total() == 0 {
+            return Ok(false);
+        }
+        self.with_connection(|connection| {
+            let changed = connection
+                .execute(
+                    "INSERT OR IGNORE INTO usage_events (
+                         event_id, session_id, project_path, provider, model,
+                         timestamp_ms, input, output, cache_read, cache_write, reasoning
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    rusqlite::params![
+                        event.event_id.to_string(),
+                        event.session_id.to_string(),
+                        event.project_path,
+                        event.provider.as_str(),
+                        event.model,
+                        event.timestamp_ms,
+                        event.input as i64,
+                        event.output as i64,
+                        event.cache_read as i64,
+                        event.cache_write as i64,
+                        event.reasoning.map(|value| value as i64),
+                    ],
+                )
+                .map_err(to_io_error)?;
+            Ok(changed > 0)
+        })
+    }
+
+    /// Indexed window read of the append-only usage ledger.
+    pub fn usage_events_between(
+        &self,
+        since_ms: i64,
+        until_ms: i64,
+    ) -> io::Result<Vec<crate::usage_history::UsageEvent>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT event_id, session_id, project_path, provider, model,
+                            timestamp_ms, input, output, cache_read, cache_write, reasoning
+                     FROM usage_events
+                     WHERE timestamp_ms >= ?1 AND timestamp_ms <= ?2
+                     ORDER BY timestamp_ms, event_id",
+                )
+                .map_err(to_io_error)?;
+            let rows = statement
+                .query_map(params![since_ms, until_ms], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
+                    ))
+                })
+                .map_err(to_io_error)?;
+            Ok(rows
+                .filter_map(Result::ok)
+                .filter_map(
+                    |(
+                        event_id,
+                        session_id,
+                        project_path,
+                        provider,
+                        model,
+                        timestamp_ms,
+                        input,
+                        output,
+                        cache_read,
+                        cache_write,
+                        reasoning,
+                    )| {
+                        Some(crate::usage_history::UsageEvent {
+                            event_id: Uuid::parse_str(&event_id).ok()?,
+                            session_id: Uuid::parse_str(&session_id).ok()?,
+                            project_path,
+                            provider: ProviderId::new(provider),
+                            model,
+                            timestamp_ms,
+                            input: input as u64,
+                            output: output as u64,
+                            cache_read: cache_read as u64,
+                            cache_write: cache_write as u64,
+                            reasoning: reasoning.map(|value| value as u64),
+                        })
+                    },
+                )
+                .collect())
+        })
+    }
+
+    fn with_connection<T>(&self, f: impl FnOnce(&Connection) -> io::Result<T>) -> io::Result<T> {
+        let mut guard = self.storage.lock();
+        if guard.is_none() {
+            *guard = Some(Storage {
+                connection: self.open()?,
+                persisted_sessions: HashSet::new(),
+                written_messages: HashMap::new(),
+                saved_projects: 0,
+                saved_app_settings: 0,
+                saved_app_state: 0,
+            });
+        }
+        f(&guard.as_ref().expect("storage opened above").connection)
+    }
+
+    pub fn blobs(&self) -> Arc<BlobStore> {
+        Arc::clone(&self.blobs)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn open(&self) -> io::Result<Connection> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let connection = Connection::open(&self.path).map_err(to_io_error)?;
+        // WAL keeps a streaming save from blocking on readers. foreign_keys
+        // must be on for every writer so session delete cascades the ledger.
+        configure_sqlite(&connection)?;
+        apply_migrations(&connection)?;
+        Ok(connection)
+    }
+
+    pub fn load_or_fresh(&self, cwd: PathBuf) -> PersistedState {
+        let mut state = self.load().unwrap_or_else(|_| {
+            if cwd.parent().is_none() {
+                PersistedState::empty()
+            } else {
+                PersistedState::fresh(cwd)
+            }
+        });
+        state.ensure_runtime_session();
+        // The session that opens on launch is the one session whose transcript
+        // is needed immediately; the rest stay as list rows until selected.
+        if let Some(selected) = state.selected_session
+            && let Some(session) = state
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == selected)
+        {
+            let _ = self.hydrate(session);
+        }
+        state
+    }
+
+    fn read_app_settings(&self) -> io::Result<Option<AppSettings>> {
+        match fs::read(&self.app_settings_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(to_io_error),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn read_app_state(&self) -> io::Result<Option<AppState>> {
+        let Ok(bytes) = fs::read(&self.app_state_path) else {
+            return Ok(None);
+        };
+        // `state.json` used to be the pre-SQLite all-in-one store. Requiring a
+        // format-specific version key makes that document (and malformed
+        // app-managed state) safely reset instead of being migrated.
+        let Ok(app_state) = serde_json::from_slice::<AppState>(&bytes) else {
+            return Ok(None);
+        };
+        if app_state.app_state_version != APP_STATE_VERSION {
+            return Ok(None);
+        }
+        Ok(Some(app_state))
+    }
+
+    fn write_app_settings(&self, settings: &AppSettings) -> io::Result<()> {
+        if let Some(parent) = self.app_settings_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let data = serde_json::to_vec_pretty(settings).map_err(to_io_error)?;
+        let temporary = self.app_settings_path.with_extension("json.tmp");
+        fs::write(&temporary, data)?;
+        fs::rename(temporary, &self.app_settings_path)
+    }
+
+    fn write_app_state(&self, app_state: &AppState) -> io::Result<()> {
+        if let Some(parent) = self.app_state_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let data = serde_json::to_vec_pretty(app_state).map_err(to_io_error)?;
+        let temporary = self.app_state_path.with_extension("json.tmp");
+        fs::write(&temporary, data)?;
+        fs::rename(temporary, &self.app_state_path)
+    }
+
+    pub fn load(&self) -> io::Result<PersistedState> {
+        let connection = self.open()?;
+        let mut state = PersistedState::empty();
+
+        // Missing JSON files mean defaults; the database remains the source of
+        // truth for projects and sessions.
+        let app_settings_missing = self.desktop_files && !self.app_settings_path.is_file();
+        let app_settings = if self.desktop_files {
+            self.read_app_settings()?
+        } else {
+            None
+        };
+        if let Some(settings) = app_settings {
+            state.apply_app_settings(settings);
+        }
+        let app_state = if self.desktop_files {
+            self.read_app_state()?
+        } else {
+            None
+        };
+        let app_state_missing = app_state.is_none();
+        if let Some(app_state) = app_state {
+            state.apply_app_state(app_state);
+        }
+
+        let mut projects = connection
+            .prepare("SELECT id, name, path, created_at FROM projects ORDER BY position")
+            .map_err(to_io_error)?;
+        state.projects = projects
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(to_io_error)?
+            .filter_map(Result::ok)
+            .filter_map(|(id, name, path, created_at)| {
+                Some(Project {
+                    id: Uuid::parse_str(&id).ok()?,
+                    name,
+                    path: PathBuf::from(path),
+                    created_at: created_at as u64,
+                })
+            })
+            .collect();
+        drop(projects);
+
+        // Only the columns the session list needs. Transcripts and messages are
+        // fetched per session by `hydrate`, so startup cost does not grow with
+        // how much history exists.
+        let mut sessions = connection
+            .prepare(
+                "SELECT id, project_id, title, auto_title, provider, model, status,
+                        created_at, updated_at, last_reply_at
+                 FROM sessions ORDER BY updated_at",
+            )
+            .map_err(to_io_error)?;
+        let mut persisted_sessions = HashSet::new();
+        state.sessions = sessions
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                ))
+            })
+            .map_err(to_io_error)?
+            .filter_map(Result::ok)
+            .filter_map(|row| {
+                let session = session_skeleton(row)?;
+                persisted_sessions.insert(session.id);
+                Some(session)
+            })
+            .collect();
+        drop(sessions);
+
+        state.migrate_loaded();
+        let app_settings = state.app_settings();
+        let app_settings_are_saved = !self.desktop_files
+            || !app_settings_missing
+            || self.write_app_settings(&app_settings).is_ok();
+        let app_state = state.app_state();
+        let app_state_is_saved = if !self.desktop_files {
+            true
+        } else if app_state_missing {
+            // Persist the random installation ID before the first analytics
+            // event is sent. Failure must not discard valid database state.
+            self.write_app_state(&app_state).is_ok()
+        } else {
+            true
+        };
+
+        *self.storage.lock() = Some(Storage {
+            connection,
+            persisted_sessions,
+            // A fresh connection has written nothing yet. Sessions loaded here
+            // are skeletons anyway, so the first save of one is a full write.
+            written_messages: HashMap::new(),
+            saved_projects: 0,
+            saved_app_settings: if app_settings_are_saved {
+                fingerprint(&serde_json::to_string(&app_settings).map_err(to_io_error)?)
+            } else {
+                0
+            },
+            saved_app_state: if app_state_is_saved {
+                fingerprint(&serde_json::to_string(&app_state).map_err(to_io_error)?)
+            } else {
+                0
+            },
+        });
+        Ok(state)
+    }
+
+    /// Fills in a session's transcript, turns and messages.
+    ///
+    /// Startup loads only list columns, so this runs when a session is first
+    /// selected. It reads one row plus that session's messages — cheap enough
+    /// to do inline, and a no-op once the session is already loaded.
+    pub fn hydrate(&self, session: &mut AgentSession) -> io::Result<()> {
+        if session.detail_loaded {
+            return Ok(());
+        }
+        let mut guard = self.storage.lock();
+        if guard.is_none() {
+            *guard = Some(Storage {
+                connection: self.open()?,
+                persisted_sessions: HashSet::new(),
+                written_messages: HashMap::new(),
+                saved_projects: 0,
+                saved_app_settings: 0,
+                saved_app_state: 0,
+            });
+        }
+        let connection = &guard.as_ref().expect("storage opened above").connection;
+        let id = session.id.to_string();
+
+        let data: Option<String> = connection
+            .query_row(
+                "SELECT data FROM session_details WHERE session_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(to_io_error)?;
+        // A session with no row has nothing stored to load; it is already whole.
+        let Some(data) = data else {
+            session.detail_loaded = true;
+            return Ok(());
+        };
+        let stored = serde_json::from_str::<AgentSession>(&data).map_err(to_io_error)?;
+        session.transcript_blocks = stored.transcript_blocks;
+        session.turns = stored.turns;
+        session.queued_messages = stored.queued_messages;
+        session.workspace = stored.workspace;
+        session.runtime_mode = stored.runtime_mode;
+        session.interaction_mode = stored.interaction_mode;
+        session.reasoning_effort = stored.reasoning_effort;
+        session.service_tier = stored.service_tier;
+        session.context_window = stored.context_window;
+        session.context_usage = stored.context_usage;
+        session.runtime_event_cursor = stored.runtime_event_cursor;
+
+        let mut statement = connection
+            .prepare(
+                "SELECT id, turn_id, role, content, display_content, attachments,
+                        created_at, streaming
+                 FROM messages WHERE session_id = ?1 ORDER BY position",
+            )
+            .map_err(to_io_error)?;
+        session.messages = statement
+            .query_map(params![id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            })
+            .map_err(to_io_error)?
+            .filter_map(Result::ok)
+            .filter_map(message_from_row)
+            .collect();
+
+        session.detail_loaded = true;
+        Ok(())
+    }
+
+    /// Persists whatever the app marked as changed, so a streaming turn writes
+    /// one session row and a selection change writes no rows at all.
+    pub fn save(&self, state: &mut PersistedState) -> io::Result<()> {
+        // Only changed sessions can hold a new inline payload, so the blob walk
+        // follows the same set rather than every transcript on every save.
+        let dirty = state.dirty_sessions.clone();
+        externalize_blobs(
+            state
+                .sessions
+                .iter_mut()
+                .filter(|session| dirty.contains(&session.id)),
+            &self.blobs,
+        );
+
+        let mut guard = self.storage.lock();
+        if guard.is_none() {
+            *guard = Some(Storage {
+                connection: self.open()?,
+                persisted_sessions: HashSet::new(),
+                written_messages: HashMap::new(),
+                saved_projects: 0,
+                saved_app_settings: 0,
+                saved_app_state: 0,
+            });
+        }
+        let storage = guard.as_mut().expect("storage opened above");
+
+        if self.desktop_files {
+            let app_settings = state.app_settings();
+            let app_settings_fingerprint =
+                fingerprint(&serde_json::to_string(&app_settings).map_err(to_io_error)?);
+            if app_settings_fingerprint != storage.saved_app_settings {
+                self.write_app_settings(&app_settings)?;
+                storage.saved_app_settings = app_settings_fingerprint;
+            }
+
+            let app_state = state.app_state();
+            let app_state_fingerprint =
+                fingerprint(&serde_json::to_string(&app_state).map_err(to_io_error)?);
+            if app_state_fingerprint != storage.saved_app_state {
+                self.write_app_state(&app_state)?;
+                storage.saved_app_state = app_state_fingerprint;
+            }
+        }
+
+        let transaction = storage
+            .connection
+            .unchecked_transaction()
+            .map_err(to_io_error)?;
+
+        let projects = serde_json::to_string(&state.projects).map_err(to_io_error)?;
+        let projects_fingerprint = fingerprint(&projects);
+        if projects_fingerprint != storage.saved_projects {
+            transaction
+                .execute("DELETE FROM projects", [])
+                .map_err(to_io_error)?;
+            for (position, project) in state.projects.iter().enumerate() {
+                transaction
+                    .execute(
+                        INSERT_PROJECT,
+                        params![
+                            project.id.to_string(),
+                            project.name,
+                            project.path.to_string_lossy(),
+                            position as i64,
+                            project.created_at as i64
+                        ],
+                    )
+                    .map_err(to_io_error)?;
+            }
+            storage.saved_projects = projects_fingerprint;
+        }
+
+        // Only sessions the app reported as changed are written. A draft that
+        // has not started yet owns no row, so it counts as removed until it does.
+        let mut live = HashSet::with_capacity(state.sessions.len());
+        // Applied only after the commit below, so a transaction that rolls back
+        // does not leave this connection believing rows it never wrote are on
+        // disk — which would make the next save skip them for good.
+        let mut written_messages = Vec::new();
+        for session in state.sessions.iter() {
+            if !session.has_started() {
+                // Still listed after rewind-to-empty: keep the row so FK
+                // cascade cannot treat an in-memory session as a delete.
+                if storage.persisted_sessions.contains(&session.id) {
+                    live.insert(session.id);
+                }
+                continue;
+            }
+            live.insert(session.id);
+            // A skeleton's empty transcript means "not fetched", not "empty".
+            // Its promoted list columns may still have changed (for example,
+            // an inactive sidebar row was renamed), so update only those and
+            // leave the detail and message rows untouched.
+            if !session.detail_loaded {
+                if state.dirty_sessions.contains(&session.id) {
+                    transaction
+                        .execute(
+                            UPSERT_SESSION,
+                            rusqlite::params_from_iter(session_params(session)),
+                        )
+                        .map_err(to_io_error)?;
+                    storage.persisted_sessions.insert(session.id);
+                }
+                continue;
+            }
+            if !state.dirty_sessions.contains(&session.id)
+                && storage.persisted_sessions.contains(&session.id)
+            {
+                continue;
+            }
+            let data = session_data(session)?;
+            transaction
+                .execute(
+                    UPSERT_SESSION,
+                    rusqlite::params_from_iter(session_params(session)),
+                )
+                .map_err(to_io_error)?;
+            transaction
+                .execute(UPSERT_SESSION_DETAIL, params![session.id.to_string(), data])
+                .map_err(to_io_error)?;
+            written_messages.push((
+                session.id,
+                write_messages(
+                    &transaction,
+                    session,
+                    storage.written_messages.get(&session.id).unwrap_or(&EMPTY),
+                )?,
+            ));
+            storage.persisted_sessions.insert(session.id);
+        }
+
+        let removed = storage
+            .persisted_sessions
+            .iter()
+            .copied()
+            .filter(|id| !live.contains(id))
+            .collect::<Vec<_>>();
+        for id in &removed {
+            let key = id.to_string();
+            transaction
+                .execute("DELETE FROM sessions WHERE id = ?1", params![key])
+                .map_err(to_io_error)?;
+            transaction
+                .execute(
+                    "DELETE FROM session_details WHERE session_id = ?1",
+                    params![key],
+                )
+                .map_err(to_io_error)?;
+            transaction
+                .execute("DELETE FROM messages WHERE session_id = ?1", params![key])
+                .map_err(to_io_error)?;
+            storage.persisted_sessions.remove(id);
+            self.harness_snapshots.lock().remove(id);
+            storage.written_messages.remove(id);
+        }
+
+        transaction.commit().map_err(to_io_error)?;
+        // Now that the rows are durable, and not before. Unlinking first would
+        // lose the brain if the process died with the session row still live.
+        for (session_id, fingerprints) in written_messages {
+            storage.written_messages.insert(session_id, fingerprints);
+        }
+        let snapshots = self.snapshot_directory();
+        for id in removed {
+            unlink_snapshot_files(&snapshots, id);
+        }
+        state.dirty_sessions.clear();
+        Ok(())
+    }
+
+    /// Builds a blob sweep.
+    ///
+    /// Both halves are filesystem and database work, so the whole thing runs on
+    /// a background executor; it opens its own connection rather than borrowing
+    /// the store's.
+    pub fn blob_sweep(&self) -> impl FnOnce() + Send + 'static {
+        let blobs = Arc::clone(&self.blobs);
+        let path = self.path.clone();
+        let attachments_root = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("attachments");
+        let snapshots_root = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(SNAPSHOTS_DIRECTORY);
+        let drafts_path = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(COMPOSER_DRAFTS_FILENAME);
+        move || {
+            let Ok(connection) = Connection::open(&path) else {
+                return;
+            };
+            if configure_sqlite(&connection).is_err() {
+                return;
+            };
+            let snapshot_cutoff = SystemTime::now()
+                .checked_sub(SNAPSHOT_SWEEP_GRACE_PERIOD)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let _ = sweep_orphan_snapshots(&connection, &snapshots_root, snapshot_cutoff);
+            let cutoff = SystemTime::now()
+                .checked_sub(ASSET_SWEEP_GRACE_PERIOD)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let Ok(mut live) = live_blob_references(&connection) else {
+                return;
+            };
+            if let Ok(drafts) = fs::read_to_string(drafts_path) {
+                collect_blob_references(&drafts, &mut live);
+            }
+            let _ = blobs.retain_unreferenced_older_than(&live, cutoff);
+            let Ok(mut live_attachments) = live_attachment_references(&connection) else {
+                return;
+            };
+            if let Ok(drafts) = fs::read_to_string(
+                path.parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(COMPOSER_DRAFTS_FILENAME),
+            ) {
+                collect_attachment_references(&drafts, &mut live_attachments);
+            }
+            let _ = crate::attachments::AttachmentStore::new(attachments_root)
+                .retain_unreferenced_older_than(&live_attachments, cutoff);
+        }
+    }
+}
+
+type SessionColumns = (
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    String,
+    i64,
+    i64,
+    Option<i64>,
+);
+
+/// Builds a list-only session from its columns. `messages`,
+/// `transcript_blocks` and `turns` stay empty until [`StateStore::hydrate`].
+///
+/// Built field by field rather than through `AgentSession::new`, which would
+/// spend a random-number syscall per row on an id that is then overwritten.
+fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
+    let (
+        id,
+        project_id,
+        title,
+        auto_title,
+        provider,
+        model,
+        status,
+        created_at,
+        updated_at,
+        last_reply_at,
+    ) = row;
+    Some(AgentSession {
+        id: Uuid::parse_str(&id).ok()?,
+        title,
+        auto_title,
+        project_id: Uuid::parse_str(&project_id).ok()?,
+        workspace: SessionWorkspace::Local,
+        provider: serde_json::from_value(serde_json::Value::String(provider)).ok()?,
+        model,
+        // Hydration replaces these; the list never reads them.
+        runtime_mode: RuntimeMode::default(),
+        interaction_mode: InteractionMode::default(),
+        reasoning_effort: None,
+        service_tier: None,
+        context_window: None,
+        status: serde_json::from_value(serde_json::Value::String(status)).ok()?,
+        created_at: created_at as u64,
+        updated_at: updated_at as u64,
+        last_reply_at: last_reply_at.map(|at| at as u64),
+        context_usage: None,
+        runtime_event_cursor: None,
+        messages: Vec::new(),
+        transcript_blocks: Vec::new(),
+        turns: Vec::new(),
+        queued_messages: Vec::new(),
+        detail_loaded: false,
+    })
+}
+
+type MessageColumns = (
+    String,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    String,
+    i64,
+    i64,
+);
+
+fn message_from_row(row: MessageColumns) -> Option<Message> {
+    let (id, turn_id, role, content, display_content, attachments, created_at, streaming) = row;
+    Some(Message {
+        id: Uuid::parse_str(&id).ok()?,
+        turn_id: turn_id.as_deref().and_then(|id| Uuid::parse_str(id).ok()),
+        role: serde_json::from_value(serde_json::Value::String(role)).ok()?,
+        content,
+        display_content,
+        attachments: serde_json::from_str::<Vec<MessageAttachment>>(&attachments)
+            .unwrap_or_default(),
+        created_at: created_at as u64,
+        streaming: streaming != 0,
+    })
+}
+
+fn write_snapshot_file(
+    dir: &Path,
+    session_id: Uuid,
+    snapshot: &wakuwaku_harness::SessionSnapshot,
+) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let path = snapshot_path(dir, session_id);
+    let tmp = snapshot_tmp_path(dir, session_id);
+    {
+        let file = fs::File::create(&tmp)?;
+        serde_json::to_writer(&file, snapshot).map_err(to_io_error)?;
+    }
+    fs::rename(tmp, path)
+}
+
+fn read_snapshot_file(
+    dir: &Path,
+    session_id: Uuid,
+) -> io::Result<Option<wakuwaku_harness::SessionSnapshot>> {
+    let path = snapshot_path(dir, session_id);
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    serde_json::from_reader(file).map(Some).map_err(to_io_error)
+}
+
+fn unlink_snapshot_files(dir: &Path, session_id: Uuid) {
+    let _ = fs::remove_file(snapshot_path(dir, session_id));
+    let _ = fs::remove_file(snapshot_tmp_path(dir, session_id));
+}
+
+fn snapshot_path(dir: &Path, session_id: Uuid) -> PathBuf {
+    dir.join(format!("{session_id}.json"))
+}
+
+fn snapshot_tmp_path(dir: &Path, session_id: Uuid) -> PathBuf {
+    dir.join(format!("{session_id}.json.tmp"))
+}
+
+fn snapshot_file_session_id(path: &Path) -> Option<Uuid> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name
+        .strip_suffix(".json.tmp")
+        .or_else(|| name.strip_suffix(".json"))?;
+    Uuid::parse_str(stem).ok()
+}
+
+fn live_session_ids(connection: &Connection) -> io::Result<HashSet<Uuid>> {
+    let mut statement = connection
+        .prepare("SELECT id FROM sessions")
+        .map_err(to_io_error)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(to_io_error)?;
+    Ok(rows
+        .filter_map(Result::ok)
+        .filter_map(|id| Uuid::parse_str(&id).ok())
+        .collect())
+}
+
+fn sweep_orphan_snapshots(
+    connection: &Connection,
+    directory: &Path,
+    cutoff: SystemTime,
+) -> io::Result<()> {
+    let live = live_session_ids(connection)?;
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(session_id) = snapshot_file_session_id(&path) else {
+            continue;
+        };
+        if live.contains(&session_id) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata
+            .modified()
+            .map_or(true, |modified| modified >= cutoff)
+        {
+            continue;
+        }
+        let _ = fs::remove_file(path);
+    }
+    Ok(())
+}
+
+/// Serializes a session for the `data` column, omitting `messages`.
+///
+/// They are rows in `messages` instead, so there is no copy in `data` that
+/// could go stale.
+fn session_data(session: &AgentSession) -> io::Result<String> {
+    let mut value = serde_json::to_value(session).map_err(to_io_error)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("messages");
+    }
+    serde_json::to_string(&value).map_err(to_io_error)
+}
+
+const UPSERT_MESSAGE: &str = "INSERT INTO messages(
+         id, session_id, turn_id, position, role, content, display_content,
+         attachments, created_at, streaming
+     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+     ON CONFLICT(id) DO UPDATE SET
+         session_id = excluded.session_id,
+         turn_id    = excluded.turn_id,
+         position   = excluded.position,
+         role       = excluded.role,
+         content    = excluded.content,
+         display_content = excluded.display_content,
+         attachments = excluded.attachments,
+         created_at = excluded.created_at,
+         streaming  = excluded.streaming";
+
+/// Replaces a session's messages with the given list.
+///
+/// Appending during a turn touches only the new rows; the delete clears any
+/// tail left behind when a conversation is forked or truncated.
+/// Writes the messages whose stored row would actually differ.
+///
+/// A streaming turn saves once a second, and every one of those saves used to
+/// re-upsert the whole transcript: a `to_string` of the id, a clone of the
+/// body, a `serde_json` round-trip for the role, and a statement, per message.
+/// At two thousand messages that is upwards of 15ms — several frames — spent
+/// rewriting rows that are byte-for-byte what SQLite already holds.
+///
+/// `written` is what the connection was last told, keyed by message id, so the
+/// comparison costs one hash of each body instead of a write of it. Returns the
+/// map to remember for next time; the caller installs it only once the
+/// transaction commits, so a rolled-back write is not recorded as done.
+fn write_messages(
+    transaction: &Connection,
+    session: &AgentSession,
+    written: &HashMap<Uuid, u64>,
+) -> io::Result<HashMap<Uuid, u64>> {
+    use rusqlite::types::Value;
+    let session_id = session.id.to_string();
+    let mut current = HashMap::with_capacity(session.messages.len());
+    for (position, message) in session.messages.iter().enumerate() {
+        let fingerprint = message_fingerprint(message, position);
+        current.insert(message.id, fingerprint);
+        if written.get(&message.id) == Some(&fingerprint) {
+            continue;
+        }
+        let attachments = if message.attachments.is_empty() {
+            "[]".to_owned()
+        } else {
+            serde_json::to_string(&message.attachments).map_err(to_io_error)?
+        };
+        transaction
+            .execute(
+                UPSERT_MESSAGE,
+                rusqlite::params_from_iter([
+                    Value::Text(message.id.to_string()),
+                    Value::Text(session_id.clone()),
+                    message
+                        .turn_id
+                        .map_or(Value::Null, |id| Value::Text(id.to_string())),
+                    Value::Integer(position as i64),
+                    Value::Text(tag_of(message.role)),
+                    Value::Text(message.content.clone()),
+                    message
+                        .display_content
+                        .clone()
+                        .map_or(Value::Null, Value::Text),
+                    Value::Text(attachments),
+                    Value::Integer(message.created_at as i64),
+                    Value::Integer(i64::from(message.streaming)),
+                ]),
+            )
+            .map_err(to_io_error)?;
+    }
+    transaction
+        .execute(
+            "DELETE FROM messages WHERE session_id = ?1 AND position >= ?2",
+            params![session_id, session.messages.len() as i64],
+        )
+        .map_err(to_io_error)?;
+    Ok(current)
+}
+
+/// Fingerprint of every column [`write_messages`] stores for a message.
+///
+/// Covers the body as well as the metadata: an edit that preserves length —
+/// a typo fix — has to be caught, so length and position alone will not do.
+/// Folded a word at a time because this runs over the whole transcript on
+/// every save, which is what [`fingerprint`]'s byte-at-a-time loop is too slow
+/// for.
+/// Stand-in for "this connection has written nothing for that session yet".
+static EMPTY: std::sync::LazyLock<HashMap<Uuid, u64>> = std::sync::LazyLock::new(HashMap::new);
+
+fn message_fingerprint(message: &Message, position: usize) -> u64 {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut fold = |value: u64| {
+        hash ^= value;
+        hash = hash.wrapping_mul(PRIME).rotate_left(23);
+    };
+
+    fold(position as u64);
+    fold(message.created_at);
+    fold(u64::from(message.streaming));
+    fold(fingerprint(&tag_of(message.role)));
+    let (high, low) = message.id.as_u64_pair();
+    fold(high);
+    fold(low);
+    match message.turn_id {
+        Some(turn_id) => {
+            let (high, low) = turn_id.as_u64_pair();
+            fold(high);
+            fold(low);
+        }
+        // Distinct from a turn id that happens to be zero.
+        None => fold(u64::MAX),
+    }
+
+    let bytes = message.content.as_bytes();
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        fold(u64::from_le_bytes(
+            chunk.try_into().expect("chunks_exact yields 8 bytes"),
+        ));
+    }
+    let mut tail = [0u8; 8];
+    let remainder = chunks.remainder();
+    tail[..remainder.len()].copy_from_slice(remainder);
+    fold(u64::from_le_bytes(tail));
+    fold(bytes.len() as u64);
+    if let Some(display_content) = &message.display_content {
+        fold(1);
+        fold(fingerprint(display_content));
+    } else {
+        fold(0);
+    }
+    fold(message.attachments.len() as u64);
+    for attachment in &message.attachments {
+        fold(fingerprint(&attachment.path.to_string_lossy()));
+        fold(fingerprint(&attachment.mention));
+        fold(fingerprint(&attachment.name));
+        fold(u64::from(attachment.is_dir));
+        fold(u64::from(attachment.is_image));
+        if let Some(reference) = &attachment.blob_reference {
+            fold(1);
+            fold(fingerprint(reference));
+        } else {
+            fold(0);
+        }
+    }
+    hash
+}
+
+/// Columns the sidebar sorts and filters on are stored alongside the JSON so
+/// listing sessions never has to deserialize a transcript.
+const UPSERT_SESSION: &str = "INSERT INTO sessions(
+         id, project_id, title, auto_title, provider, model, status,
+         created_at, updated_at, last_reply_at
+     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+     ON CONFLICT(id) DO UPDATE SET
+         project_id    = excluded.project_id,
+         title         = excluded.title,
+         auto_title    = excluded.auto_title,
+         provider      = excluded.provider,
+         model         = excluded.model,
+         status        = excluded.status,
+         created_at    = excluded.created_at,
+         updated_at    = excluded.updated_at,
+         last_reply_at = excluded.last_reply_at";
+
+const INSERT_PROJECT: &str = "INSERT INTO projects(id, name, path, position, created_at)
+     VALUES(?1, ?2, ?3, ?4, ?5)
+     ON CONFLICT(id) DO UPDATE SET
+         name       = excluded.name,
+         path       = excluded.path,
+         position   = excluded.position,
+         created_at = excluded.created_at";
+
+/// The transcript, written alongside the list row it belongs to.
+const UPSERT_SESSION_DETAIL: &str = "INSERT INTO session_details(session_id, data)
+     VALUES(?1, ?2)
+     ON CONFLICT(session_id) DO UPDATE SET data = excluded.data";
+
+/// Serializes an enum to the same string the JSON blob uses, so a column and
+/// its JSON counterpart can never disagree about spelling.
+fn tag_of(value: impl Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn session_params(session: &AgentSession) -> Vec<rusqlite::types::Value> {
+    use rusqlite::types::Value;
+    vec![
+        Value::Text(session.id.to_string()),
+        Value::Text(session.project_id.to_string()),
+        Value::Text(session.title.clone()),
+        session.auto_title.clone().map_or(Value::Null, Value::Text),
+        Value::Text(tag_of(session.provider.clone())),
+        session.model.clone().map_or(Value::Null, Value::Text),
+        Value::Text(tag_of(session.status)),
+        Value::Integer(session.created_at as i64),
+        Value::Integer(session.updated_at as i64),
+        session
+            .last_reply_at
+            .map_or(Value::Null, |at| Value::Integer(at as i64)),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{
+        ActivityItem, ActivityKind, FavoriteModel, MessageRole, ReasoningBlock, TranscriptBlock,
+    };
+    use base64::Engine as _;
+
+    fn temporary_directory() -> PathBuf {
+        std::env::temp_dir().join(format!("wakuwaku-state-{}", Uuid::new_v4()))
+    }
+
+    fn store_in(directory: &Path) -> StateStore {
+        StateStore::with_settings_paths(directory.join("app.db"), directory.join("app.json"))
+    }
+
+    /// `load` returns list-only sessions by design; tests that assert on
+    /// transcripts fetch them the way the app does when a session is opened.
+    fn load_hydrated(store: &StateStore) -> PersistedState {
+        let mut state = store.load().unwrap();
+        for session in &mut state.sessions {
+            store.hydrate(session).unwrap();
+        }
+        state
+    }
+
+    fn text_draft(text: &str) -> ComposerDraft {
+        ComposerDraft {
+            text: text.to_owned(),
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn panel_visibility_defaults_keep_only_the_sidebar_open() {
+        let state = PersistedState::empty();
+        assert!(state.sidebar_visible);
+        assert!(!state.right_panel_visible);
+
+        let mut app_state = serde_json::to_value(state.app_state()).unwrap();
+        let app_state = app_state.as_object_mut().unwrap();
+        app_state.remove("sidebar_visible");
+        app_state.remove("right_panel_visible");
+        let restored: AppState = serde_json::from_value(app_state.clone().into()).unwrap();
+
+        assert!(restored.sidebar_visible);
+        assert!(!restored.right_panel_visible);
+    }
+
+    #[test]
+    fn analytics_preference_and_identity_use_their_respective_files() {
+        let mut state = PersistedState::empty();
+        state.analytics_enabled = false;
+        let analytics_id = state.analytics_id;
+        let mut settings = serde_json::to_value(state.app_settings()).unwrap();
+
+        let restored: AppSettings = serde_json::from_value(settings.clone()).unwrap();
+        assert!(!restored.analytics_enabled);
+        assert!(settings.get("analytics_id").is_none());
+
+        let app_state: AppState =
+            serde_json::from_value(serde_json::to_value(state.app_state()).unwrap()).unwrap();
+        assert_eq!(app_state.analytics_id, analytics_id);
+
+        settings
+            .as_object_mut()
+            .unwrap()
+            .remove("analytics_enabled");
+        let backfilled: AppSettings = serde_json::from_value(settings).unwrap();
+        assert!(backfilled.analytics_enabled);
+    }
+
+    #[test]
+    fn missing_settings_and_app_state_are_created_during_load() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let restored = store.load().unwrap();
+        let settings_path = directory.join("app.json");
+        let settings: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        let app_state: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
+
+        assert_eq!(settings["analytics_enabled"], true);
+        assert!(settings.get("analytics_id").is_none());
+        assert_eq!(app_state["analytics_id"], restored.analytics_id.to_string());
+        assert!(app_state.get("analytics_enabled").is_none());
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn settings_accept_a_partial_user_authored_document() {
+        let settings: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+
+        assert_eq!(settings.theme, ThemePreference::Dark);
+        assert_eq!(settings.language, AppLanguage::System);
+        assert!(settings.analytics_enabled);
+    }
+
+    #[test]
+    fn legacy_all_in_one_state_is_not_migrated() {
+        let directory = temporary_directory();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("state.json"),
+            r#"{"version":1,"sidebar_width":333.0,"right_panel_visible":true}"#,
+        )
+        .unwrap();
+
+        let restored = store_in(&directory).load().unwrap();
+        assert_eq!(restored.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
+        assert!(!restored.right_panel_visible);
+
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
+        assert_eq!(rewritten["app_state_version"], APP_STATE_VERSION);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn new_session_drafts_follow_the_project_across_runtime_session_ids() {
+        let project_id = Uuid::new_v4();
+        let first_runtime_session =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
+        let relaunched_runtime_session =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
+        assert_ne!(first_runtime_session.id, relaunched_runtime_session.id);
+
+        let mut drafts = ComposerDrafts::default();
+        let draft = text_draft("unfinished new task");
+        assert!(drafts.set(
+            ComposerDraftKey::for_session(&first_runtime_session),
+            draft.clone()
+        ));
+        assert_eq!(
+            drafts.get_for(&relaunched_runtime_session),
+            Some(&draft),
+            "the blank session's transient UUID must not own its draft"
+        );
+    }
+
+    #[test]
+    fn existing_session_drafts_are_isolated_by_session_id() {
+        let project_id = Uuid::new_v4();
+        let mut first =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
+        let mut second =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
+        first.begin_turn("first task");
+        second.begin_turn("second task");
+
+        let mut drafts = ComposerDrafts::default();
+        let first_draft = text_draft("follow up one");
+        let second_draft = text_draft("follow up two");
+        drafts.set(ComposerDraftKey::for_session(&first), first_draft.clone());
+        drafts.set(ComposerDraftKey::for_session(&second), second_draft.clone());
+
+        assert_eq!(drafts.get_for(&first), Some(&first_draft));
+        assert_eq!(drafts.get_for(&second), Some(&second_draft));
+    }
+
+    #[test]
+    fn composer_project_change_moves_a_draft_only_to_an_empty_destination() {
+        let source = ComposerDraftKey::NewSession(Uuid::new_v4());
+        let destination = ComposerDraftKey::NewSession(Uuid::new_v4());
+        let draft = text_draft("keep this prompt");
+        let mut drafts = ComposerDrafts::default();
+        drafts.set(source, draft.clone());
+
+        assert!(drafts.move_to_empty(source, destination));
+        assert!(drafts.get(source).is_none());
+        assert_eq!(drafts.get(destination), Some(&draft));
+
+        let occupied = ComposerDraftKey::NewSession(Uuid::new_v4());
+        let parked = text_draft("already parked here");
+        drafts.set(occupied, parked.clone());
+        assert!(!drafts.move_to_empty(destination, occupied));
+        assert_eq!(drafts.get(destination), Some(&draft));
+        assert_eq!(drafts.get(occupied), Some(&parked));
+    }
+
+    #[test]
+    fn composer_drafts_round_trip_text_and_attachment_metadata() {
+        let directory = temporary_directory();
+        let store = ComposerDraftStore::for_state_path(&directory.join("app.db"));
+        let project_id = Uuid::new_v4();
+        let draft = ComposerDraft {
+            text: "compare these".to_owned(),
+            attachments: vec![ComposerDraftAttachment {
+                path: PathBuf::from("/tmp/reference image.png"),
+                mention: "/tmp/reference image.png".to_owned(),
+                name: "reference image.png".to_owned(),
+                is_dir: false,
+                is_image: true,
+                blob_reference: None,
+            }],
+        };
+        let mut drafts = ComposerDrafts::default();
+        drafts.set(ComposerDraftKey::NewSession(project_id), draft.clone());
+
+        store.save(drafts, 1).unwrap();
+        let restored = store.load().unwrap();
+        assert_eq!(
+            restored.get(ComposerDraftKey::NewSession(project_id)),
+            Some(&draft)
+        );
+    }
+
+    #[test]
+    fn composer_draft_changes_preserve_unrelated_client_keys() {
+        let directory = temporary_directory();
+        let store = ComposerDraftStore::for_state_path(&directory.join("app.db"));
+        let desktop_session_id = Uuid::new_v4();
+        let web_project_id = Uuid::new_v4();
+        let desktop_draft = text_draft("desktop follow-up");
+        let web_draft = text_draft("web new task");
+        let mut initial = ComposerDrafts::default();
+        initial.set(
+            ComposerDraftKey::Session(desktop_session_id),
+            desktop_draft.clone(),
+        );
+        store.save(initial, 1).unwrap();
+
+        store
+            .apply_changes(vec![ComposerDraftChange {
+                target: ComposerDraftTarget::NewSession {
+                    project_id: web_project_id,
+                },
+                draft: Some(web_draft.clone()),
+            }])
+            .unwrap();
+
+        let restored = store.load().unwrap();
+        assert_eq!(
+            restored.get(ComposerDraftKey::Session(desktop_session_id)),
+            Some(&desktop_draft)
+        );
+        assert_eq!(
+            restored.get(ComposerDraftKey::NewSession(web_project_id)),
+            Some(&web_draft)
+        );
+    }
+
+    #[test]
+    fn empty_and_older_composer_drafts_cannot_resurface() {
+        let directory = temporary_directory();
+        let store = ComposerDraftStore::for_state_path(&directory.join("app.db"));
+        let session_id = Uuid::new_v4();
+        let key = ComposerDraftKey::Session(session_id);
+        let mut latest = ComposerDrafts::default();
+        latest.set(key, text_draft("latest"));
+        store.save(latest, 2).unwrap();
+
+        let mut stale = ComposerDrafts::default();
+        stale.set(key, text_draft("stale"));
+        store.save(stale, 1).unwrap();
+        assert_eq!(store.load().unwrap().get(key), Some(&text_draft("latest")));
+
+        let mut removed = store.load().unwrap();
+        assert!(removed.set(key, ComposerDraft::default()));
+        assert!(!removed.set(key, ComposerDraft::default()));
+        store.save(removed, 3).unwrap();
+        assert!(store.load().unwrap().get(key).is_none());
+    }
+
+    #[test]
+    fn projects_round_trip_as_columns_with_created_at() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/some project"));
+        let project = state.projects[0].clone();
+        assert!(project.created_at > 0, "a new project is dated");
+        store.save(&mut state).unwrap();
+
+        // Stored as columns, not as a JSON blob.
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        let (name, path, created_at): (String, String, i64) = connection
+            .query_row(
+                "SELECT name, path, created_at FROM projects WHERE id = ?1",
+                params![project.id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(name, project.name);
+        assert_eq!(path, project.path.to_string_lossy());
+        assert_eq!(created_at as u64, project.created_at);
+        drop(connection);
+
+        let restored = store_in(&directory).load().unwrap();
+        assert_eq!(restored.projects[0].name, project.name);
+        assert_eq!(restored.projects[0].path, project.path);
+        assert_eq!(restored.projects[0].created_at, project.created_at);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn load_returns_list_columns_and_hydrate_fills_the_transcript() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
+        state.sessions[0].auto_title = Some("Investigate".into());
+        state.sessions[0].workspace = SessionWorkspace::Worktree {
+            path: PathBuf::from("/tmp/worktrees/investigate"),
+            branch: "waku/investigate".into(),
+        };
+        state.sessions[0].begin_turn("Ask");
+        state.sessions[0].push_message(MessageRole::Assistant, "an answer");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        let session = &restored.sessions[0];
+        // The list has everything it renders...
+        assert_eq!(session.title, AgentSession::DEFAULT_TITLE);
+        assert_eq!(session.auto_title.as_deref(), Some("Investigate"));
+        assert_eq!(session.display_title(), "Investigate");
+        assert_eq!(session.id, id);
+        assert!(session.last_reply_at.is_some());
+        // ...and none of what it does not.
+        assert!(!session.detail_loaded);
+        assert!(session.messages.is_empty());
+        assert!(session.turns.is_empty());
+        assert_eq!(session.workspace, SessionWorkspace::Local);
+        // A skeleton still counts as started, since only started sessions
+        // are stored at all.
+        assert!(session.has_started());
+
+        reopened.hydrate(&mut restored.sessions[0]).unwrap();
+        let session = &restored.sessions[0];
+        assert!(session.detail_loaded);
+        assert_eq!(session.turns.len(), 1);
+        assert_eq!(
+            session.workspace,
+            SessionWorkspace::Worktree {
+                path: PathBuf::from("/tmp/worktrees/investigate"),
+                branch: "waku/investigate".into(),
+            }
+        );
+        assert!(
+            session
+                .messages
+                .iter()
+                .any(|message| message.content == "an answer")
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn sent_attachment_presentation_round_trips_with_message_rows() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let attachment = MessageAttachment {
+            path: PathBuf::from("/tmp/reference.png"),
+            mention: "/tmp/reference.png".to_owned(),
+            name: "reference.png".to_owned(),
+            is_dir: false,
+            is_image: true,
+            blob_reference: Some("wakuwaku-blob:abcdef.png".to_owned()),
+        };
+        state.sessions[0].begin_turn_with_presentation(
+            "compare @/tmp/reference.png",
+            Some("compare".to_owned()),
+            vec![attachment.clone()],
+        );
+        store.save(&mut state).unwrap();
+
+        let restored = load_hydrated(&store);
+        let message = &restored.sessions[0].messages[0];
+        assert_eq!(message.content, "compare @/tmp/reference.png");
+        assert_eq!(message.visible_content(), "compare");
+        assert_eq!(message.attachments, vec![attachment]);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    /// Rows this store's connection has inserted, updated or deleted.
+    fn rows_written(store: &StateStore) -> u64 {
+        store
+            .storage
+            .lock()
+            .as_ref()
+            .expect("the store has saved at least once")
+            .connection
+            .total_changes()
+    }
+
+    /// A streaming turn saves once a second, and every one of those saves used
+    /// to rewrite the entire transcript — measurably several frames of work at
+    /// a couple of thousand messages. Counted in rows, because rows written is
+    /// exactly what used to grow with history.
+    #[test]
+    fn a_save_only_writes_the_messages_that_changed() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
+        for turn in 0..20 {
+            state.sessions[0].begin_turn(format!("prompt {turn}"));
+            state.sessions[0].push_message(MessageRole::Assistant, format!("reply {turn}"));
+            state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        }
+        store.save(&mut state).unwrap();
+        assert!(state.sessions[0].messages.len() >= 40);
+
+        // A dirty session always rewrites its own two rows; that is the floor
+        // the message count is measured against.
+        let before = rows_written(&store);
+        state.mark_session_dirty(id);
+        store.save(&mut state).unwrap();
+        let floor = rows_written(&store) - before;
+
+        let before = rows_written(&store);
+        state
+            .session_mut(id)
+            .unwrap()
+            .push_message(MessageRole::Assistant, "one more");
+        store.save(&mut state).unwrap();
+        assert_eq!(
+            rows_written(&store) - before,
+            floor + 1,
+            "a new message costs one row, not the whole transcript"
+        );
+
+        // Length is not enough to tell rows apart: a typo fix keeps it.
+        let before = rows_written(&store);
+        let session = state.session_mut(id).unwrap();
+        let original = session.messages[3].content.clone();
+        let edited = original.chars().rev().collect::<String>();
+        assert_eq!(edited.len(), original.len());
+        assert_ne!(edited, original);
+        session.messages[3].content = edited.clone();
+        store.save(&mut state).unwrap();
+        assert_eq!(
+            rows_written(&store) - before,
+            floor + 1,
+            "an edit that preserves length is still written"
+        );
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        reopened.hydrate(&mut restored.sessions[0]).unwrap();
+        let messages = &restored.sessions[0].messages;
+        assert_eq!(messages[3].content, edited, "the edit reached disk");
+        assert_eq!(
+            messages.last().unwrap().content,
+            "one more",
+            "and so did the append"
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_skeleton_is_never_written_back_over_stored_history() {
+        // The failure this guards against is silent and total: saving a session
+        // whose transcript was never fetched would replace it with nothing.
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("Ask");
+        state.sessions[0].push_message(MessageRole::User, "keep me");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        assert!(!restored.sessions[0].detail_loaded);
+        // Mark it dirty anyway, the worst case.
+        let id = restored.sessions[0].id;
+        restored.mark_session_dirty(id);
+        reopened.save(&mut restored).unwrap();
+
+        let checked = load_hydrated(&store_in(&directory));
+        assert_eq!(checked.sessions[0].turns.len(), 1, "turns survived");
+        assert!(
+            checked.sessions[0]
+                .messages
+                .iter()
+                .any(|message| message.content == "keep me"),
+            "messages survived"
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn blob_sweep_keeps_images_of_sessions_that_are_not_loaded() {
+        // Sweeping from memory would treat an unhydrated session as owning no
+        // images and delete screenshots that are still referenced.
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let payload = vec![4u8; 32 * 1024];
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&payload)
+        );
+        let id = state.sessions[0].id;
+        state.sessions[0].begin_turn("Screenshot");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state
+            .session_mut(id)
+            .unwrap()
+            .transcript_blocks
+            .push(TranscriptBlock {
+                after_message: 0,
+                turn_id: None,
+                activities: vec![
+                    ActivityItem::new(None, ActivityKind::Tool, "Screenshot", None, true)
+                        .with_image_urls(vec![data_url]),
+                ],
+            });
+        store.save(&mut state).unwrap();
+
+        // Reopen without hydrating anything, then sweep.
+        let reopened = store_in(&directory);
+        let restored = reopened.load().unwrap();
+        assert!(!restored.sessions[0].detail_loaded);
+        reopened.blob_sweep()();
+
+        let checked = load_hydrated(&store_in(&directory));
+        let activities = &checked.sessions[0].transcript_blocks[0].activities;
+        let path = store
+            .blobs()
+            .path_for(&activities[0].image_urls[0])
+            .unwrap();
+        assert_eq!(fs::read(path).unwrap(), payload, "the image survived");
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn blob_sweep_keeps_clipboard_attachments_in_composer_drafts() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        // Open the database so the sweep has a migrated source to scan.
+        store.load().unwrap();
+        let payload = vec![9u8; 1024];
+        let reference = store
+            .blobs()
+            .store_image_bytes("image/png", &payload)
+            .unwrap();
+        let path = store.blobs().path_for(&reference).unwrap();
+
+        let project_id = Uuid::new_v4();
+        let mut drafts = ComposerDrafts::default();
+        drafts.set(
+            ComposerDraftKey::NewSession(project_id),
+            ComposerDraft {
+                text: String::new(),
+                attachments: vec![ComposerDraftAttachment {
+                    path: path.clone(),
+                    mention: path.display().to_string(),
+                    name: "image.png".to_owned(),
+                    is_dir: false,
+                    is_image: true,
+                    blob_reference: Some(reference),
+                }],
+            },
+        );
+        ComposerDraftStore::for_state_path(&directory.join("app.db"))
+            .save(drafts, 1)
+            .unwrap();
+
+        store.blob_sweep()();
+
+        assert_eq!(fs::read(path).unwrap(), payload);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn default_path_is_build_specific() {
+        let path = StateStore::default_path();
+        assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("app.db")));
+        let directory = path.parent().and_then(Path::file_name);
+        let store = StateStore::new(path.clone());
+        assert_eq!(store.app_state_path, path.with_file_name("state.json"));
+
+        // Debug files stay inside the checkout so development cannot read or
+        // write the installed app's settings.
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(directory, Some(std::ffi::OsStr::new("temp")));
+            let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .unwrap();
+            assert!(path.starts_with(checkout));
+            assert_eq!(store.app_settings_path, path.with_file_name("app.json"));
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            assert_eq!(directory, Some(std::ffi::OsStr::new("WakuWaku")));
+            let configuration_directory = dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".wakuwaku");
+            assert_eq!(
+                store.app_settings_path,
+                configuration_directory.join("app.json")
+            );
+        }
+    }
+
+    #[test]
+    fn state_round_trips() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].model = Some("gpt-5.6-luna".into());
+        state.last_model = Some("gpt-5.6-luna".into());
+        state.sessions[0].reasoning_effort = Some("xhigh".into());
+        state.last_reasoning_effort = Some("xhigh".into());
+        state.sessions[0].context_window = Some("1m".into());
+        state.last_context_window = Some("1m".into());
+        state.remember_model_traits(
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+            "gpt-5.6-luna",
+            Some("xhigh".into()),
+            Some("1m".into()),
+        );
+        state.sessions[0].runtime_mode = crate::model::RuntimeMode::FullAccess;
+        state.favorite_models.push(FavoriteModel {
+            provider: ProviderId::new(ProviderId::OPENAI_RESPONSES),
+            model: "gpt-5.6-luna".into(),
+        });
+        state.theme = ThemePreference::Light;
+        state.language = AppLanguage::SimplifiedChinese;
+        state.sidebar_visible = false;
+        state.right_panel_visible = false;
+        state.sidebar_width = 318.0;
+        state.right_panel_width = 612.0;
+        state.sessions[0].begin_turn("Persist this session");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].transcript_blocks.push(TranscriptBlock {
+            after_message: 1,
+            turn_id: None,
+            activities: vec![
+                ActivityItem::from_reasoning(
+                    ReasoningBlock {
+                        content: "Checking the source".into(),
+                        started_at_ms: 1_000,
+                        finished_at_ms: 2_500,
+                    },
+                    true,
+                ),
+                ActivityItem::new(
+                    Some("tool-1".into()),
+                    ActivityKind::Search,
+                    "Read src/main.rs",
+                    Some("{\"path\":\"src/main.rs\"}".into()),
+                    true,
+                ),
+            ],
+        });
+        let daemon_settings = state.daemon_settings();
+        store.save(&mut state).unwrap();
+
+        let mut restored = load_hydrated(&store_in(&directory));
+        restored.apply_daemon_settings(daemon_settings);
+        assert_eq!(restored.projects[0].name, "project");
+        assert_eq!(restored.sessions.len(), 1);
+        assert_eq!(restored.sessions[0].model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(restored.last_model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(restored.last_reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(
+            restored.sessions[0].reasoning_effort.as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(restored.last_context_window.as_deref(), Some("1m"));
+        assert_eq!(restored.sessions[0].context_window.as_deref(), Some("1m"));
+        assert_eq!(
+            restored.model_traits_for(
+                ProviderId::new(ProviderId::OPENAI_RESPONSES),
+                "gpt-5.6-luna"
+            ),
+            (Some("xhigh".into()), Some("1m".into()))
+        );
+        assert_eq!(
+            restored.sessions[0].runtime_mode,
+            crate::model::RuntimeMode::FullAccess
+        );
+        assert_eq!(restored.favorite_models, state.favorite_models);
+        assert_eq!(restored.theme, ThemePreference::Light);
+        assert_eq!(restored.language, AppLanguage::SimplifiedChinese);
+        assert!(!restored.sidebar_visible);
+        assert!(!restored.right_panel_visible);
+        assert_eq!(restored.sidebar_width, 318.0);
+        assert_eq!(restored.right_panel_width, 612.0);
+        assert_eq!(restored.sessions[0].transcript_blocks.len(), 1);
+        assert_eq!(
+            restored.sessions[0].transcript_blocks[0].activities.len(),
+            2
+        );
+        assert_eq!(
+            restored.sessions[0].transcript_blocks[0].activities[0]
+                .reasoning
+                .as_ref()
+                .map(|reasoning| reasoning.content.as_str()),
+            Some("Checking the source")
+        );
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn unchanged_sessions_are_not_rewritten() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("First");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        let quiet = {
+            let mut session = state.new_session(
+                state.projects[0].id,
+                ProviderId::new(ProviderId::OPENAI_RESPONSES),
+            );
+            session.begin_turn("Quiet");
+            session.finish_active_turn(crate::model::TurnStatus::Completed);
+            session
+        };
+        let quiet_id = quiet.id;
+        state.sessions.push(quiet);
+        store.save(&mut state).unwrap();
+
+        // Stamp the quiet session's row so any write would overwrite the mark.
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        connection
+            .execute(
+                "UPDATE sessions SET title = 'untouched' WHERE id = ?1",
+                params![quiet_id.to_string()],
+            )
+            .unwrap();
+
+        // Change the other session, through the accessor that marks it dirty.
+        let active_id = state.sessions[0].id;
+        let session = state.session_mut(active_id).unwrap();
+        session.begin_turn("Second");
+        session.finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        let quiet_title: String = connection
+            .query_row(
+                "SELECT title FROM sessions WHERE id = ?1",
+                params![quiet_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            quiet_title, "untouched",
+            "a session nobody touched was not rewritten"
+        );
+        drop(connection);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_session_changed_without_the_accessor_is_not_written() {
+        // The dirty set is the contract: bypassing `session_mut` means the
+        // change does not reach disk. This pins that so the invariant is
+        // visible rather than discovered later as data loss.
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
+        state.sessions[0].begin_turn("First");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        state.sessions[0].title = "bypassed".into();
+        store.save(&mut state).unwrap();
+        assert_eq!(
+            store_in(&directory).load().unwrap().sessions[0].title,
+            "New task",
+            "an unmarked change stays in memory"
+        );
+
+        // Going through the accessor persists it.
+        state.session_mut(id).unwrap().title = "marked".into();
+        store.save(&mut state).unwrap();
+        assert_eq!(
+            store_in(&directory).load().unwrap().sessions[0].title,
+            "marked"
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn renaming_a_skeleton_updates_metadata_without_erasing_its_transcript() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
+        state.sessions[0].begin_turn("Keep this transcript");
+        state.sessions[0].push_message(MessageRole::Assistant, "still here");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        assert!(!restored.sessions[0].detail_loaded);
+        assert!(restored.session_mut(id).unwrap().set_title("Renamed task"));
+        reopened.save(&mut restored).unwrap();
+
+        let checked = load_hydrated(&store_in(&directory));
+        assert_eq!(checked.sessions[0].title, "Renamed task");
+        assert!(
+            checked.sessions[0]
+                .messages
+                .iter()
+                .any(|message| message.content == "still here")
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_new_session_is_written_even_without_being_marked() {
+        // Safety net: a session with no row yet is always written, so a missed
+        // mark can never lose a whole session.
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("Unmarked");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.dirty_sessions.clear();
+
+        store.save(&mut state).unwrap();
+
+        assert_eq!(store_in(&directory).load().unwrap().sessions.len(), 1);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn app_settings_and_app_managed_state_live_in_separate_json_files() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.theme = ThemePreference::Light;
+        state.language = AppLanguage::SimplifiedChinese;
+        state.sidebar_width = 301.0;
+        store.save(&mut state).unwrap();
+
+        let settings = directory.join("app.json");
+        let text = fs::read_to_string(&settings).unwrap();
+        assert!(
+            text.contains('\n'),
+            "settings are pretty-printed for editing"
+        );
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["theme"], "light");
+        assert_eq!(value["language"], "simplified-chinese");
+        for daemon_key in ["computer_use_enabled", "computer_use_allowed_apps"] {
+            assert!(
+                value.get(daemon_key).is_none(),
+                "{daemon_key} leaked into app.json"
+            );
+        }
+        for app_managed_key in [
+            "version",
+            "app_state_version",
+            "analytics_id",
+            "selected_project",
+            "selected_session",
+            "last_provider",
+            "last_model",
+            "last_reasoning_effort",
+            "last_context_window",
+            "remembered_model_traits",
+            "sidebar_visible",
+            "right_panel_visible",
+            "sidebar_width",
+            "right_panel_width",
+        ] {
+            assert!(
+                value.get(app_managed_key).is_none(),
+                "{app_managed_key} leaked into app.json"
+            );
+        }
+
+        let app_state: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
+        assert_eq!(app_state["sidebar_width"], 301.0);
+        assert_eq!(app_state["app_state_version"], APP_STATE_VERSION);
+        for setting_key in [
+            "analytics_enabled",
+            "favorite_models",
+            "theme",
+            "language",
+            "computer_use_enabled",
+            "computer_use_allowed_apps",
+        ] {
+            assert!(
+                app_state.get(setting_key).is_none(),
+                "{setting_key} leaked into state.json"
+            );
+        }
+
+        // A hand edit is picked up on the next load.
+        let edited = text.replace("simplified-chinese", "english");
+        fs::write(&settings, edited).unwrap();
+        let restored = store_in(&directory).load().unwrap();
+        assert_eq!(restored.language, AppLanguage::English);
+        assert_eq!(restored.sidebar_width, 301.0);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn app_state_changes_do_not_rewrite_app_settings() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        store.save(&mut state).unwrap();
+
+        let settings_path = directory.join("app.json");
+        let mut user_document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        user_document["future_setting"] = serde_json::Value::Bool(true);
+        let user_document = serde_json::to_vec(&user_document).unwrap();
+        fs::write(&settings_path, &user_document).unwrap();
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        restored.sidebar_width = 333.0;
+        reopened.save(&mut restored).unwrap();
+
+        assert_eq!(fs::read(&settings_path).unwrap(), user_document);
+        let app_state: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
+        assert_eq!(app_state["sidebar_width"], 333.0);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn migrations_run_once_and_are_recorded() {
+        let connection = Connection::open_in_memory().unwrap();
+
+        assert_eq!(
+            apply_migrations(&connection).unwrap(),
+            MIGRATIONS.len(),
+            "all run on a fresh database"
+        );
+
+        let recorded: Vec<String> = connection
+            .prepare("SELECT tag FROM migrations ORDER BY tag")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(
+            recorded,
+            MIGRATIONS
+                .iter()
+                .map(|(tag, _)| tag.to_string())
+                .collect::<Vec<_>>()
+        );
+
+        // Re-running is a no-op; a second CREATE TABLE would otherwise error.
+        assert_eq!(apply_migrations(&connection).unwrap(), 0);
+    }
+
+    #[test]
+    fn recorded_migrations_are_skipped() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(MIGRATIONS_TABLE).unwrap();
+        // Claim every migration already ran. The tables do not exist, so
+        // anything that did run would fail loudly.
+        for (tag, _) in MIGRATIONS {
+            connection
+                .execute(
+                    "INSERT INTO migrations(tag, applied_at) VALUES(?1, 0)",
+                    params![tag],
+                )
+                .unwrap();
+        }
+
+        assert_eq!(apply_migrations(&connection).unwrap(), 0);
+        assert!(
+            connection
+                .query_row::<i64, _, _>("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+                .is_err(),
+            "nothing ran, so the schema was never created"
+        );
+    }
+
+    #[test]
+    fn a_half_applied_run_resumes_from_where_it_stopped() {
+        let connection = Connection::open_in_memory().unwrap();
+        apply_migrations(&connection).unwrap();
+
+        // Drop the record of the last migration without dropping its tables,
+        // as an interrupted run would leave things.
+        let (last, _) = MIGRATIONS.last().expect("at least one migration");
+        connection
+            .execute("DELETE FROM migrations WHERE tag = ?1", params![last])
+            .unwrap();
+
+        // It re-runs and fails loudly rather than silently skipping, because
+        // the tables it creates already exist.
+        let error = apply_migrations(&connection).unwrap_err();
+        assert!(
+            error.to_string().contains(last),
+            "the failure names the migration: {error}"
+        );
+    }
+
+    #[test]
+    fn auto_title_migration_preserves_existing_generated_titles_as_fallbacks() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(MIGRATIONS_TABLE).unwrap();
+        connection.execute_batch(MIGRATIONS[0].1).unwrap();
+        connection
+            .execute(
+                "INSERT INTO migrations(tag, applied_at) VALUES(?1, 0)",
+                params![MIGRATIONS[0].0],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions(
+                    id, project_id, title, provider, model, status,
+                    created_at, updated_at, last_reply_at
+                 ) VALUES('session-1', 'project-1', 'Investigate the parser',
+                          'openai-codex', NULL, 'idle', 1, 1, NULL)",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(apply_migrations(&connection).unwrap(), MIGRATIONS.len() - 1);
+        let (title, auto_title): (String, Option<String>) = connection
+            .query_row(
+                "SELECT title, auto_title FROM sessions WHERE id = 'session-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, AgentSession::DEFAULT_TITLE);
+        assert_eq!(auto_title.as_deref(), Some("Investigate the parser"));
+    }
+
+    #[test]
+    fn messages_round_trip_through_their_own_table() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("Ask");
+        state.sessions[0].push_message(MessageRole::User, "how do I center a div");
+        state.sessions[0].push_message(MessageRole::Assistant, "flexbox");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        let expected = state.sessions[0].messages.clone();
+        store.save(&mut state).unwrap();
+
+        // The JSON column must not carry a second copy that could drift.
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        let data: String = connection
+            .query_row("SELECT data FROM session_details LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            !serde_json::from_str::<serde_json::Value>(&data)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("messages"),
+            "messages live only in their own table"
+        );
+        drop(connection);
+
+        let restored = load_hydrated(&store_in(&directory));
+        let messages = &restored.sessions[0].messages;
+        assert_eq!(messages.len(), expected.len());
+        assert!(expected.len() >= 2, "the turn and both replies are present");
+        for (restored, expected) in messages.iter().zip(&expected) {
+            assert_eq!(restored.id, expected.id);
+            assert_eq!(restored.role, expected.role);
+            assert_eq!(restored.content, expected.content);
+            assert_eq!(restored.turn_id, expected.turn_id);
+            assert_eq!(restored.created_at, expected.created_at);
+            assert_eq!(restored.streaming, expected.streaming);
+        }
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn message_search_reads_skeleton_history_and_prefers_user_matches() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let project_id = state.projects[0].id;
+        let user_match_id = state.sessions[0].id;
+        state.sessions[0].begin_turn("Older user needle at 100%_literal");
+        state.sessions[0].push_message(MessageRole::Assistant, "Newer assistant needle");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+
+        let mut assistant_match =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
+        let assistant_match_id = assistant_match.id;
+        assistant_match.begin_turn("Ordinary prompt");
+        assistant_match.push_message(MessageRole::System, "System needle is private");
+        assistant_match.push_message(MessageRole::Assistant, "Streaming needle");
+        assistant_match.messages.last_mut().unwrap().streaming = true;
+        assistant_match.push_message(MessageRole::Assistant, "Final assistant needle");
+        assistant_match.finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions.push(assistant_match);
+        store.save(&mut state).unwrap();
+
+        let reopened = store_in(&directory);
+        let skeletons = reopened.load().unwrap();
+        assert!(
+            skeletons
+                .sessions
+                .iter()
+                .all(|session| !session.detail_loaded)
+        );
+        assert!(
+            skeletons
+                .sessions
+                .iter()
+                .all(|session| session.messages.is_empty())
+        );
+
+        let matches = reopened.session_message_search("needle".into(), 50)().unwrap();
+        assert_eq!(
+            matches
+                .iter()
+                .map(|matched| (matched.session_id, matched.source))
+                .collect::<Vec<_>>(),
+            vec![
+                (user_match_id, MessageRole::User),
+                (assistant_match_id, MessageRole::Assistant),
+            ]
+        );
+        assert!(matches[0].snippet.contains("user needle"));
+        assert!(matches[1].snippet.contains("Final assistant needle"));
+        assert!(!matches[1].snippet.contains("Streaming"));
+        assert!(!matches[1].snippet.contains("System"));
+        assert_eq!(
+            reopened.session_message_search("100%_literal".into(), 50)()
+                .unwrap()
+                .iter()
+                .map(|matched| matched.session_id)
+                .collect::<Vec<_>>(),
+            vec![user_match_id],
+            "SQL wildcard characters are searched literally"
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn message_search_snippets_center_the_literal_query_and_stay_bounded() {
+        let text = format!("{}100%_needle{}", "before ".repeat(80), " after".repeat(80));
+        let snippet = build_session_search_snippet(&text, "100%_needle");
+        assert!(snippet.starts_with('…'));
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.contains("100%_needle"));
+        assert!(snippet.chars().count() <= SESSION_SEARCH_SNIPPET_CHARS);
+    }
+
+    #[test]
+    fn truncating_a_conversation_drops_the_orphaned_message_rows() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("First");
+        state.sessions[0].push_message(MessageRole::User, "one");
+        state.sessions[0].push_message(MessageRole::Assistant, "two");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        let id = state.sessions[0].id;
+        state.session_mut(id).unwrap().messages.truncate(1);
+        store.save(&mut state).unwrap();
+
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "the tail row was deleted, not left behind");
+        drop(connection);
+
+        assert_eq!(
+            load_hydrated(&store_in(&directory)).sessions[0]
+                .messages
+                .len(),
+            1
+        );
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn deleting_a_session_removes_its_messages() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("Keep");
+        state.sessions[0].push_message(MessageRole::User, "keep me");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        let mut extra = state.new_session(
+            state.projects[0].id,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
+        extra.begin_turn("Remove");
+        extra.push_message(MessageRole::User, "delete me");
+        extra.finish_active_turn(crate::model::TurnStatus::Completed);
+        let removed_id = extra.id;
+        state.sessions.push(extra);
+        store.save(&mut state).unwrap();
+
+        state.sessions.retain(|session| session.id != removed_id);
+        store.save(&mut state).unwrap();
+
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        let orphans: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                params![removed_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_message_edit_alone_marks_the_session_dirty() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("Ask");
+        state.sessions[0].push_message(MessageRole::User, "before");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store.save(&mut state).unwrap();
+
+        // Nothing outside the message list changes, so the session JSON is
+        // identical; only the message row differs.
+        let id = state.sessions[0].id;
+        state.session_mut(id).unwrap().messages[0].content = "after".into();
+        store.save(&mut state).unwrap();
+
+        assert_eq!(
+            load_hydrated(&store_in(&directory)).sessions[0].messages[0].content,
+            "after"
+        );
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn promoted_columns_match_the_json_payload() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].title = "Investigate the parser".into();
+        state.sessions[0].auto_title = Some("Provider fallback".into());
+        state.sessions[0].model = Some("gpt-5.6-luna".into());
+        state.sessions[0].begin_turn("Go");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        let session = state.sessions[0].clone();
+        store.save(&mut state).unwrap();
+
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        let columns = connection
+            .query_row(
+                "SELECT title, auto_title, provider, model, status,
+                        created_at, updated_at, last_reply_at
+                 FROM sessions WHERE id = ?1",
+                params![session.id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let (title, auto_title, provider, model, status, created, updated, last_reply) = columns;
+
+        assert_eq!(title, "Investigate the parser");
+        assert_eq!(auto_title.as_deref(), Some("Provider fallback"));
+        assert_eq!(provider, tag_of(session.provider));
+        assert_eq!(model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(status, tag_of(session.status));
+        assert_eq!(created as u64, session.created_at);
+        assert_eq!(updated as u64, session.updated_at);
+        assert_eq!(last_reply.map(|at| at as u64), session.last_reply_at);
+        assert!(last_reply.is_some(), "a submitted turn sets last_reply_at");
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn last_reply_at_tracks_turn_activity_not_every_edit() {
+        let mut session = AgentSession::new(
+            Uuid::new_v4(),
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
+        assert!(session.last_reply_at.is_none(), "no turn yet");
+
+        session.begin_turn("Ask");
+        let submitted_at = session.last_reply_at.expect("submission recorded");
+        assert_eq!(submitted_at, session.turns.last().unwrap().started_at);
+        session.finish_active_turn(crate::model::TurnStatus::Completed);
+        let replied_at = session.last_reply_at.expect("reply recorded");
+        assert!(replied_at >= submitted_at);
+
+        // A later edit moves updated_at but must not look like a new reply.
+        session.title = "Renamed".into();
+        session.updated_at = replied_at + 500;
+        assert_eq!(session.last_reply_at, Some(replied_at));
+
+        // A second turn moves it immediately, before that turn finishes.
+        session.begin_turn("Again");
+        assert!(session.last_reply_at >= Some(replied_at));
+        session.finish_active_turn(crate::model::TurnStatus::Failed);
+        assert!(session.last_reply_at >= Some(replied_at));
+    }
+
+    #[test]
+    fn sessions_can_be_listed_without_deserializing_transcripts() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("First");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        let mut second = state.new_session(
+            state.projects[0].id,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
+        second.title = "Newer".into();
+        second.begin_turn("Second");
+        second.finish_active_turn(crate::model::TurnStatus::Completed);
+        second.updated_at = state.sessions[0].updated_at + 100;
+        state.sessions.push(second);
+        store.save(&mut state).unwrap();
+
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        let mut statement = connection
+            .prepare("SELECT title FROM sessions ORDER BY updated_at DESC")
+            .unwrap();
+        let titles: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+
+        assert_eq!(titles.first().map(String::as_str), Some("Newer"));
+        assert_eq!(titles.len(), 2);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn reopening_does_not_rewrite_untouched_sessions() {
+        let directory = temporary_directory();
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("Stored");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        store_in(&directory).save(&mut state).unwrap();
+
+        // A fresh store reloads and then saves without any edits in between.
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        assert!(
+            restored.dirty_sessions.is_empty(),
+            "loading marks nothing dirty"
+        );
+
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        connection
+            .execute_batch("UPDATE sessions SET title = 'untouched'")
+            .unwrap();
+        reopened.save(&mut restored).unwrap();
+
+        let title: String = connection
+            .query_row("SELECT title FROM sessions LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            title, "untouched",
+            "no row was rewritten after a plain load"
+        );
+        drop(connection);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn large_images_are_externalized_and_referenced() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let payload = vec![9u8; 64 * 1024];
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&payload)
+        );
+        state.sessions[0].begin_turn("Screenshot");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        let id = state.sessions[0].id;
+        state
+            .session_mut(id)
+            .unwrap()
+            .transcript_blocks
+            .push(TranscriptBlock {
+                after_message: 0,
+                turn_id: None,
+                activities: vec![
+                    ActivityItem::new(None, ActivityKind::Tool, "Screenshot", None, true)
+                        .with_image_urls(vec![data_url]),
+                ],
+            });
+
+        store.save(&mut state).unwrap();
+
+        let restored = load_hydrated(&store_in(&directory));
+        let activities = &restored.sessions[0].transcript_blocks[0].activities;
+        let reference = &activities[0].image_urls[0];
+        assert!(crate::blob_store::is_blob_reference(reference));
+        let path = store.blobs().path_for(reference).unwrap();
+        assert_eq!(fs::read(path).unwrap(), payload);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn blank_sessions_stay_runtime_only() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+
+        store.save(&mut state).unwrap();
+        let restored = store_in(&directory).load().unwrap();
+
+        assert!(restored.sessions.is_empty());
+        assert!(restored.selected_session.is_none());
+        assert_eq!(restored.selected_project, state.selected_project);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn quitting_on_a_draft_relaunches_to_the_new_session_page() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let started_id = state.sessions[0].id;
+        state.sessions[0].begin_turn("Persist this session");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        let draft = state.new_session(
+            state.projects[0].id,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
+        state.selected_session = Some(draft.id);
+        state.sessions.push(draft);
+
+        store.save(&mut state).unwrap();
+        let restored = store_in(&directory).load().unwrap();
+
+        // Only the started session earned a row, and the draft selection was
+        // stored as no selection so launch recreates the new-session page.
+        assert_eq!(restored.sessions.len(), 1);
+        assert_eq!(restored.sessions[0].id, started_id);
+        assert_eq!(restored.selected_session, None);
+
+        let relaunched = store_in(&directory).load_or_fresh(PathBuf::from("/tmp/project"));
+        let selected = relaunched.selected_session.expect("draft selected");
+        assert_ne!(selected, started_id);
+        let session = relaunched
+            .sessions
+            .iter()
+            .find(|session| session.id == selected)
+            .expect("draft exists");
+        assert!(!session.has_started());
+        assert_eq!(session.project_id, relaunched.selected_project.unwrap());
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn deleted_sessions_lose_their_row() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.sessions[0].begin_turn("Keep");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        let mut extra = state.new_session(
+            state.projects[0].id,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
+        extra.begin_turn("Remove");
+        extra.finish_active_turn(crate::model::TurnStatus::Completed);
+        let removed_id = extra.id;
+        state.sessions.push(extra);
+        store.save(&mut state).unwrap();
+
+        state.sessions.retain(|session| session.id != removed_id);
+        store.save(&mut state).unwrap();
+
+        let restored = store_in(&directory).load().unwrap();
+        assert_eq!(restored.sessions.len(), 1);
+        assert!(restored.sessions.iter().all(|s| s.id != removed_id));
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn sessions_without_transcript_blocks_remain_compatible() {
+        let session = AgentSession::new(Uuid::new_v4(), ProviderId::new("grok"));
+        let mut value = serde_json::to_value(session).unwrap();
+        value.as_object_mut().unwrap().remove("transcript_blocks");
+
+        let restored = serde_json::from_value::<AgentSession>(value).unwrap();
+        assert!(restored.transcript_blocks.is_empty());
+    }
+
+    #[test]
+    fn selected_model_and_traits_are_used_for_new_sessions() {
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.last_provider = ProviderId::new("grok");
+        state.last_model = Some("grok-code-fast-1".into());
+        state.last_reasoning_effort = Some("high".into());
+
+        let remembered = state.new_session(state.projects[0].id, ProviderId::new("grok"));
+        let other_provider = state.new_session(
+            state.projects[0].id,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
+
+        assert_eq!(remembered.model.as_deref(), Some("grok-code-fast-1"));
+        assert_eq!(remembered.reasoning_effort.as_deref(), Some("high"));
+        assert!(other_provider.model.is_none());
+        assert!(other_provider.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn model_traits_are_remembered_by_provider_and_model() {
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        state.remember_model_traits(
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+            "gpt-5.6-sol",
+            Some("max".into()),
+            None,
+        );
+
+        assert_eq!(
+            state.model_traits_for(ProviderId::new("anthropic"), "claude-opus-5"),
+            (None, None),
+            "a different provider starts from its own defaults"
+        );
+        assert_eq!(
+            state.model_traits_for(
+                ProviderId::new(ProviderId::OPENAI_RESPONSES),
+                "gpt-5.6-terra"
+            ),
+            (None, None),
+            "a different model starts from its own defaults"
+        );
+        assert_eq!(
+            state.model_traits_for(ProviderId::new(ProviderId::OPENAI_RESPONSES), "gpt-5.6-sol"),
+            (Some("max".into()), None),
+            "switching back restores the explicit choice"
+        );
+    }
+
+    #[test]
+    fn missing_remembered_selection_is_backfilled_from_selected_session() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let id = state.sessions[0].id;
+        state.sessions[0].begin_turn("Started");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        let session = state.session_mut(id).unwrap();
+        session.model = Some("gpt-5.6-luna".into());
+        session.reasoning_effort = Some("xhigh".into());
+        store.save(&mut state).unwrap();
+
+        // Drop the remembered selection from app state, as a file written
+        // before those fields existed would have.
+        let app_state_path = directory.join("state.json");
+        let mut app_state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&app_state_path).unwrap()).unwrap();
+        for key in ["last_model", "last_reasoning_effort"] {
+            app_state.as_object_mut().unwrap().remove(key);
+        }
+        fs::write(&app_state_path, serde_json::to_vec(&app_state).unwrap()).unwrap();
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        reopened.hydrate(&mut restored.sessions[0]).unwrap();
+        restored.backfill_remembered_selection();
+
+        assert_eq!(restored.last_model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(restored.last_reasoning_effort.as_deref(), Some("xhigh"));
+        fs::remove_dir_all(directory).ok();
+    }
+
+    fn identity_snapshot() -> wakuwaku_harness::SessionSnapshot {
+        use std::sync::Arc;
+        use wakuwaku_harness::{
+            AssistantMessage, ContentBlock, Message, QueueMode, StopReason, TextBlock,
+            ThinkingBlock, ToolCall, ToolResult, ToolResultPart, Usage, UserMessage,
+        };
+        let assistant = AssistantMessage {
+            content: vec![
+                ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "plan".into(),
+                    signature: Some("sig-think".into()),
+                    redacted: false,
+                }),
+                ContentBlock::Text(TextBlock {
+                    text: "calling".into(),
+                    signature: Some("sig-text".into()),
+                }),
+                ContentBlock::ToolCall(Arc::new(ToolCall {
+                    id: "call-1|item-9".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path":"src/lib.rs"}),
+                    thought_signature: Some("sig-tool".into()),
+                })),
+            ],
+            model: "claude-opus".into(),
+            provider: "anthropic".into(),
+            response_id: Some("resp-abc".into()),
+            usage: Usage {
+                input: 11,
+                output: 7,
+                cache_read: 3,
+                cache_write: 1,
+                reasoning: Some(2),
+                total_tokens: 22,
+            },
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+        };
+        wakuwaku_harness::Session::with_history(
+            Some("system".into()),
+            vec![
+                Message::User(UserMessage::text("inspect")),
+                Message::Assistant(Arc::new(assistant)),
+                Message::ToolResult(Arc::new(ToolResult {
+                    tool_call_id: "call-1|item-9".into(),
+                    tool_name: "read".into(),
+                    content: vec![ToolResultPart::Text("contents".into())],
+                    is_error: false,
+                    details: None,
+                })),
+            ],
+            vec![3],
+            QueueMode::OneAtATime,
+            wakuwaku_harness::Budget::default(),
+        )
+        .unwrap()
+        .snapshot()
+    }
+
+    fn assert_identity(snapshot: &wakuwaku_harness::SessionSnapshot) {
+        let assistant = snapshot
+            .messages
+            .iter()
+            .find_map(wakuwaku_harness::Message::as_assistant)
+            .expect("assistant");
+        assert_eq!(assistant.response_id.as_deref(), Some("resp-abc"));
+        assert_eq!(assistant.usage.input, 11);
+        assert_eq!(assistant.usage.total_tokens, 22);
+        match &assistant.content[..] {
+            [
+                wakuwaku_harness::ContentBlock::Thinking(thinking),
+                wakuwaku_harness::ContentBlock::Text(text),
+                wakuwaku_harness::ContentBlock::ToolCall(call),
+            ] => {
+                assert_eq!(thinking.signature.as_deref(), Some("sig-think"));
+                assert_eq!(text.signature.as_deref(), Some("sig-text"));
+                assert_eq!(call.id, "call-1|item-9");
+                assert_eq!(call.thought_signature.as_deref(), Some("sig-tool"));
+            }
+            other => panic!("unexpected content: {other:?}"),
+        }
+    }
+
+    fn snapshot_file(directory: &Path, session_id: Uuid) -> PathBuf {
+        directory
+            .join(SNAPSHOTS_DIRECTORY)
+            .join(format!("{session_id}.json"))
+    }
+
+    fn session_detail(directory: &Path, session_id: Uuid) -> serde_json::Value {
+        let connection = Connection::open(directory.join("app.db")).unwrap();
+        let data: String = connection
+            .query_row(
+                "SELECT data FROM session_details WHERE session_id = ?1",
+                params![session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&data).unwrap()
+    }
+
+    fn started_session(state: &mut PersistedState) -> Uuid {
+        let session_id = state.sessions[0].id;
+        state.sessions[0].begin_turn("inspect");
+        state.sessions[0].push_message(MessageRole::Assistant, "calling");
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        session_id
+    }
+
+    #[test]
+    fn restart_hydrate_preserves_harness_response_usage_and_signatures() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let session_id = started_session(&mut state);
+        store
+            .persist_harness_snapshot(session_id, identity_snapshot())
+            .unwrap();
+        store.save(&mut state).unwrap();
+
+        let path = snapshot_file(&directory, session_id);
+        assert!(path.is_file());
+        assert!(
+            session_detail(&directory, session_id)
+                .get("harnessSnapshot")
+                .is_none()
+        );
+
+        let reopened = store_in(&directory);
+        let mut restored = reopened.load().unwrap();
+        reopened.hydrate(&mut restored.sessions[0]).unwrap();
+        assert!(reopened.harness_snapshot(session_id).is_none());
+        let loaded = reopened
+            .load_harness_snapshot(session_id)
+            .unwrap()
+            .expect("stored snapshot");
+        assert_identity(&loaded);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn a_save_without_an_in_memory_snapshot_does_not_wipe_the_stored_one() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let session_id = started_session(&mut state);
+        store
+            .persist_harness_snapshot(session_id, identity_snapshot())
+            .unwrap();
+        store.save(&mut state).unwrap();
+
+        let reader = store_in(&directory);
+        let mut hydrated = reader.load().unwrap();
+        reader.hydrate(&mut hydrated.sessions[0]).unwrap();
+
+        let writer = store_in(&directory);
+        let mut other = writer.load().unwrap();
+        other.sessions[0] = hydrated.sessions[0].clone();
+        other.mark_session_dirty(session_id);
+        writer.save(&mut other).unwrap();
+
+        let checked = store_in(&directory);
+        let loaded = checked
+            .load_harness_snapshot(session_id)
+            .unwrap()
+            .expect("stored snapshot");
+        assert_identity(&loaded);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn ui_saves_do_not_rewrite_snapshot_files() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let session_id = started_session(&mut state);
+        store
+            .persist_harness_snapshot(session_id, identity_snapshot())
+            .unwrap();
+        store.save(&mut state).unwrap();
+
+        let path = snapshot_file(&directory, session_id);
+        let before = fs::read(&path).unwrap();
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+        state.mark_session_dirty(session_id);
+        store.save(&mut state).unwrap();
+        state.mark_session_dirty(session_id);
+        store.save(&mut state).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+        assert!(
+            session_detail(&directory, session_id)
+                .get("harnessSnapshot")
+                .is_none()
+        );
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn malformed_snapshot_json_is_an_error_not_absence() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let session_id = Uuid::new_v4();
+        let path = snapshot_file(&directory, session_id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{").unwrap();
+
+        let error = store.load_harness_snapshot(session_id).unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn snapshot_sweep_deletes_stale_orphans_and_keeps_live_files() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let live_id = started_session(&mut state);
+        store
+            .persist_harness_snapshot(live_id, identity_snapshot())
+            .unwrap();
+        store.save(&mut state).unwrap();
+
+        let orphan_id = Uuid::new_v4();
+        let recent_id = Uuid::new_v4();
+        let orphan = snapshot_file(&directory, orphan_id);
+        let recent = snapshot_file(&directory, recent_id);
+        fs::write(&orphan, b"{}").unwrap();
+        fs::write(&recent, b"{}").unwrap();
+        let past = SystemTime::now() - SNAPSHOT_SWEEP_GRACE_PERIOD - Duration::from_secs(60 * 60);
+        fs::File::options()
+            .write(true)
+            .open(&orphan)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+
+        store.blob_sweep()();
+
+        assert!(snapshot_file(&directory, live_id).is_file());
+        assert!(!orphan.is_file());
+        assert!(recent.is_file());
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn removing_a_session_unlinks_its_snapshot_after_commit() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let session_id = started_session(&mut state);
+        store
+            .persist_harness_snapshot(session_id, identity_snapshot())
+            .unwrap();
+        store.save(&mut state).unwrap();
+        assert!(snapshot_file(&directory, session_id).is_file());
+
+        state.sessions.clear();
+        store.save(&mut state).unwrap();
+        assert!(!snapshot_file(&directory, session_id).exists());
+        assert!(store.load_harness_snapshot(session_id).unwrap().is_none());
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn usage_events_insert_once_and_skip_zero_tokens() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let event = crate::usage_history::UsageEvent {
+            event_id: Uuid::from_u128(7),
+            session_id: Uuid::from_u128(8),
+            project_path: "/tmp/project".into(),
+            provider: ProviderId::new("anthropic"),
+            model: "claude-fable-5".into(),
+            timestamp_ms: 1_700_000_000_000,
+            input: 3,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: None,
+        };
+        assert!(store.insert_usage_event(&event).unwrap());
+        assert!(!store.insert_usage_event(&event).unwrap());
+        let zero = crate::usage_history::UsageEvent {
+            input: 0,
+            output: 0,
+            event_id: Uuid::from_u128(9),
+            ..event.clone()
+        };
+        assert!(!store.insert_usage_event(&zero).unwrap());
+        let rows = store
+            .usage_events_between(1_700_000_000_000, 1_700_000_000_000)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id, event.event_id);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn usage_events_survive_session_removal_and_store_reopen() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
+        let session_id = state.sessions[0].id;
+        let event = crate::usage_history::UsageEvent {
+            event_id: Uuid::from_u128(11),
+            session_id,
+            project_path: "/tmp/project".into(),
+            provider: ProviderId::new("openai-responses"),
+            model: "gpt-5.3".into(),
+            timestamp_ms: 1_700_000_000_100,
+            input: 2,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: None,
+        };
+        store.save(&mut state).unwrap();
+        assert!(store.insert_usage_event(&event).unwrap());
+        state.sessions.clear();
+        store.save(&mut state).unwrap();
+        let reader = store_in(&directory);
+        let rows = reader.usage_events_between(0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id, event.event_id);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn usage_events_keep_independent_provider_rows() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        for (index, provider) in ["anthropic", "openai-responses", "xai"]
+            .into_iter()
+            .enumerate()
+        {
+            let event = crate::usage_history::UsageEvent {
+                event_id: Uuid::from_u128(20 + index as u128),
+                session_id: Uuid::from_u128(30),
+                project_path: "/tmp/project".into(),
+                provider: ProviderId::new(provider),
+                model: "model".into(),
+                timestamp_ms: 1_700_000_000_200 + index as i64,
+                input: 1,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: None,
+            };
+            assert!(store.insert_usage_event(&event).unwrap());
+        }
+        let rows = store.usage_events_between(0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 3);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn app_bundle_root_directory_starts_with_onboarding() {
+        let directory = temporary_directory();
+        let state = store_in(&directory).load_or_fresh(PathBuf::from("/"));
+        assert!(state.projects.is_empty());
+        assert!(state.selected_session.is_none());
+        fs::remove_dir_all(directory).ok();
+    }
+}

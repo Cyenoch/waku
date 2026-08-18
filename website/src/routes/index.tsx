@@ -65,7 +65,7 @@ const FEATURES = [
   {
     icon: HardDrive,
     title: 'Local by architecture',
-    body: 'Projects, sessions, and transcripts live on your disk. No account, no telemetry, no Waku cloud between you and the model.',
+    body: 'Projects, sessions, and transcripts live on your disk. No account, no telemetry, no WakuWaku cloud between you and the model.',
   },
   {
     icon: RefreshCw,
@@ -77,7 +77,7 @@ const FEATURES = [
 const FAQ = [
   {
     q: 'Is this another Electron app?',
-    a: 'No. Waku is a single Rust binary rendered by GPUI, the UI framework Zed is built on. The window you see is drawn by the GPU, not by a browser engine.',
+    a: 'No. WakuWaku is a single Rust binary rendered by GPUI, the UI framework Zed is built on. The window you see is drawn by the GPU, not by a browser engine.',
   },
   {
     q: 'Do I need new API keys?',
@@ -85,11 +85,11 @@ const FAQ = [
   },
   {
     q: 'Where does my data live?',
-    a: 'On your machine. Projects, sessions, transcripts, and provider session IDs are stored locally. There is no Waku account and no telemetry.',
+    a: 'On your machine. Projects, sessions, transcripts, and provider session IDs are stored locally. There is no WakuWaku account and no telemetry.',
   },
   {
     q: 'What about Windows?',
-    a: 'Still planned. Waku runs natively on macOS and Linux today.',
+    a: 'Still planned. WakuWaku runs natively on macOS and Linux today.',
   },
   {
     q: 'What is the future plan?',
@@ -143,7 +143,7 @@ function DownloadMenu({
               macOS (Apple Silicon)
             </Menu.LinkItem>
             <Menu.LinkItem
-              href="https://github.com/egoist/waku/blob/main/docs/linux.md"
+              href="https://github.com/Cyenoch/WakuWaku/blob/main/docs/linux.md"
               target="_blank"
               rel="noreferrer"
               closeOnClick
@@ -178,12 +178,12 @@ function Home() {
                 className="size-8 rounded-[6px]"
               />
               <span className="text-[15px] font-semibold tracking-tight">
-                Waku
+                WakuWaku
               </span>
             </a>
             <div className="flex items-center gap-5">
               <a
-                href="https://github.com/egoist/waku"
+                href="https://github.com/Cyenoch/WakuWaku"
                 target="_blank"
                 rel="noreferrer"
                 aria-label="GitHub"
@@ -221,7 +221,7 @@ function Home() {
                 A native coding agent with a built-in Rust harness.
               </h1>
               <p className="mt-5 max-w-[36rem] text-[17px] leading-relaxed text-pretty text-muted-foreground">
-                Waku talks to HTTP model endpoints — sessions,
+                WakuWaku talks to HTTP model endpoints — sessions,
                 transcripts, tool activity, and checkpoints in one fast
                 graphite window, entirely on your machine.
               </p>
@@ -279,7 +279,7 @@ function Home() {
                 />
                 <img
                   src="/app-screenshot-light.png"
-                  alt="Waku showing a coding session"
+                  alt="WakuWaku showing a coding session"
                   width={2266}
                   height={1752}
                   className="block h-auto w-full"
@@ -311,7 +311,7 @@ function Home() {
             <section id="download" className="border-t px-5 py-16 md:px-10 md:py-20">
               <SectionLabel>Download</SectionLabel>
               <h2 className="mt-3 text-2xl font-semibold tracking-tight">
-                Get Waku
+                Get WakuWaku
               </h2>
               <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3">
                 <DownloadMenu
@@ -354,7 +354,7 @@ function Home() {
               alt=""
               className="size-4 rounded-[4px] opacity-80 grayscale"
             />
-            <span>© 2026 Waku</span>
+            <span>© 2026 WakuWaku</span>
           </footer>
         </div>
       </div>
