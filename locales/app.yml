@@ -310,6 +310,45 @@ common.retry:
   en: Retry
 common.creating:
   en: Creating…
+common.continue:
+  en: Continue
+common.delete:
+  en: Delete
+common.edit:
+  en: Edit
+common.save:
+  en: Save
+
+providers.add:
+  en: Add provider
+providers.configure_first:
+  en: Configure a provider before choosing a model.
+providers.connected:
+  en: Connected
+providers.api_format:
+  en: API format
+providers.edit_title:
+  en: Edit provider
+providers.id:
+  en: Provider ID
+providers.name:
+  en: Name
+providers.base_url:
+  en: Base URL
+providers.api_key_env:
+  en: API key environment variable
+providers.models:
+  en: Models
+providers.context_window:
+  en: Context window
+providers.max_output_tokens:
+  en: Maximum output tokens
+providers.headers:
+  en: Additional headers
+providers.invalid_configuration:
+  en: Provider configuration is invalid or incomplete
+providers.device_code:
+  en: "Enter %{code} at %{url}"
 
 settings.local_by_default:
   en: Local by default

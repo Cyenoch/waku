@@ -152,6 +152,26 @@ common.reset: 重置
 common.revoke: 撤销授权
 common.retry: 重试
 common.creating: 正在创建…
+common.continue: 继续
+common.delete: 删除
+common.edit: 编辑
+common.save: 保存
+
+providers.add: 添加服务商
+providers.configure_first: 请先配置服务商，再选择模型
+providers.connected: 已连接
+providers.api_format: API 格式
+providers.edit_title: 编辑服务商
+providers.id: 服务商 ID
+providers.name: 名称
+providers.base_url: 基础 URL
+providers.api_key_env: API 密钥环境变量
+providers.models: 模型
+providers.context_window: 上下文窗口
+providers.max_output_tokens: 最大输出 token 数
+providers.headers: 附加请求头
+providers.invalid_configuration: 服务商配置无效或不完整
+providers.device_code: "请在 %{url} 输入 %{code}"
 settings.local_by_default: 默认存储在本地
 settings.local_by_default_description: 项目、对话和设置均存储在这台 Mac 上
 settings.local_by_default_web_description: 项目、对话和附件保留在所连接的守护进程主机上。Waku Web 的偏好设置保留在此浏览器中。

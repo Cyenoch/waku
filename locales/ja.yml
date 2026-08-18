@@ -158,6 +158,26 @@ common.reset: リセット
 common.revoke: 許可を解除
 common.retry: 再試行
 common.creating: 作成中…
+common.continue: 続行
+common.delete: 削除
+common.edit: 編集
+common.save: 保存
+
+providers.add: プロバイダーを追加
+providers.configure_first: モデルを選ぶ前にプロバイダーを設定してください
+providers.connected: 接続済み
+providers.api_format: API 形式
+providers.edit_title: プロバイダーを編集
+providers.id: プロバイダー ID
+providers.name: 名前
+providers.base_url: ベース URL
+providers.api_key_env: API キーの環境変数
+providers.models: モデル
+providers.context_window: コンテキストウインドウ
+providers.max_output_tokens: 最大出力トークン数
+providers.headers: 追加ヘッダー
+providers.invalid_configuration: プロバイダーの設定が無効または不完全です
+providers.device_code: "%{url} で %{code} を入力"
 
 settings.local_by_default: デフォルトでローカルに保存
 settings.local_by_default_description: プロジェクト、会話、設定はこの Mac に保存されます

@@ -1501,81 +1501,105 @@ impl Waku {
 
     fn render_providers_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
-        let providers = &self.state.external_providers;
         let editing = self.expanded_provider_settings.clone();
-        let builtin_cards = self.render_builtin_provider_cards(cx);
-        let mut rows = div().mt(px(12.0)).flex().flex_col().gap(px(8.0));
-        if providers.is_empty() {
-            rows = rows.child(
-                div()
-                    .p(px(18.0))
-                    .rounded(px(10.0))
-                    .bg(theme.raised)
-                    .text_color(theme.text_secondary)
-                    .child(tr!("providers.configure_first")),
-            );
-        }
-        for provider in providers {
+        div()
+            .mt(px(15.0))
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(self.render_builtin_provider_cards(cx))
+            .child(self.render_custom_provider_list(theme, cx))
+            .children(editing.map(|provider_id| self.render_provider_form(provider_id, theme, cx)))
+            .into_any_element()
+    }
+
+    fn render_custom_provider_list(&self, theme: Theme, cx: &mut Context<Self>) -> Div {
+        let add = settings_row_action(
+            "add-provider",
+            tr!("providers.add"),
+            theme.text_secondary,
+            theme,
+        )
+        .on_click(cx.listener(|this, _, _, cx| this.begin_provider_edit(None, cx)))
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            if !event.keystroke.modifiers.modified()
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
+                this.begin_provider_edit(None, cx);
+                cx.stop_propagation();
+            }
+        }));
+        let mut group = settings_group(theme).child(
+            div()
+                .w_full()
+                .min_h(px(60.0))
+                .px(px(20.0))
+                .py(px(12.0))
+                .flex()
+                .items_center()
+                .gap(px(24.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_size(px(12.5))
+                        .line_height(px(18.0))
+                        .text_color(theme.text_secondary)
+                        .child(tr!("providers.description")),
+                )
+                .child(add),
+        );
+        for provider in &self.state.external_providers {
             let id = provider.id.clone();
             let id_for_edit = id.clone();
             let id_for_edit_keyboard = id.clone();
             let id_for_delete = id.clone();
-            let is_editing = editing.as_ref() == Some(&id);
-            let label = format!("{} · {}", provider.name, provider.default_model);
-            rows = rows.child(
-                div()
-                    .p(px(14.0))
-                    .rounded(px(10.0))
-                    .bg(theme.raised)
-                    .border_1()
-                    .border_color(if is_editing {
-                        theme.accent
-                    } else {
-                        theme.border
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.0))
-                            .child(icon("icons/bot.svg", 16.0, theme.text_secondary))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(div().text_color(theme.text).child(label)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .text_color(theme.text_tertiary)
-                                    .child(SharedString::from(format!(
-                                        "{} · {}",
-                                        provider.id, provider.api_format
-                                    ))),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("edit-provider-{}", id)))
-                                    .tab_index(0)
-                                    .focus_visible(|style| {
-                                        style.border_1().border_color(theme.accent)
-                                    })
-                                    .px(px(8.0))
-                                    .py(px(5.0))
-                                    .rounded(px(6.0))
-                                    .text_color(theme.text_secondary)
-                                    .hover(|element| element.bg(theme.overlay))
-                                    .child(tr!("common.edit"))
+            let detail = if provider.default_model.is_empty() {
+                format!(
+                    "{} · {}",
+                    provider.base_url,
+                    tr!("providers.catalog_models")
+                )
+            } else {
+                format!("{} · {}", provider.base_url, provider.default_model)
+            };
+            group = group
+                .child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border))
+                .child(
+                    div()
+                        .w_full()
+                        .min_h(px(60.0))
+                        .px(px(20.0))
+                        .py(px(12.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(24.0))
+                        .child(settings_row_copy(theme, provider.name.clone(), detail))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    settings_row_action(
+                                        SharedString::from(format!("edit-provider-{id}")),
+                                        tr!("common.edit"),
+                                        theme.text_secondary,
+                                        theme,
+                                    )
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.begin_provider_edit(Some(id_for_edit.clone()), cx);
                                     }))
                                     .on_key_down(cx.listener(
                                         move |this, event: &KeyDownEvent, _, cx| {
-                                            if matches!(
-                                                event.keystroke.key.as_str(),
-                                                "enter" | "space"
-                                            ) {
+                                            if !event.keystroke.modifiers.modified()
+                                                && matches!(
+                                                    event.keystroke.key.as_str(),
+                                                    "enter" | "space"
+                                                )
+                                            {
                                                 this.begin_provider_edit(
                                                     Some(id_for_edit_keyboard.clone()),
                                                     cx,
@@ -1584,216 +1608,185 @@ impl Waku {
                                             }
                                         },
                                     )),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "delete-provider-{}",
-                                        id_for_delete
-                                    )))
-                                    .tab_index(0)
-                                    .focus_visible(|style| {
-                                        style.border_1().border_color(theme.accent)
-                                    })
-                                    .px(px(8.0))
-                                    .py(px(5.0))
-                                    .rounded(px(6.0))
-                                    .text_color(theme.danger)
-                                    .hover(|element| element.bg(theme.overlay))
-                                    .child(tr!("common.delete"))
+                                )
+                                .child(
+                                    settings_row_action(
+                                        SharedString::from(format!(
+                                            "delete-provider-{id_for_delete}"
+                                        )),
+                                        tr!("common.delete"),
+                                        theme.danger,
+                                        theme,
+                                    )
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.delete_provider(&id_for_delete, cx);
                                     }))
                                     .on_key_down(cx.listener(
                                         move |this, event: &KeyDownEvent, _, cx| {
-                                            if matches!(
-                                                event.keystroke.key.as_str(),
-                                                "enter" | "space"
-                                            ) {
+                                            if !event.keystroke.modifiers.modified()
+                                                && matches!(
+                                                    event.keystroke.key.as_str(),
+                                                    "enter" | "space"
+                                                )
+                                            {
                                                 this.delete_provider(&id, cx);
                                                 cx.stop_propagation();
                                             }
                                         },
                                     )),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt(px(5.0))
-                            .text_size(px(10.5))
-                            .text_color(theme.text_tertiary)
-                            .child(SharedString::from(provider.base_url.clone())),
-                    ),
-            );
-        }
-        let add = div()
-            .id("add-provider")
-            .tab_index(0)
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
-            .px(px(11.0))
-            .py(px(7.0))
-            .rounded(px(7.0))
-            .bg(theme.accent)
-            .text_color(theme.text)
-            .hover(|element| element.opacity(0.9))
-            .child(tr!("providers.add"))
-            .on_click(cx.listener(|this, _, _, cx| this.begin_provider_edit(None, cx)))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.begin_provider_edit(None, cx);
-                    cx.stop_propagation();
-                }
-            }));
-        let form = editing.map(|provider_id| self.render_provider_form(provider_id, theme, cx));
-        div()
-            .w_full()
-            .px(px(20.0))
-            .py(px(16.0))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(px(20.0))
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            div()
-                                .text_size(px(15.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(tr!("providers.title"))
-                                .child(
-                                    div()
-                                        .mt(px(5.0))
-                                        .text_size(px(12.0))
-                                        .line_height(px(18.0))
-                                        .text_color(theme.text_secondary)
-                                        .child(tr!("providers.config_description")),
                                 ),
                         ),
-                    )
-                    .child(add),
-            )
-            .child(builtin_cards)
-            .child(rows)
-            .children(form)
-            .into_any_element()
+                );
+        }
+        group
     }
 
     fn render_builtin_provider_cards(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
-        let mut cards = div().mt(px(12.0)).flex().flex_col().gap(px(8.0));
-        for preset in waku_client::ProviderPreset::ALL {
+        let mut group = settings_group(theme);
+        for (index, preset) in waku_client::ProviderPreset::ALL.into_iter().enumerate() {
+            if index > 0 {
+                group = group.child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border));
+            }
             let provider = preset.provider_id();
             let auth = self.auth_statuses.get(&provider);
-            let status = auth
-                .map(|value| format!("{:?}", value.method))
-                .unwrap_or_else(|| tr!("providers.not_authenticated").to_string());
-            let methods = preset_login_methods(preset.id());
-            let mut logins = div().flex().items_center().gap(px(6.0));
-            for method in methods {
-                let login_provider = provider.clone();
-                let key_provider = provider.clone();
-                let method = *method;
-                logins = logins.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "login-provider-{}-{}",
-                            preset.id(),
-                            method as u8
-                        )))
-                        .tab_index(0)
-                        .focus_visible(|style| style.border_1().border_color(theme.accent))
-                        .px(px(8.0))
-                        .py(px(5.0))
-                        .rounded(px(6.0))
-                        .text_color(theme.text_secondary)
-                        .hover(|element| element.bg(theme.overlay))
-                        .child(login_method_label(method))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.start_provider_login(login_provider.clone(), method, cx)
-                        }))
-                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                            if !event.keystroke.modifiers.modified()
-                                && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                            {
-                                this.start_provider_login(key_provider.clone(), method, cx);
-                                cx.stop_propagation();
-                            }
-                        })),
-                );
-            }
-            let logout_provider = provider.clone();
-            let logout_key_provider = provider.clone();
-            let logout = div()
-                .id(SharedString::from(format!(
-                    "logout-provider-{}",
-                    preset.id()
-                )))
-                .tab_index(0)
-                .focus_visible(|style| style.border_1().border_color(theme.accent))
-                .px(px(8.0))
-                .py(px(5.0))
-                .rounded(px(6.0))
-                .text_color(theme.danger)
-                .hover(|element| element.bg(theme.overlay))
-                .child(tr!("providers.logout"))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.logout_provider(logout_provider.clone(), cx)
-                }))
-                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                    if !event.keystroke.modifiers.modified()
-                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                    {
-                        this.logout_provider(logout_key_provider.clone(), cx);
-                        cx.stop_propagation();
-                    }
-                }));
-            let mut card = div()
-                .p(px(14.0))
-                .rounded(px(10.0))
-                .bg(theme.raised)
-                .border_1()
-                .border_color(theme.border)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .child(icon("icons/bot.svg", 16.0, theme.text_secondary))
-                        .child(
-                            div()
-                                .flex_1()
-                                .child(div().text_color(theme.text).child(preset.display_name())),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme.text_secondary)
-                                .child(status),
-                        )
-                        .child(logins)
-                        .child(logout),
-                );
-            if let Some(phase) = self
+            let status = auth_status_label(auth);
+            let phase = self
                 .auth_phases
                 .iter()
-                .find(|phase| phase.provider() == Some(&provider))
-            {
+                .find(|phase| phase.provider() == Some(&provider));
+            let row_actions = provider_row_actions(
+                auth.map(|status| status.method),
+                phase,
+                self.auth_pending.contains(&provider),
+            );
+            let methods = preset_login_methods(preset.id());
+            let mut actions = div().flex().items_center().gap(px(6.0));
+            match row_actions {
+                ProviderRowActions::Login => {
+                    for method in methods {
+                        let login_provider = provider.clone();
+                        let key_provider = provider.clone();
+                        let method = *method;
+                        actions = actions.child(
+                            settings_row_action(
+                                SharedString::from(format!(
+                                    "login-provider-{}-{}",
+                                    preset.id(),
+                                    method as u8
+                                )),
+                                login_method_label(method),
+                                theme.text_secondary,
+                                theme,
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.start_provider_login(login_provider.clone(), method, cx)
+                            }))
+                            .on_key_down(cx.listener(
+                                move |this, event: &KeyDownEvent, _, cx| {
+                                    if !event.keystroke.modifiers.modified()
+                                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                    {
+                                        this.start_provider_login(key_provider.clone(), method, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            )),
+                        );
+                    }
+                }
+                ProviderRowActions::Logout => {
+                    let logout_provider = provider.clone();
+                    let logout_key_provider = provider.clone();
+                    actions = actions.child(
+                        settings_row_action(
+                            SharedString::from(format!("logout-provider-{}", preset.id())),
+                            tr!("providers.logout"),
+                            theme.danger,
+                            theme,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.logout_provider(logout_provider.clone(), cx)
+                        }))
+                        .on_key_down(cx.listener(
+                            move |this, event: &KeyDownEvent, _, cx| {
+                                if !event.keystroke.modifiers.modified()
+                                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                {
+                                    this.logout_provider(logout_key_provider.clone(), cx);
+                                    cx.stop_propagation();
+                                }
+                            },
+                        )),
+                    );
+                }
+                ProviderRowActions::Pending => {
+                    if let Some(login_id) = phase.and_then(waku_client::AuthPhase::login_id) {
+                        actions = actions.child(
+                            settings_row_action(
+                                SharedString::from(format!(
+                                    "cancel-provider-login-{}",
+                                    preset.id()
+                                )),
+                                tr!("common.cancel"),
+                                theme.text_secondary,
+                                theme,
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.cancel_provider_login(login_id, cx)
+                            }))
+                            .on_key_down(cx.listener(
+                                move |this, event: &KeyDownEvent, _, cx| {
+                                    if !event.keystroke.modifiers.modified()
+                                        && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                    {
+                                        this.cancel_provider_login(login_id, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            )),
+                        );
+                    }
+                }
+            }
+            let mut row = div()
+                .w_full()
+                .min_h(px(60.0))
+                .px(px(20.0))
+                .py(px(12.0))
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(24.0))
+                        .child(settings_row_copy(theme, preset.display_name(), status))
+                        .child(actions),
+                );
+            if let Some(phase) = phase {
                 if let waku_client::AuthPhase::AwaitingApiKey { .. } = phase {
                     let api_provider = provider.clone();
                     let api_key_provider = provider.clone();
-                    card = card
-                        .child(
-                            TextField::new("provider-api-key", self.auth_api_key_input.clone())
-                                .w_full(),
-                        )
-                        .child(
-                            div()
-                                .id("complete-provider-api-key")
-                                .tab_index(0)
-                                .focus_visible(|style| style.border_1().border_color(theme.accent))
-                                .px(px(8.0))
-                                .py(px(5.0))
-                                .child(tr!("common.continue"))
+                    row = row.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                TextField::new("provider-api-key", self.auth_api_key_input.clone())
+                                    .flex_1(),
+                            )
+                            .child(
+                                settings_row_action(
+                                    "complete-provider-api-key",
+                                    tr!("common.continue"),
+                                    theme.text_secondary,
+                                    theme,
+                                )
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.complete_api_key_login(api_provider.clone(), cx)
                                 }))
@@ -1813,48 +1806,26 @@ impl Waku {
                                         }
                                     },
                                 )),
-                        );
-                }
-                if let Some(login_id) = phase.login_id().filter(|_| {
-                    matches!(
-                        phase,
-                        waku_client::AuthPhase::AwaitingBrowser { .. }
-                            | waku_client::AuthPhase::AwaitingDevice { .. }
-                            | waku_client::AuthPhase::AwaitingApiKey { .. }
-                    )
-                }) {
-                    card = card.child(
-                        div()
-                            .id("cancel-provider-login")
-                            .tab_index(0)
-                            .focus_visible(|style| style.border_1().border_color(theme.accent))
-                            .px(px(8.0))
-                            .py(px(5.0))
-                            .child(tr!("common.cancel"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.cancel_provider_login(login_id, cx)
-                            }))
-                            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                                if !event.keystroke.modifiers.modified()
-                                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                                {
-                                    this.cancel_provider_login(login_id, cx);
-                                    cx.stop_propagation();
-                                }
-                            })),
+                            ),
                     );
                 }
-                card = card.child(
-                    div()
-                        .mt(px(5.0))
-                        .text_size(px(11.0))
-                        .text_color(theme.text_secondary)
-                        .child(auth_phase_summary(phase)),
-                );
+                let summary = auth_phase_summary(phase);
+                if !summary.is_empty() {
+                    row = row.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_size(px(12.5))
+                            .line_height(px(18.0))
+                            .text_color(theme.text_secondary)
+                            .child(summary),
+                    );
+                }
             }
-            cards = cards.child(card);
+            group = group.child(row);
         }
-        cards
+        group
     }
 
     fn provider_field(
@@ -1901,25 +1872,22 @@ impl Waku {
                     .child(tr!("providers.api_format")),
             )
             .child(
-                div()
-                    .id("provider-api-format")
-                    .tab_index(0)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
-                    .px(px(9.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .bg(theme.overlay)
-                    .text_color(theme.text)
-                    .child(format.to_string())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let index = api_formats
-                            .iter()
-                            .position(|candidate| *candidate == this.provider_api_format)
-                            .unwrap_or(0);
-                        this.provider_api_format = api_formats[(index + 1) % api_formats.len()];
-                        cx.notify();
-                    }))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                settings_row_action(
+                    "provider-api-format",
+                    format.as_str(),
+                    theme.text_secondary,
+                    theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let index = api_formats
+                        .iter()
+                        .position(|candidate| *candidate == this.provider_api_format)
+                        .unwrap_or(0);
+                    this.provider_api_format = api_formats[(index + 1) % api_formats.len()];
+                    cx.notify();
+                }))
+                .on_key_down(cx.listener(
+                    move |this, event: &KeyDownEvent, _, cx| {
                         if !event.keystroke.modifiers.modified()
                             && matches!(event.keystroke.key.as_str(), "enter" | "space")
                         {
@@ -1931,66 +1899,70 @@ impl Waku {
                             cx.notify();
                             cx.stop_propagation();
                         }
-                    })),
+                    },
+                )),
             );
         let save_id = provider_id.clone();
         let save_key_id = provider_id.clone();
-        let save = div()
-            .id("save-provider")
-            .tab_index(0)
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
-            .px(px(10.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .bg(theme.accent)
-            .text_color(theme.text)
-            .child(tr!("common.save"))
-            .on_click(cx.listener(move |this, _, _, cx| this.save_provider(&save_id, cx)))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if !event.keystroke.modifiers.modified()
-                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                {
-                    this.save_provider(&save_key_id, cx);
-                    cx.stop_propagation();
-                }
-            }));
-        let cancel = div()
-            .id("cancel-provider")
-            .tab_index(0)
-            .focus_visible(|style| style.border_1().border_color(theme.accent))
-            .px(px(10.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .text_color(theme.text_secondary)
-            .hover(|element| element.bg(theme.overlay))
-            .child(tr!("common.cancel"))
-            .on_click(cx.listener(move |this, _, _, cx| {
+        let save = settings_row_action(
+            "save-provider",
+            tr!("common.save"),
+            theme.text_secondary,
+            theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.save_provider(&save_id, cx)))
+        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+            if !event.keystroke.modifiers.modified()
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
+                this.save_provider(&save_key_id, cx);
+                cx.stop_propagation();
+            }
+        }));
+        let cancel = settings_row_action(
+            "cancel-provider",
+            tr!("common.cancel"),
+            theme.text_secondary,
+            theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.expanded_provider_settings = None;
+            this.clear_provider_form(cx);
+            cx.notify();
+        }))
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            if !event.keystroke.modifiers.modified()
+                && matches!(event.keystroke.key.as_str(), "enter" | "space")
+            {
                 this.expanded_provider_settings = None;
                 this.clear_provider_form(cx);
                 cx.notify();
-            }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if !event.keystroke.modifiers.modified()
-                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                {
-                    this.expanded_provider_settings = None;
-                    this.clear_provider_form(cx);
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-            }));
-        let models_hint = existing.map(|provider| provider.models.len()).unwrap_or(0);
+                cx.stop_propagation();
+            }
+        }));
+        let models_label = match existing.map(|provider| provider.models.len()).unwrap_or(0) {
+            0 => tr!("providers.models"),
+            1 => tr!("providers.model_count_one", count = 1),
+            count => tr!("providers.model_count_many", count = count),
+        };
         div()
-            .mt(px(10.0))
-            .p(px(14.0))
-            .rounded(px(10.0))
-            .bg(theme.surface)
+            .w_full()
+            .flex()
+            .flex_col()
+            .px(px(20.0))
+            .py(px(15.0))
+            .rounded(px(13.0))
+            .bg(theme.raised)
             .child(
                 div()
-                    .text_size(px(12.5))
+                    .text_size(px(13.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(tr!("providers.edit_title")),
+                    .child(if existing.is_some() {
+                        tr!("providers.edit_title")
+                    } else {
+                        tr!("providers.add")
+                    }),
             )
             .child(
                 div()
@@ -2047,7 +2019,7 @@ impl Waku {
                     .child(self.provider_field(
                         "provider-models",
                         self.provider_model_input.clone(),
-                        format!("{} ({models_hint})", tr!("providers.models")),
+                        models_label,
                         theme,
                     ))
                     .child(self.provider_field(
@@ -2654,6 +2626,9 @@ impl Waku {
         let generation = self.auth_generation;
         self.auth_pending.insert(provider.clone());
         self.clear_auth_api_key(cx);
+        self.auth_api_key_input.update(cx, |input, cx| {
+            input.set_placeholder(tr!("providers.api_key_placeholder"), cx);
+        });
         let pending_provider = provider.clone();
         let client = self.daemon.client();
         cx.spawn(async move |this, cx| {
@@ -2784,6 +2759,133 @@ impl Waku {
         .detach();
     }
 }
+fn settings_group(theme: Theme) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .rounded(px(13.0))
+        .overflow_hidden()
+        .bg(theme.raised)
+}
+
+fn settings_row_copy(
+    theme: Theme,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .child(
+            div()
+                .text_size(px(13.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .mt(px(5.0))
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.5))
+                .line_height(px(18.0))
+                .text_color(theme.text_secondary)
+                .child(description.into()),
+        )
+}
+
+fn settings_row_action(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    color: gpui::Hsla,
+    theme: Theme,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .tab_index(0)
+        .h(px(27.0))
+        .px(px(9.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(theme.border_strong)
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_none()
+        .cursor_default()
+        .text_size(px(10.5))
+        .text_color(color)
+        .focus_visible(|style| style.border_color(theme.accent))
+        .hover(|element| element.bg(theme.overlay))
+        .child(label.into())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderRowActions {
+    Login,
+    Logout,
+    Pending,
+}
+
+fn provider_row_actions(
+    method: Option<waku_client::AuthMethod>,
+    phase: Option<&waku_client::AuthPhase>,
+    login_in_flight: bool,
+) -> ProviderRowActions {
+    if login_in_flight
+        || matches!(
+            phase,
+            Some(
+                waku_client::AuthPhase::AwaitingBrowser { .. }
+                    | waku_client::AuthPhase::AwaitingDevice { .. }
+                    | waku_client::AuthPhase::AwaitingApiKey { .. }
+            )
+        )
+    {
+        return ProviderRowActions::Pending;
+    }
+    if matches!(phase, Some(waku_client::AuthPhase::Failed { .. })) {
+        return ProviderRowActions::Login;
+    }
+    if matches!(phase, Some(waku_client::AuthPhase::Completed { .. })) {
+        return ProviderRowActions::Logout;
+    }
+    match method {
+        Some(
+            waku_client::AuthMethod::EnvKey
+            | waku_client::AuthMethod::StoredApiKey
+            | waku_client::AuthMethod::Oauth,
+        ) => ProviderRowActions::Logout,
+        Some(waku_client::AuthMethod::None) | None => ProviderRowActions::Login,
+    }
+}
+
+fn auth_status_label(status: Option<&waku_client::ProviderAuthStatus>) -> String {
+    let Some(status) = status else {
+        return tr!("providers.not_authenticated");
+    };
+    match status.method {
+        waku_client::AuthMethod::None => tr!("providers.not_authenticated"),
+        waku_client::AuthMethod::EnvKey
+        | waku_client::AuthMethod::StoredApiKey
+        | waku_client::AuthMethod::Oauth => {
+            if let Some(email) = status.email.as_deref().filter(|value| !value.is_empty()) {
+                return email.to_owned();
+            }
+            if let Some(account) = status
+                .account_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                return account.to_owned();
+            }
+            tr!("providers.connected")
+        }
+    }
+}
+
 fn preset_login_methods(preset_id: &str) -> &'static [waku_client::LoginMethod] {
     match preset_id {
         waku_client::ProviderId::OPENAI_CODEX => &[
@@ -2797,22 +2899,26 @@ fn preset_login_methods(preset_id: &str) -> &'static [waku_client::LoginMethod] 
 
 fn login_method_label(method: waku_client::LoginMethod) -> String {
     match method {
-        waku_client::LoginMethod::ApiKey => tr!("providers.connect").to_string(),
-        waku_client::LoginMethod::OauthBrowser => tr!("providers.sign_in").to_string(),
-        waku_client::LoginMethod::OauthDevice => tr!("providers.use_device_code").to_string(),
+        waku_client::LoginMethod::ApiKey => tr!("providers.connect"),
+        waku_client::LoginMethod::OauthBrowser => tr!("providers.sign_in"),
+        waku_client::LoginMethod::OauthDevice => tr!("providers.use_device_code"),
     }
 }
 
 fn auth_phase_summary(phase: &waku_client::AuthPhase) -> String {
     match phase {
-        waku_client::AuthPhase::AwaitingBrowser { url, .. } => format!("Opening browser: {url}"),
+        waku_client::AuthPhase::AwaitingBrowser { .. } => tr!("providers.browser_waiting"),
         waku_client::AuthPhase::AwaitingDevice {
             user_code,
             verification_url,
             ..
-        } => format!("Code {user_code} at {verification_url}"),
+        } => tr!(
+            "providers.device_code",
+            code = user_code.as_str(),
+            url = verification_url.as_str()
+        ),
         waku_client::AuthPhase::AwaitingApiKey { instructions, .. } => instructions.clone(),
-        waku_client::AuthPhase::Completed { .. } => tr!("providers.connected").to_string(),
+        waku_client::AuthPhase::Completed { .. } => String::new(),
         waku_client::AuthPhase::Failed { message, .. } => message.clone(),
         waku_client::AuthPhase::Idle => String::new(),
     }
@@ -2924,9 +3030,12 @@ fn accepts_generation(current: u64, response: u64) -> bool {
 
 #[cfg(test)]
 mod auth_behavior_tests {
-    use super::{accepts_generation, auth_phase_url, preset_login_methods};
+    use super::{
+        ProviderRowActions, accepts_generation, auth_phase_summary, auth_phase_url,
+        auth_status_label, preset_login_methods, provider_row_actions,
+    };
     use uuid::Uuid;
-    use waku_client::{LoginMethod, ProviderId};
+    use waku_client::{AuthMethod, LoginMethod, ProviderAuthStatus, ProviderId};
 
     #[test]
     fn browser_and_device_phases_provide_system_urls() {
@@ -2994,6 +3103,176 @@ mod auth_behavior_tests {
         assert_eq!(
             phase.provider().map(ProviderId::as_str),
             Some("openai-codex")
+        );
+    }
+
+    fn sample_status(method: AuthMethod) -> ProviderAuthStatus {
+        ProviderAuthStatus {
+            provider: ProviderId::new("anthropic"),
+            method,
+            email: None,
+            account_id: None,
+            expires_at_ms: None,
+            relogin_required: false,
+        }
+    }
+
+    #[test]
+    fn missing_auth_status_uses_localized_unauthenticated_label() {
+        let label = auth_status_label(None);
+        assert_eq!(label, tr!("providers.not_authenticated"));
+        assert_ne!(label, "None");
+    }
+
+    #[test]
+    fn none_auth_method_uses_localized_unauthenticated_label() {
+        let label = auth_status_label(Some(&sample_status(AuthMethod::None)));
+        assert_eq!(label, tr!("providers.not_authenticated"));
+        assert_ne!(label, "None");
+    }
+
+    #[test]
+    fn connected_status_prefers_email_over_generic_label() {
+        let mut status = sample_status(AuthMethod::Oauth);
+        status.email = Some("user@example.com".into());
+        status.account_id = Some("acct".into());
+        assert_eq!(auth_status_label(Some(&status)), "user@example.com");
+    }
+
+    #[test]
+    fn connected_status_falls_back_to_account_id() {
+        let mut status = sample_status(AuthMethod::StoredApiKey);
+        status.account_id = Some("acct_123".into());
+        assert_eq!(auth_status_label(Some(&status)), "acct_123");
+    }
+
+    #[test]
+    fn connected_status_without_identity_uses_connected_label() {
+        let label = auth_status_label(Some(&sample_status(AuthMethod::EnvKey)));
+        assert_eq!(label, tr!("providers.connected"));
+        assert_ne!(label, "EnvKey");
+        assert_ne!(label, format!("{:?}", AuthMethod::EnvKey));
+    }
+
+    #[test]
+    fn browser_phase_uses_localized_waiting_copy() {
+        let phase = waku_client::AuthPhase::AwaitingBrowser {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("openai-codex"),
+            url: "https://browser.example".into(),
+        };
+        let summary = auth_phase_summary(&phase);
+        assert_eq!(summary, tr!("providers.browser_waiting"));
+        assert!(!summary.contains("Opening browser"));
+    }
+
+    #[test]
+    fn device_phase_uses_localized_code_and_url() {
+        let phase = waku_client::AuthPhase::AwaitingDevice {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("openai-codex"),
+            user_code: "WXYZ".into(),
+            verification_url: "https://device.example".into(),
+            instructions: "verify".into(),
+        };
+        let summary = auth_phase_summary(&phase);
+        assert_eq!(
+            summary,
+            tr!(
+                "providers.device_code",
+                code = "WXYZ",
+                url = "https://device.example"
+            )
+        );
+        assert_ne!(summary, "Code WXYZ at https://device.example");
+    }
+
+    #[test]
+    fn completed_phase_contributes_no_duplicate_secondary_text() {
+        let phase = waku_client::AuthPhase::Completed {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("xai-oauth"),
+        };
+        assert!(auth_phase_summary(&phase).is_empty());
+    }
+
+    #[test]
+    fn missing_status_offers_login_not_logout() {
+        assert_eq!(
+            provider_row_actions(None, None, false),
+            ProviderRowActions::Login
+        );
+    }
+
+    #[test]
+    fn none_method_offers_login_not_logout() {
+        assert_eq!(
+            provider_row_actions(Some(AuthMethod::None), None, false),
+            ProviderRowActions::Login
+        );
+    }
+
+    #[test]
+    fn oauth_method_offers_logout_not_login() {
+        assert_eq!(
+            provider_row_actions(Some(AuthMethod::Oauth), None, false),
+            ProviderRowActions::Logout
+        );
+    }
+
+    #[test]
+    fn env_key_method_offers_logout_not_login() {
+        assert_eq!(
+            provider_row_actions(Some(AuthMethod::EnvKey), None, false),
+            ProviderRowActions::Logout
+        );
+    }
+
+    #[test]
+    fn awaiting_device_phase_is_pending_without_start_or_logout() {
+        let phase = waku_client::AuthPhase::AwaitingDevice {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("xai-oauth"),
+            user_code: "WXYZ".into(),
+            verification_url: "https://device.example".into(),
+            instructions: "verify".into(),
+        };
+        assert_eq!(
+            provider_row_actions(Some(AuthMethod::None), Some(&phase), false),
+            ProviderRowActions::Pending
+        );
+    }
+
+    #[test]
+    fn in_flight_login_is_pending_before_phase_arrives() {
+        assert_eq!(
+            provider_row_actions(Some(AuthMethod::None), None, true),
+            ProviderRowActions::Pending
+        );
+    }
+
+    #[test]
+    fn failed_phase_is_retryable_login_even_if_previously_connected() {
+        let phase = waku_client::AuthPhase::Failed {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("openai-codex"),
+            message: "loopback unavailable".into(),
+        };
+        assert_eq!(
+            provider_row_actions(Some(AuthMethod::Oauth), Some(&phase), false),
+            ProviderRowActions::Login
+        );
+    }
+
+    #[test]
+    fn completed_phase_offers_logout_before_status_refresh() {
+        let phase = waku_client::AuthPhase::Completed {
+            login_id: Uuid::nil(),
+            provider: ProviderId::new("xai-oauth"),
+        };
+        assert_eq!(
+            provider_row_actions(None, Some(&phase), false),
+            ProviderRowActions::Logout
         );
     }
 }
