@@ -915,6 +915,12 @@ impl Waku {
         }
         let turn_id = message.turn_id?;
         let turn = session.turns.iter().find(|turn| turn.id == turn_id)?;
+        // A steer joins the running turn as another user message. Rewinding
+        // restores the turn's checkpoint and resubmits the prompt that opened
+        // it, so only that prompt can carry the affordance.
+        if !message_opens_turn(&session.messages, message_index) {
+            return None;
+        }
         let retained_turn_count = turn.turn_count.saturating_sub(1);
         // Cache only — the ref lives in git, and this runs for every visible
         // user message on every frame. `prefetch_checkpoint_refs` fills the
@@ -930,6 +936,7 @@ impl Waku {
         }
         Some(UserMessageAction {
             session_id: session.id,
+            message_id: message.id,
             turn_count: turn.turn_count,
         })
     }
@@ -1136,7 +1143,7 @@ impl Waku {
                             .as_ref()
                             .filter(|edit| {
                                 edit.session_id == action.session_id
-                                    && edit.turn_count == action.turn_count
+                                    && edit.message_id == action.message_id
                             })
                             .map(|edit| edit.input.clone())
                     });
