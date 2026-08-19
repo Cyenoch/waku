@@ -34,6 +34,7 @@ pub mod persistence;
 pub mod projectless;
 pub mod protocol;
 pub mod server;
+pub mod session_events;
 pub mod settings;
 pub mod skills;
 pub mod terminal;

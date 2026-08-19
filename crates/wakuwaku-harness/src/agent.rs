@@ -221,6 +221,27 @@ impl Session {
         })
     }
 
+    /// Appends the prompt to the transcript and returns the snapshot that
+    /// durably proves it was admitted. Callers persist this snapshot before
+    /// dispatching the first provider request of the turn.
+    pub fn admit_prompt(&mut self, prompt: impl Into<UserMessage>) -> SessionSnapshot {
+        self.context.messages.push(Message::User(prompt.into()));
+        self.snapshot()
+    }
+
+    /// Replaces transcript/checkpoint state from a snapshot while keeping the
+    /// live steering queue. Used only to roll back an in-memory prompt whose
+    /// durable admission write failed.
+    pub fn restore_snapshot(&mut self, snapshot: SessionSnapshot) -> Result<(), HarnessError> {
+        let restored = Session::with_snapshot(snapshot)?;
+        self.context = restored.context;
+        self.queue_mode = restored.queue_mode;
+        self.budget = restored.budget;
+        self.initial_checkpoint = restored.initial_checkpoint;
+        self.completed_turns = restored.completed_turns;
+        Ok(())
+    }
+
     pub fn with_history(
         system_prompt: Option<String>,
         messages: Vec<Message>,
@@ -466,12 +487,11 @@ impl Harness {
         session: &mut Session,
         prompt: impl Into<UserMessage>,
         cancel: CancelToken,
-        mut sink: impl FnMut(AgentEvent) + Send,
-        mut trace: impl TraceSink,
+        sink: impl FnMut(AgentEvent) + Send,
+        trace: impl TraceSink,
     ) -> Result<RunOutcome, HarnessError> {
-        session.context.messages.push(Message::User(prompt.into()));
-        sink(AgentEvent::RunStarted);
-        self.drive(session, cancel, &mut sink, &mut trace).await
+        session.admit_prompt(prompt);
+        self.continue_run(session, cancel, sink, trace).await
     }
 
     pub async fn run_text(

@@ -12,7 +12,9 @@
  * fetched only when a session is opened.
  */
 
+import { sql } from "drizzle-orm";
 import {
+  check,
   foreignKey,
   index,
   integer,
@@ -195,6 +197,103 @@ export const trajectoryRecords = sqliteTable(
       columns: [table.sessionId],
       foreignColumns: [trajectorySessions.sessionId],
       name: "trajectory_records_session_fk",
+    }).onDelete("cascade"),
+  ],
+);
+
+/**
+ * Shadow session event log (diagnostics only; opt-in capture). One stream per
+ * session generation; a fork/rewind lineage stores only its new suffix and
+ * points at `parentStreamId`/`parentSeq`. `session_id` deliberately has no FK
+ * to `sessions`: deleting a UI session must not erase diagnostic history.
+ *
+ * Note: journal entries for 0003+ are maintained by hand for the Rust
+ * migration runner (`crates/wakuwaku-core/build.rs`); do not regenerate a
+ * Drizzle snapshot for them. CHECK constraint names live only here; SQLite
+ * names them from the migration text, so keep both sides in sync when
+ * editing either.
+ */
+export const sessionStreams = sqliteTable(
+  "session_streams",
+  {
+    streamId: text("stream_id").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    parentStreamId: text("parent_stream_id"),
+    parentSeq: integer("parent_seq"),
+    generation: integer("generation").notNull().default(0),
+    createdAtMs: integer("created_at_ms").notNull(),
+    retiredAtMs: integer("retired_at_ms"),
+  },
+  (table) => [
+    uniqueIndex("session_streams_by_session_generation").on(
+      table.sessionId,
+      table.generation,
+    ),
+    check("session_streams_parent_seq_check", sql`parent_seq IS NULL OR parent_seq > 0`),
+    check("session_streams_generation_check", sql`generation >= 0`),
+    foreignKey({
+      columns: [table.parentStreamId],
+      foreignColumns: [sessionStreams.streamId],
+      name: "session_streams_parent_fk",
+    }),
+  ],
+);
+
+export const sessionHeads = sqliteTable(
+  "session_heads",
+  {
+    streamId: text("stream_id").primaryKey(),
+    headSeq: integer("head_seq").notNull().default(0),
+    revision: integer("revision").notNull().default(0),
+    schemaVersion: integer("schema_version").notNull(),
+    lastEventId: text("last_event_id"),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+  },
+  (table) => [
+    check("session_heads_head_seq_check", sql`head_seq >= 0`),
+    check("session_heads_revision_check", sql`revision >= 0`),
+    check("session_heads_schema_version_check", sql`schema_version > 0`),
+    foreignKey({
+      columns: [table.streamId],
+      foreignColumns: [sessionStreams.streamId],
+      name: "session_heads_stream_fk",
+    }).onDelete("cascade"),
+  ],
+);
+
+export const sessionEvents = sqliteTable(
+  "session_events",
+  {
+    streamId: text("stream_id").notNull(),
+    seq: integer("seq").notNull(),
+    eventId: text("event_id").notNull(),
+    commandId: text("command_id"),
+    schemaVersion: integer("schema_version").notNull(),
+    kind: text("kind").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    createdAtMs: integer("created_at_ms").notNull(),
+    runtimeId: text("runtime_id"),
+    turnId: text("turn_id"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.streamId, table.seq] }),
+    uniqueIndex("session_events_by_event_id").on(table.streamId, table.eventId),
+    // A command id identifies a whole batch, so this is a lookup index;
+    // reuse consistency is enforced by the writer's append transaction.
+    index("session_events_by_command").on(table.streamId, table.commandId),
+    index("session_events_by_kind").on(table.streamId, table.kind, table.seq),
+    index("session_events_by_turn").on(table.streamId, table.turnId, table.seq),
+    check("session_events_seq_check", sql`seq > 0`),
+    check("session_events_schema_version_check", sql`schema_version > 0`),
+    check("session_events_kind_check", sql`length(kind) > 0`),
+    check(
+      "session_events_payload_json_check",
+      sql`json_valid(payload_json)`,
+    ),
+    foreignKey({
+      columns: [table.streamId],
+      foreignColumns: [sessionStreams.streamId],
+      name: "session_events_stream_fk",
     }).onDelete("cascade"),
   ],
 );

@@ -19,7 +19,8 @@ use crate::attachments::AttachmentStore;
 use crate::auth::{AuthRuntime, AuthService};
 use crate::driver::{self, DriverHandle, DriverStartOptions, SessionOptions};
 use crate::model::{
-    AgentSession, Checkpoint, CheckpointStatus, DriverEvent, Project, SessionStatus,
+    AgentSession, Checkpoint, CheckpointStatus, DriverEvent, Project, SessionStatus, TurnStatus,
+    unix_time,
 };
 use crate::persistence::{ComposerDraftStore, PersistedState, StateStore};
 use crate::settings::DaemonSettingsStore;
@@ -44,6 +45,7 @@ pub struct WakuBackend {
     trajectory: Arc<TrajectoryWriter>,
     trace_handoff: Arc<TraceHandoff>,
     live_hub: Arc<Mutex<Option<EventHub>>>,
+    session_event_log: bool,
 }
 
 impl WakuBackend {
@@ -62,6 +64,18 @@ impl WakuBackend {
         settings: DaemonSettingsStore,
         task_store: StateStore,
         auth: AuthService,
+    ) -> anyhow::Result<Self> {
+        let session_event_log =
+            std::env::var("WAKUWAKU_SESSION_EVENT_LOG").is_ok_and(|value| value == "1");
+        Self::new_with_auth_and_session_event_log(settings, task_store, auth, session_event_log)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_auth_and_session_event_log(
+        settings: DaemonSettingsStore,
+        task_store: StateStore,
+        auth: AuthService,
+        session_event_log: bool,
     ) -> anyhow::Result<Self> {
         let task_state = task_store
             .load()
@@ -112,7 +126,35 @@ impl WakuBackend {
             trajectory,
             trace_handoff,
             live_hub,
+            session_event_log,
         })
+    }
+
+    /// Enqueues one shadow session event. Diagnostics only: never blocks
+    /// wire delivery and never fails the turn.
+    fn observe_session_event(
+        &self,
+        session_id: Uuid,
+        runtime_id: Option<Uuid>,
+        turn_id: Option<Uuid>,
+        payload: crate::session_events::SessionEventPayload,
+    ) {
+        if !self.session_event_log {
+            return;
+        }
+        let event = crate::session_events::NewSessionEvent::observed(runtime_id, turn_id, payload);
+        match self
+            .trajectory
+            .try_append_session_events(session_id, vec![event])
+        {
+            crate::trajectory_store::SessionEventEnqueue::Queued => {}
+            crate::trajectory_store::SessionEventEnqueue::Full => {
+                report_shadow_enqueue_failure("writer queue full");
+            }
+            crate::trajectory_store::SessionEventEnqueue::Disconnected => {
+                report_shadow_enqueue_failure("writer disconnected");
+            }
+        }
     }
 
     /// Capture and persist one ending checkpoint exactly once per daemon.
@@ -602,11 +644,57 @@ impl Backend for WakuBackend {
                 let persist_store = Arc::clone(&self.task_store);
                 let persist_state = Arc::clone(&self.task_state);
                 let persist_handoff = Arc::clone(&self.trace_handoff);
+                let shadow = ShadowEventCapture {
+                    enabled: self.session_event_log,
+                    writer: Arc::clone(&self.trajectory),
+                };
+                let shadow_runtime_id = runtime_id;
                 std::thread::Builder::new()
                     .name(format!("wakuwaku-daemon-events-{session_id}"))
                     .spawn(move || {
                         let mut deliver_events = true;
-                        while let Ok(event) = event_receiver.recv() {
+                        let send = |wire| events.send(wire).is_ok();
+                        while let Ok(output) = event_receiver.recv() {
+                            let event = match output {
+                                driver::DriverOutput::Event(event) => event,
+                                driver::DriverOutput::TurnStarted { snapshot, ack } => {
+                                    match persist_store
+                                        .persist_harness_snapshot(session_id, *snapshot)
+                                    {
+                                        Ok(()) => {
+                                            let _ = ack.send(true);
+                                            DriverEvent::TurnStarted
+                                        }
+                                        Err(error) => {
+                                            // Discard before releasing the
+                                            // worker: once it sees the failed
+                                            // ack it can accept a retried
+                                            // prompt whose staged input must
+                                            // not be swept by this discard.
+                                            persist_handoff.discard(session_id);
+                                            let _ = ack.send(false);
+                                            report_snapshot_persist_error(&error);
+                                            persist_and_forward_driver_event(
+                                                &persist_store,
+                                                &persist_state,
+                                                &persist_handoff,
+                                                session_id,
+                                                DriverEvent::Error(format!(
+                                                    "could not persist the admitted prompt: {error}"
+                                                )),
+                                                || {},
+                                                &mut deliver_events,
+                                                send,
+                                            );
+                                            DriverEvent::TurnFinished {
+                                                success: false,
+                                                summary: Some(error.to_string()),
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                            shadow.observe(session_id, shadow_runtime_id, &event);
                             persist_and_forward_driver_event(
                                 &persist_store,
                                 &persist_state,
@@ -621,7 +709,7 @@ impl Backend for WakuBackend {
                                     )
                                 },
                                 &mut deliver_events,
-                                |wire| events.send(wire).is_ok(),
+                                send,
                             );
                         }
                     })
@@ -664,7 +752,7 @@ impl Backend for WakuBackend {
                     }
                     driver.clone()
                 };
-                handle_driver_command(self, session_id, &driver, command)
+                handle_driver_command(self, session_id, runtime_id, &driver, command)
             }
         }
     }
@@ -761,7 +849,15 @@ impl WakuBackend {
         let snapshot = match self.task_store.load_harness_snapshot(session_id)? {
             Some(snapshot) => snapshot,
             None if session_requires_stored_snapshot(&state.sessions[index]) => {
-                return Err(missing_harness_snapshot());
+                if !recover_missing_harness_snapshot(&mut state.sessions[index]) {
+                    return Err(missing_harness_snapshot());
+                }
+                state.mark_session_dirty(session_id);
+                self.task_store.save(&mut state)?;
+                let snapshot = empty_session_snapshot();
+                self.task_store
+                    .persist_harness_snapshot(session_id, snapshot.clone())?;
+                snapshot
             }
             None => {
                 let snapshot = empty_session_snapshot();
@@ -1158,6 +1254,134 @@ fn report_usage_persist_error(error: &anyhow::Error) {
     eprintln!("wakuwaku-daemon: {error}");
 }
 
+fn report_snapshot_persist_error(error: &std::io::Error) {
+    eprintln!("wakuwaku-daemon: could not persist admitted prompt snapshot: {error}");
+}
+
+fn report_shadow_enqueue_failure(reason: &str) {
+    eprintln!("wakuwaku-daemon: shadow session event enqueue failed: {reason}");
+}
+
+/// Snapshot of the daemon's shadow-log wiring handed to each forwarding
+/// thread. Maps only events this daemon actually produces; deltas, cursor,
+/// activity, and rich activity stay live-only.
+#[derive(Clone)]
+struct ShadowEventCapture {
+    enabled: bool,
+    writer: Arc<TrajectoryWriter>,
+}
+
+impl ShadowEventCapture {
+    fn observe(&self, session_id: Uuid, runtime_id: Uuid, event: &DriverEvent) {
+        if !self.enabled {
+            return;
+        }
+        use crate::model::BackgroundWorkEvent;
+        use crate::session_events::{SessionEventPayload, bounded_text, sha256_hex};
+        let payload = match event {
+            DriverEvent::TurnStarted => Some(SessionEventPayload::TurnStarted {}),
+            DriverEvent::UsageUpdated {
+                event_id,
+                provider,
+                model,
+                timestamp_ms,
+                input,
+                output,
+                cache_read,
+                cache_write,
+                reasoning,
+                context_tokens,
+                context_window,
+            } => Some(SessionEventPayload::UsageRecorded {
+                usage_event_id: *event_id,
+                provider: provider.as_str().to_owned(),
+                model: model.clone(),
+                timestamp_ms: *timestamp_ms,
+                input: *input,
+                output: *output,
+                cache_read: *cache_read,
+                cache_write: *cache_write,
+                reasoning: *reasoning,
+                context_tokens: *context_tokens,
+                context_window: *context_window,
+            }),
+            DriverEvent::TurnFinished { success, summary } => {
+                Some(SessionEventPayload::TurnFinished {
+                    success: *success,
+                    summary: summary.clone().map(bounded_text),
+                })
+            }
+            DriverEvent::Permission {
+                request_id, title, ..
+            } => Some(SessionEventPayload::PermissionRequested {
+                request_id: request_id.clone(),
+                title: bounded_text(title.clone()),
+            }),
+            DriverEvent::UserInputRequested {
+                request_id,
+                questions,
+            } => Some(SessionEventPayload::UserInputRequested {
+                request_id: request_id.clone(),
+                question_count: questions.len(),
+            }),
+            DriverEvent::SteerAccepted { message } => Some(SessionEventPayload::SteerAccepted {
+                digest: sha256_hex(message),
+            }),
+            DriverEvent::SteerRejected { message, reason } => {
+                Some(SessionEventPayload::SteerRejected {
+                    digest: sha256_hex(message),
+                    reason: bounded_text(reason.clone()),
+                })
+            }
+            DriverEvent::BackgroundWork(boxed) => match &**boxed {
+                BackgroundWorkEvent::Upsert(item) => Some(SessionEventPayload::BackgroundWork {
+                    work_kind: item.key.kind,
+                    provider_id: item.key.provider_id.clone(),
+                    status: item.status,
+                }),
+                // Output deltas, reconciliation snapshots, and stop events
+                // carry command/output/cwd data and stay live-only.
+                _ => None,
+            },
+            DriverEvent::Error(message) => Some(SessionEventPayload::Error {
+                message: bounded_text(message.clone()),
+            }),
+            DriverEvent::ProcessExited => Some(SessionEventPayload::ProcessExited {}),
+            DriverEvent::RuntimeEventCursorAdvanced(_)
+            | DriverEvent::Connected
+            | DriverEvent::AutoTitleUpdated(_)
+            | DriverEvent::TextDelta(_)
+            | DriverEvent::ReasoningDelta(_)
+            | DriverEvent::Activity { .. }
+            | DriverEvent::RichActivity(_) => None,
+        };
+        let Some(payload) = payload else {
+            return;
+        };
+        // Usage rows reuse the legacy usage event id so the shadow stream and
+        // `usage_events` share one identity; all others get a fresh id.
+        let event = crate::session_events::NewSessionEvent {
+            event_id: match event {
+                DriverEvent::UsageUpdated { event_id, .. } => *event_id,
+                _ => Uuid::new_v4(),
+            },
+            ..crate::session_events::NewSessionEvent::observed(Some(runtime_id), None, payload)
+        };
+        match self
+            .writer
+            .try_append_session_events(session_id, vec![event])
+        {
+            crate::trajectory_store::SessionEventEnqueue::Queued => {}
+            crate::trajectory_store::SessionEventEnqueue::Full => {
+                report_shadow_enqueue_failure("writer queue full");
+            }
+            crate::trajectory_store::SessionEventEnqueue::Disconnected => {
+                report_shadow_enqueue_failure("writer disconnected");
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn persist_and_forward_driver_event(
     store: &StateStore,
@@ -1167,7 +1391,7 @@ fn persist_and_forward_driver_event(
     event: DriverEvent,
     on_turn_finished: impl FnOnce(),
     deliver_events: &mut bool,
-    send: impl FnOnce(WireDriverEvent) -> bool,
+    send: impl Fn(WireDriverEvent) -> bool,
 ) {
     if let Err(error) = persist_usage_event(store, task_state, session_id, &event) {
         report_usage_persist_error(&error);
@@ -1259,6 +1483,43 @@ fn trajectory_user_from_resolved(
 
 fn session_requires_stored_snapshot(session: &AgentSession) -> bool {
     session.turns.iter().any(|turn| turn.provider_turn_started)
+}
+
+/// Repairs a session whose stored harness snapshot vanished while every
+/// provider-started turn is an uncompleted suffix. Those turns could only
+/// have been in flight when the snapshot was lost, so their provider context
+/// is unrecoverable and the suffix is truncated back to pre-provider
+/// history; completed provider history still requires the real snapshot.
+fn recover_missing_harness_snapshot(session: &mut AgentSession) -> bool {
+    let Some(first_provider_started) = session
+        .turns
+        .iter()
+        .position(|turn| turn.provider_turn_started)
+    else {
+        return false;
+    };
+    if session.turns[first_provider_started..]
+        .iter()
+        .any(|turn| turn.status == TurnStatus::Completed)
+    {
+        return false;
+    }
+    session.truncate_after_turn(first_provider_started);
+    session.status = SessionStatus::Idle;
+    session.runtime_event_cursor = None;
+    for message in &mut session.messages {
+        message.streaming = false;
+    }
+    for block in &mut session.transcript_blocks {
+        for activity in &mut block.activities {
+            activity.complete = true;
+        }
+    }
+    session
+        .transcript_blocks
+        .retain(|block| !block.activities.is_empty());
+    session.updated_at = unix_time();
+    !session_requires_stored_snapshot(session)
 }
 
 fn upsert_start_project(state: &mut PersistedState, project: Project) {
@@ -1521,6 +1782,7 @@ fn ensure_fresh_driver_auth(
 fn handle_driver_command(
     backend: &WakuBackend,
     session_id: Uuid,
+    runtime_id: Uuid,
     driver: &DriverHandle,
     command: Command,
 ) -> anyhow::Result<ResponsePayload> {
@@ -1529,10 +1791,46 @@ fn handle_driver_command(
             ensure_fresh_driver_auth(backend, session_id, driver)?;
             backend.ensure_trajectory_initialized(session_id);
             let resolved = resolve_prompt_input(backend, input)?;
+            let digest = crate::session_events::sha256_hex(
+                &wakuwaku_harness::UserMessage::text_of(&resolved.message.parts),
+            );
+            let display_text = resolved
+                .source
+                .display_text
+                .clone()
+                .map(crate::session_events::bounded_text);
+            let attachment_count = resolved.source.attachments.len();
+            let turn_id = {
+                let state = backend.task_state.lock();
+                state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .and_then(|session| {
+                        let running: Vec<_> = session
+                            .turns
+                            .iter()
+                            .filter(|turn| turn.status == TurnStatus::Running)
+                            .collect();
+                        (running.len() == 1).then(|| running[0].id)
+                    })
+            };
             backend.trace_handoff.stage_user(
                 session_id,
                 trajectory_user_from_resolved(&resolved.message, &resolved.source),
             );
+            if turn_id.is_some() {
+                backend.observe_session_event(
+                    session_id,
+                    Some(runtime_id),
+                    turn_id,
+                    crate::session_events::SessionEventPayload::PromptObserved {
+                        digest,
+                        display_text,
+                        attachment_count,
+                    },
+                );
+            }
             driver.prompt(resolved.message)
         }
         Command::Steer { input } => {
@@ -2288,6 +2586,129 @@ mod tests {
         std::fs::remove_dir_all(directory).ok();
     }
 
+    fn provider_started_failed_session(project_id: Uuid) -> AgentSession {
+        let mut session =
+            AgentSession::new(project_id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
+        session.begin_turn("hi");
+        session.mark_active_turn_provider_started();
+        session.push_message(MessageRole::Assistant, "partial reply");
+        session.finish_active_turn(TurnStatus::Failed);
+        session.status = SessionStatus::Failed;
+        session
+    }
+
+    #[test]
+    fn failed_first_provider_turn_without_snapshot_resets_to_pre_provider_history() {
+        let directory =
+            std::env::temp_dir().join(format!("wakuwaku-daemon-reset-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = PersistedState::fresh(directory.to_path_buf());
+        let session = provider_started_failed_session(state.projects[0].id);
+        let session_id = session.id;
+        state.sessions.clear();
+        state.push_session(session);
+        store.save(&mut state).unwrap();
+
+        let backend = backend_in(&directory);
+        let snapshot = backend.embedded_snapshot(session_id).unwrap();
+        assert!(snapshot.messages.is_empty());
+        assert!(
+            backend
+                .task_store
+                .read_snapshot_file_only(session_id)
+                .unwrap()
+                .is_some()
+        );
+        {
+            let state = backend.task_state.lock();
+            let session = state
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .unwrap();
+            assert!(session.turns.is_empty());
+            assert!(session.messages.is_empty());
+            assert_eq!(session.status, SessionStatus::Idle);
+            assert!(session.runtime_event_cursor.is_none());
+        }
+
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn failed_provider_suffix_after_pre_provider_history_is_truncated() {
+        let directory =
+            std::env::temp_dir().join(format!("wakuwaku-daemon-suffix-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = PersistedState::fresh(directory.to_path_buf());
+        let mut session = AgentSession::new(
+            state.projects[0].id,
+            ProviderId::new(ProviderId::OPENAI_RESPONSES),
+        );
+        session.begin_turn("pre");
+        session.finish_active_turn(TurnStatus::Failed);
+        session.begin_turn("in-flight");
+        session.mark_active_turn_provider_started();
+        session.finish_active_turn(TurnStatus::Failed);
+        session.status = SessionStatus::Failed;
+        let session_id = session.id;
+        state.sessions.clear();
+        state.push_session(session);
+        store.save(&mut state).unwrap();
+
+        let backend = backend_in(&directory);
+        let snapshot = backend.embedded_snapshot(session_id).unwrap();
+        assert!(snapshot.messages.is_empty());
+        {
+            let state = backend.task_state.lock();
+            let session = state
+                .sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .unwrap();
+            assert_eq!(session.turns.len(), 1);
+            assert!(!session.turns[0].provider_turn_started);
+            assert_eq!(session.status, SessionStatus::Idle);
+        }
+
+        std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn failed_provider_suffix_after_completed_provider_history_still_fails_closed() {
+        let directory =
+            std::env::temp_dir().join(format!("wakuwaku-daemon-closed2-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = PersistedState::fresh(directory.to_path_buf());
+        let mut session = two_turn_session(state.projects[0].id);
+        session.turns[1].status = TurnStatus::Failed;
+        let session_id = session.id;
+        state.sessions.clear();
+        state.push_session(session);
+        store.save(&mut state).unwrap();
+
+        let backend = backend_in(&directory);
+        let error = backend.embedded_snapshot(session_id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("persisted harness snapshot is missing"),
+            "{error}"
+        );
+        assert!(
+            backend
+                .task_store
+                .read_snapshot_file_only(session_id)
+                .unwrap()
+                .is_none()
+        );
+
+        std::fs::remove_dir_all(directory).ok();
+    }
+
     #[test]
     fn provider_started_history_without_snapshot_still_fails_closed() {
         let directory =
@@ -2704,7 +3125,7 @@ mod tests {
         let task_state = Mutex::new(state);
         let event_id = Uuid::from_u128(77);
         let mut deliver = true;
-        let mut sent = 0usize;
+        let sent = std::sync::atomic::AtomicUsize::new(0);
         let mut finished = false;
         persist_and_forward_driver_event(
             &store,
@@ -2715,7 +3136,7 @@ mod tests {
             || unreachable!("usage is not a finished turn"),
             &mut deliver,
             |_| {
-                sent += 1;
+                sent.fetch_add(1, std::sync::atomic::Ordering::Release);
                 false
             },
         );
@@ -2736,7 +3157,7 @@ mod tests {
             |_| panic!("disconnected sink must not receive later events"),
         );
         assert!(!deliver);
-        assert_eq!(sent, 1);
+        assert_eq!(sent.load(std::sync::atomic::Ordering::Acquire), 1);
         assert!(finished);
         let rows = store.usage_events_between(0, i64::MAX).unwrap();
         assert_eq!(rows.len(), 1);
@@ -2789,7 +3210,7 @@ mod tests {
             },
         );
         let mut deliver = true;
-        let mut forwarded = false;
+        let forwarded = std::sync::atomic::AtomicBool::new(false);
         persist_and_forward_driver_event(
             &store,
             &Mutex::new(state),
@@ -2808,7 +3229,7 @@ mod tests {
             &mut deliver,
             |_| {
                 order.lock().push("forward".into());
-                forwarded = true;
+                forwarded.store(true, std::sync::atomic::Ordering::Release);
                 true
             },
         );
@@ -2822,7 +3243,7 @@ mod tests {
             recorded.iter().any(|step| step == "live:true"),
             "live update must see the snapshot file: {recorded:?}"
         );
-        assert!(forwarded);
+        assert!(forwarded.load(std::sync::atomic::Ordering::Acquire));
         let page = writer.page(session_id, None, Some(50), None).unwrap();
         assert!(
             page.records

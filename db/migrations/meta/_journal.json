@@ -36,6 +36,13 @@
       "when": 1787000000000,
       "tag": "0004_trajectory",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1787129247288,
+      "tag": "0005_session_events",
+      "breakpoints": true
     }
   ]
 }

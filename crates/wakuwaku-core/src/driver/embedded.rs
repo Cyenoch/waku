@@ -752,12 +752,37 @@ fn apply_options(
     Ok(())
 }
 
+/// Existing embedded-driver control timeout; also bounds how long prompt
+/// admission waits for the daemon's durable snapshot write.
+const ADMISSION_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn run_prompt(
     worker: &mut Worker,
     event_bridge: &mut EventBridge,
     prompt: wakuwaku_harness::UserMessage,
 ) {
     worker.factory.approvals.begin_run();
+
+    // Admit the prompt in memory, then block until the daemon has persisted
+    // the admitted snapshot. Provider dispatch must never precede that write:
+    // a daemon crash between the two would otherwise restore a transcript
+    // missing the prompt the provider was already answering.
+    let previous = worker.session.snapshot();
+    let admitted = worker.session.admit_prompt(prompt);
+    let (ack, acknowledged) = bounded(1);
+    let admitted = worker.events.turn_started(admitted, ack)
+        && matches!(acknowledged.recv_timeout(ADMISSION_ACK_TIMEOUT), Ok(true));
+    if !admitted {
+        worker.handoff.discard(worker.session_id);
+        if let Err(error) = worker.session.restore_snapshot(previous) {
+            let _ = worker.events.send(DriverEvent::Error(format!(
+                "could not roll back an unpersisted prompt: {error}"
+            )));
+        }
+        worker.factory.approvals.finish_run();
+        return;
+    }
+
     let cancel = CancelToken::new();
     {
         let mut active = worker
@@ -770,12 +795,10 @@ fn run_prompt(
         });
     }
 
-    let _ = worker.events.send(DriverEvent::TurnStarted);
     let mut sink = |event| event_bridge.emit(event);
     let mut traces = worker.handoff.sink(worker.session_id);
-    let result = worker.runtime.block_on(worker.harness.run(
+    let result = worker.runtime.block_on(worker.harness.continue_run(
         &mut worker.session,
-        prompt,
         cancel,
         &mut sink,
         &mut traces,
@@ -1087,8 +1110,16 @@ fn assistant_text(message: &AssistantMessage) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::driver::DriverOutput;
     use crate::driver::test_event_channel;
     use wakuwaku_harness::ApprovalRequest;
+
+    fn next_event(rx: &crossbeam_channel::Receiver<DriverOutput>) -> DriverEvent {
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            DriverOutput::Event(event) => event,
+            DriverOutput::TurnStarted { .. } => panic!("unexpected admission handshake"),
+        }
+    }
 
     #[test]
     fn failed_run_surfaces_provider_error_as_turn_summary() {
@@ -1102,10 +1133,10 @@ mod tests {
             &session,
         );
         assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            next_event(&rx),
             DriverEvent::Error(message) if message.contains("connection reset")
         ));
-        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+        match next_event(&rx) {
             DriverEvent::TurnFinished {
                 success: false,
                 summary: Some(summary),
@@ -1123,8 +1154,8 @@ mod tests {
         }
     }
 
-    fn permission_id(rx: &crossbeam_channel::Receiver<DriverEvent>) -> String {
-        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+    fn permission_id(rx: &crossbeam_channel::Receiver<DriverOutput>) -> String {
+        match next_event(rx) {
             DriverEvent::Permission { request_id, .. } => request_id,
             other => panic!("unexpected event {other:?}"),
         }
@@ -1225,8 +1256,8 @@ mod tests {
         }
     }
 
-    fn take_usage(rx: &crossbeam_channel::Receiver<DriverEvent>) -> DriverEvent {
-        rx.recv_timeout(Duration::from_secs(1)).unwrap()
+    fn take_usage(rx: &crossbeam_channel::Receiver<DriverOutput>) -> DriverEvent {
+        next_event(rx)
     }
 
     #[test]
@@ -1365,6 +1396,184 @@ mod tests {
             worker.join().unwrap(),
             Ok(ApprovalDecision::Cancelled)
         ));
+    }
+
+    /// A provider whose only job is counting requests; the barrier test must
+    /// observe dispatch timing, not responses.
+    struct CountingProvider {
+        requests: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl wakuwaku_harness::ModelProvider for CountingProvider {
+        fn complete<'a>(
+            &'a self,
+            _ctx: &'a wakuwaku_harness::PromptContext,
+            _opts: &'a RequestOptions,
+            _model: Option<&'a str>,
+            _cancel: CancelToken,
+            _sink: &'a mut (dyn FnMut(StreamEvent) + Send),
+        ) -> futures::future::BoxFuture<'a, Result<AssistantMessage, HarnessError>> {
+            use std::sync::atomic::Ordering;
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(AssistantMessage {
+                    content: vec![ContentBlock::Text(wakuwaku_harness::TextBlock {
+                        text: "done".into(),
+                        signature: None,
+                    })],
+                    model: "counting".into(),
+                    provider: "counting".into(),
+                    response_id: None,
+                    usage: wakuwaku_harness::Usage::default(),
+                    stop_reason: wakuwaku_harness::StopReason::Stop,
+                    error_message: None,
+                })
+            })
+        }
+    }
+
+    fn barrier_worker(
+        events: DriverEventSender,
+    ) -> (Worker, Arc<std::sync::atomic::AtomicUsize>, Sender<Command>) {
+        use std::sync::atomic::AtomicUsize;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let http: SharedProvider = Arc::new(CountingProvider {
+            requests: Arc::clone(&requests),
+        });
+        // The counting provider is registered under the counting endpoint so
+        // the live provider handle is constructable; it is never dialed
+        // because `http` serves every harness request in-process.
+        let endpoint = ExternalProvider::new(
+            "counting",
+            "Counting",
+            "http://127.0.0.1:1/v1",
+            wakuwaku_protocol::ApiFormat::OpenAiResponses,
+        );
+        let providers = Providers::new();
+        providers
+            .set_providers(vec![ProviderConfig {
+                endpoint: endpoint.clone(),
+                limits: Default::default(),
+                auth: wakuwaku_harness::Auth::Bearer("t".into()),
+                transport: wakuwaku_provider::TransportProfile::Standard,
+                extra_auth_headers: Vec::new(),
+            }])
+            .map_err(|error| anyhow!(error.to_string()))
+            .unwrap();
+        let live = Arc::new(HttpProvider::new(providers, "counting").unwrap());
+        let (commands, receiver) = unbounded();
+        let config = RuntimeConfig {
+            mode: RuntimeMode::Ask,
+            interaction_mode: InteractionMode::Plan,
+            model: "counting".into(),
+            reasoning_effort: None,
+            service_tier: None,
+            context_window: 128_000,
+            capabilities: wakuwaku_protocol::ModelCapabilities::openai_compatible(
+                wakuwaku_protocol::ApiFormat::OpenAiResponses,
+            ),
+            limits: wakuwaku_protocol::ProviderLimits::default(),
+        };
+        let approvals = Arc::new(ApprovalBridge::new(events.clone()));
+        let factory = HarnessFactory {
+            provider: endpoint,
+            http,
+            live,
+            cwd: std::env::temp_dir(),
+            approvals: Arc::clone(&approvals),
+        };
+        let harness = factory.build(&config).unwrap();
+        let mut session = wakuwaku_harness::Session::new(None);
+        session.set_budget(budget(&config));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let worker = Worker {
+            runtime,
+            receiver,
+            active_run: Arc::new(Mutex::new(None)),
+            factory,
+            harness,
+            session,
+            config,
+            events,
+            session_id: Uuid::nil(),
+            handoff: Arc::new(crate::trajectory::TraceHandoff::new()),
+        };
+        (worker, requests, commands)
+    }
+
+    fn admitted_handshake(
+        rx: &crossbeam_channel::Receiver<DriverOutput>,
+    ) -> crossbeam_channel::Sender<bool> {
+        match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+            DriverOutput::TurnStarted { ack, .. } => ack,
+            DriverOutput::Event(_) => panic!("expected the admission handshake"),
+        }
+    }
+
+    #[test]
+    fn run_prompt_dispatches_only_after_the_admission_ack() {
+        use std::sync::atomic::Ordering;
+
+        // Acknowledged: the provider runs exactly once after the ack.
+        let (events, rx) = test_event_channel();
+        let (mut worker, requests, _commands) = barrier_worker(events);
+        let mut bridge = EventBridge::new(
+            worker.events.clone(),
+            ProviderId::new("counting"),
+            worker.config.model.clone(),
+            worker.config.context_window,
+        );
+        let runner = std::thread::spawn(move || {
+            run_prompt(
+                &mut worker,
+                &mut bridge,
+                wakuwaku_harness::UserMessage::text("go"),
+            );
+            worker.session.snapshot()
+        });
+        let ack = admitted_handshake(&rx);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "no provider request before the ack"
+        );
+        ack.send(true).unwrap();
+        let snapshot = runner.join().unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot.transcript().len(), 2, "prompt plus reply");
+
+        // Rejected: the prompt is rolled back and the provider never runs.
+        let (events, rx) = test_event_channel();
+        let (mut worker, requests, _commands) = barrier_worker(events);
+        let mut bridge = EventBridge::new(
+            worker.events.clone(),
+            ProviderId::new("counting"),
+            worker.config.model.clone(),
+            worker.config.context_window,
+        );
+        let runner = std::thread::spawn(move || {
+            run_prompt(
+                &mut worker,
+                &mut bridge,
+                wakuwaku_harness::UserMessage::text("no"),
+            );
+            worker.session.snapshot()
+        });
+        let ack = admitted_handshake(&rx);
+        ack.send(false).unwrap();
+        let snapshot = runner.join().unwrap();
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "a rejected admission must never dispatch"
+        );
+        assert!(
+            snapshot.transcript().is_empty(),
+            "the rejected prompt is rolled back out of the transcript"
+        );
     }
 
     #[test]

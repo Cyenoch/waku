@@ -13,6 +13,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use wakuwaku_client::driver::{DriverHandle, DriverStartOptions, event_channel};
 use wakuwaku_client::{DaemonClient, PromptInput};
+use wakuwaku_core::auth::{
+    AuthRuntime, AuthService, CredentialStore, MemoryCredentialStore, StoredCredential,
+};
 use wakuwaku_core::daemon::WakuBackend;
 use wakuwaku_core::model::{
     DriverEvent, InteractionMode, MessageRole, ProviderId, RuntimeMode, TurnStatus,
@@ -20,9 +23,6 @@ use wakuwaku_core::model::{
 use wakuwaku_core::persistence::{PersistedState, StateStore};
 use wakuwaku_core::protocol::{Command, ResponsePayload, StartTask};
 use wakuwaku_core::{DaemonSettings, DaemonSettingsStore, ServerOptions, serve};
-use wakuwaku_core::auth::{
-    AuthRuntime, AuthService, CredentialStore, MemoryCredentialStore, StoredCredential,
-};
 use wakuwaku_protocol::{ApiFormat, AuthEndpoints, ExternalProvider, SecretString};
 const TOKEN: &str = "restore-token";
 const PROVIDER: &str = "restore-openai";
@@ -110,6 +110,102 @@ fn serve_http(mut stream: TcpStream, mock: &MockHttp) {
     let Some(body) = mock.responses.lock().pop_front() else {
         return;
     };
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+}
+
+/// Mock provider whose response bodies are held until a test releases them,
+/// reproducing an in-flight provider request at daemon-crash time.
+struct GatedMockHttp {
+    responses: Mutex<VecDeque<String>>,
+    arrived: Mutex<Vec<std::path::PathBuf>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    released: std::sync::mpsc::Sender<()>,
+}
+
+impl GatedMockHttp {
+    fn new(bodies: Vec<String>) -> Arc<Self> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Arc::new(Self {
+            responses: Mutex::new(bodies.into()),
+            arrived: Mutex::new(Vec::new()),
+            release: Mutex::new(rx),
+            released: tx,
+        })
+    }
+
+    fn bind(self: &Arc<Self>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Arc::clone(self);
+        thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let mock = Arc::clone(&mock);
+                        thread::spawn(move || serve_gated_http(stream, &mock));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        port
+    }
+
+    fn wait_arrival(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if !self.arrived.lock().is_empty() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("provider request never arrived");
+    }
+
+    fn release(&self) {
+        let _ = self.released.send(());
+    }
+}
+
+fn serve_gated_http(mut stream: TcpStream, mock: &GatedMockHttp) {
+    stream.set_nonblocking(false).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    let header_end = loop {
+        let n = match stream.read(&mut tmp) {
+            Ok(0) => return,
+            Ok(n) => n,
+            Err(_) => return,
+        };
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(at) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            break at + 4;
+        }
+        if buf.len() > 1024 * 1024 {
+            return;
+        }
+    };
+    // Record that the request arrived, then hold the response until released.
+    let request = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let target = request
+        .lines()
+        .find_map(|line| line.split_once(' ').map(|(_, path)| path.to_owned()))
+        .unwrap_or_default();
+    mock.arrived
+        .lock()
+        .push(std::path::PathBuf::from(format!("POST {target}")));
+    let body = mock.responses.lock().pop_front().unwrap_or_default();
+    let _ = mock.release.lock().recv_timeout(Duration::from_secs(20));
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
@@ -396,6 +492,527 @@ fn dropping_a_driver_handle_clone_keeps_prompt_events() {
             _ => {}
         }
     }
+    drop(handle);
+    client.shutdown();
+    shutdown.store(true, Ordering::Release);
+    std::fs::remove_dir_all(directory).ok();
+}
+
+fn gated_daemon(
+    directory: &std::path::Path,
+    workspace: &std::path::Path,
+) -> (DaemonClient, Uuid, Arc<GatedMockHttp>, Arc<AtomicBool>) {
+    let mock = GatedMockHttp::new(vec![model_sse("held")]);
+    let port = mock.bind();
+    let provider = ExternalProvider::new(
+        PROVIDER,
+        "Restore OpenAI",
+        format!("http://127.0.0.1:{port}/v1"),
+        ApiFormat::OpenAiResponses,
+    );
+    let settings = DaemonSettingsStore::open(directory.join("settings.json")).unwrap();
+    settings
+        .replace(DaemonSettings {
+            external_providers: vec![provider],
+            extra: Default::default(),
+        })
+        .unwrap();
+    let creds = Arc::new(MemoryCredentialStore::default());
+    creds
+        .set(
+            &ProviderId::new(PROVIDER),
+            StoredCredential::api_key(SecretString::new("sk-restore")),
+        )
+        .unwrap();
+    let auth = AuthService::new(AuthRuntime::testing(
+        directory,
+        creds,
+        AuthEndpoints::production(),
+    ))
+    .unwrap();
+    let store = StateStore::daemon(directory.join("app.db"));
+    let mut state = PersistedState::fresh(workspace.to_path_buf());
+    let session_id = state.sessions[0].id;
+    state.sessions[0].provider = ProviderId::new(PROVIDER);
+    state.sessions[0].model = Some("restore-model".into());
+    state.sessions[0].begin_turn("seed");
+    store.save(&mut state).unwrap();
+    let backend = WakuBackend::new_with_auth(settings, store, auth).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = shutdown.clone();
+    thread::spawn(move || {
+        serve(
+            listener,
+            TOKEN.into(),
+            Arc::new(backend),
+            server_shutdown,
+            ServerOptions {
+                allow_shutdown: true,
+                ..ServerOptions::default()
+            },
+        )
+        .unwrap();
+    });
+    let client = DaemonClient::connect(&address.to_string(), TOKEN.into()).unwrap();
+    (client, session_id, mock, shutdown)
+}
+
+#[test]
+fn prompt_admission_snapshot_is_persisted_before_provider_dispatch() {
+    let directory = std::env::temp_dir().join(format!("wakuwaku-admit-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let workspace = directory.join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (client, session_id, mock, shutdown) = gated_daemon(&directory, &workspace);
+    let session = {
+        let store = StateStore::daemon(directory.join("app.db"));
+        store
+            .load()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .unwrap()
+    };
+    let (wake, _) = smol::channel::bounded(1);
+    let (events, rx) = event_channel(wake);
+    let handle = DriverHandle::start_restoring(
+        client.clone(),
+        session_id,
+        start_options(workspace.clone()),
+        Some(StartTask {
+            generation: session.transcript_baseline_generation(),
+            project: None,
+            session,
+        }),
+        events,
+    )
+    .unwrap();
+    wait_event(&rx, Duration::from_secs(5), |event| {
+        matches!(event, DriverEvent::Connected)
+    });
+    handle.prompt(PromptInput::text("held prompt"));
+
+    // The provider request arrives and is held; the admitted snapshot must
+    // already be durable before the response completes.
+    mock.wait_arrival();
+    let store = StateStore::daemon(directory.join("app.db"));
+    let snapshot = store
+        .read_snapshot_file_only(session_id)
+        .unwrap()
+        .expect("admitted-prompt snapshot must exist while the provider request is in flight");
+    let user_texts: Vec<String> = snapshot
+        .transcript()
+        .iter()
+        .filter_map(|message| match message {
+            wakuwaku_harness::Message::User(user) => Some(
+                user.parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        wakuwaku_harness::UserPart::Text(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        user_texts
+            .iter()
+            .filter(|text| text.as_str() == "held prompt")
+            .count(),
+        1,
+        "admitted prompt must be in the durable snapshot exactly once"
+    );
+
+    mock.release();
+    wait_event(&rx, Duration::from_secs(5), |event| {
+        matches!(event, DriverEvent::TurnFinished { success: true, .. })
+    });
+    drop(handle);
+    client.shutdown();
+    shutdown.store(true, Ordering::Release);
+    std::fs::remove_dir_all(directory).ok();
+}
+
+#[test]
+fn failed_admission_persistence_rolls_back_prompt_and_skips_provider() {
+    let directory =
+        std::env::temp_dir().join(format!("wakuwaku-admit-rollback-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let workspace = directory.join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (client, session_id, mock, shutdown) = gated_daemon(&directory, &workspace);
+    let session = {
+        let store = StateStore::daemon(directory.join("app.db"));
+        store
+            .load()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .unwrap()
+    };
+    let (wake, _) = smol::channel::bounded(1);
+    let (events, rx) = event_channel(wake);
+    let handle = DriverHandle::start_restoring(
+        client.clone(),
+        session_id,
+        start_options(workspace.clone()),
+        Some(StartTask {
+            generation: session.transcript_baseline_generation(),
+            project: None,
+            session,
+        }),
+        events,
+    )
+    .unwrap();
+    wait_event(&rx, Duration::from_secs(5), |event| {
+        matches!(event, DriverEvent::Connected)
+    });
+
+    // Make the atomic snapshot write fail: `File::create` on a path whose
+    // parent is a directory errors, so the tmp path becomes a directory.
+    let store = StateStore::daemon(directory.join("app.db"));
+    store.read_snapshot_file_only(session_id).unwrap();
+    let snapshots = directory.join("snapshots");
+    std::fs::create_dir_all(snapshots.join(format!("{session_id}.json.tmp"))).unwrap();
+
+    handle.prompt(PromptInput::text("B"));
+
+    let mut saw_error = false;
+    let mut saw_failed_finish = false;
+    let mut saw_turn_started = false;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(event) = rx.recv_timeout(remaining) else {
+            break;
+        };
+        match event {
+            DriverEvent::TurnStarted => saw_turn_started = true,
+            DriverEvent::Error(message) => {
+                assert!(
+                    message.contains("could not persist the admitted prompt"),
+                    "{message}"
+                );
+                saw_error = true;
+            }
+            DriverEvent::TurnFinished { success: false, .. } => saw_failed_finish = true,
+            _ => {}
+        }
+        if saw_error && saw_failed_finish {
+            break;
+        }
+    }
+    assert!(saw_error, "persistence failure must surface as an error");
+    assert!(saw_failed_finish, "turn must finish as failed");
+    assert!(
+        !saw_turn_started,
+        "TurnStarted must never precede a failed write"
+    );
+    assert!(
+        mock.arrived.lock().is_empty(),
+        "provider must not be dispatched for an unpersisted prompt"
+    );
+
+    // Rollback: removing the blocker lets the next prompt through and the
+    // provider context contains only that prompt, proving B was rolled back.
+    std::fs::remove_dir_all(snapshots.join(format!("{session_id}.json.tmp"))).unwrap();
+    handle.prompt(PromptInput::text("C"));
+    mock.wait_arrival();
+    mock.release();
+    wait_event(&rx, Duration::from_secs(5), |event| {
+        matches!(event, DriverEvent::TurnFinished { success: true, .. })
+    });
+    let snapshot = store
+        .read_snapshot_file_only(session_id)
+        .unwrap()
+        .expect("snapshot after C");
+    let user_texts: Vec<String> = snapshot
+        .transcript()
+        .iter()
+        .filter_map(|message| match message {
+            wakuwaku_harness::Message::User(user) => Some(
+                user.parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        wakuwaku_harness::UserPart::Text(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !user_texts.iter().any(|text| text.as_str() == "B"),
+        "rolled-back prompt must not survive: {user_texts:?}"
+    );
+    assert_eq!(
+        user_texts
+            .iter()
+            .filter(|text| text.as_str() == "C")
+            .count(),
+        1
+    );
+
+    drop(handle);
+    client.shutdown();
+    shutdown.store(true, Ordering::Release);
+    std::fs::remove_dir_all(directory).ok();
+}
+
+fn gated_daemon_with_event_log(
+    directory: &std::path::Path,
+    workspace: &std::path::Path,
+    session_event_log: bool,
+) -> (DaemonClient, Uuid, Arc<GatedMockHttp>, Arc<AtomicBool>) {
+    let mock = GatedMockHttp::new(vec![model_sse("logged")]);
+    let port = mock.bind();
+    let provider = ExternalProvider::new(
+        PROVIDER,
+        "Restore OpenAI",
+        format!("http://127.0.0.1:{port}/v1"),
+        ApiFormat::OpenAiResponses,
+    );
+    let settings = DaemonSettingsStore::open(directory.join("settings.json")).unwrap();
+    settings
+        .replace(DaemonSettings {
+            external_providers: vec![provider],
+            extra: Default::default(),
+        })
+        .unwrap();
+    let creds = Arc::new(MemoryCredentialStore::default());
+    creds
+        .set(
+            &ProviderId::new(PROVIDER),
+            StoredCredential::api_key(SecretString::new("sk-restore")),
+        )
+        .unwrap();
+    let auth = AuthService::new(AuthRuntime::testing(
+        directory,
+        creds,
+        AuthEndpoints::production(),
+    ))
+    .unwrap();
+    let store = StateStore::daemon(directory.join("app.db"));
+    let mut state = PersistedState::fresh(workspace.to_path_buf());
+    let session_id = state.sessions[0].id;
+    state.sessions[0].provider = ProviderId::new(PROVIDER);
+    state.sessions[0].model = Some("restore-model".into());
+    // Mirror the app: it begins the turn client-side before sending Prompt,
+    // so the daemon projection carries exactly one Running turn.
+    state.sessions[0].begin_turn("logged prompt");
+    store.save(&mut state).unwrap();
+    let backend =
+        WakuBackend::new_with_auth_and_session_event_log(settings, store, auth, session_event_log)
+            .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = shutdown.clone();
+    thread::spawn(move || {
+        serve(
+            listener,
+            TOKEN.into(),
+            Arc::new(backend),
+            server_shutdown,
+            ServerOptions {
+                allow_shutdown: true,
+                ..ServerOptions::default()
+            },
+        )
+        .unwrap();
+    });
+    let client = DaemonClient::connect(&address.to_string(), TOKEN.into()).unwrap();
+    (client, session_id, mock, shutdown)
+}
+
+fn shadow_event_rows(
+    directory: &std::path::Path,
+    session_id: Uuid,
+) -> Vec<(i64, String, String, String)> {
+    let connection = rusqlite::Connection::open(directory.join("app.db")).unwrap();
+    connection
+        .prepare(
+            "SELECT seq, kind, payload_json, event_id FROM session_events
+             WHERE stream_id = ?1 ORDER BY seq",
+        )
+        .unwrap()
+        .query_map([session_id.to_string()], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect()
+}
+
+#[test]
+fn session_event_log_captures_prompt_turn_usage_finish_when_enabled() {
+    let directory = std::env::temp_dir().join(format!("wakuwaku-shadow-on-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let workspace = directory.join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (client, session_id, mock, shutdown) =
+        gated_daemon_with_event_log(&directory, &workspace, true);
+    let mut session = {
+        let store = StateStore::daemon(directory.join("app.db"));
+        let mut state = store.load().unwrap();
+        let mut session = state
+            .sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .unwrap();
+        store.hydrate(&mut session).unwrap();
+        session
+    };
+    let (wake, _) = smol::channel::bounded(1);
+    let (events, rx) = event_channel(wake);
+    let handle = DriverHandle::start_restoring(
+        client.clone(),
+        session_id,
+        start_options(workspace.clone()),
+        Some(StartTask {
+            generation: session.transcript_baseline_generation(),
+            project: None,
+            session,
+        }),
+        events,
+    )
+    .unwrap();
+    wait_event(&rx, Duration::from_secs(5), |event| {
+        matches!(event, DriverEvent::Connected)
+    });
+    handle.prompt(PromptInput::text("logged prompt"));
+    mock.wait_arrival();
+    mock.release();
+    wait_event(&rx, Duration::from_secs(5), |event| {
+        matches!(event, DriverEvent::TurnFinished { success: true, .. })
+    });
+
+    let rows = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let rows = shadow_event_rows(&directory, session_id);
+            if rows
+                .iter()
+                .any(|(seq, kind, _, _)| kind == "turn_finished" && *seq > 0)
+            {
+                break rows;
+            }
+            if Instant::now() > deadline {
+                panic!("shadow rows never flushed: {rows:?}");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let kinds: Vec<&str> = rows.iter().map(|(_, kind, _, _)| kind.as_str()).collect();
+    let prompt_at = kinds
+        .iter()
+        .position(|kind| *kind == "prompt_observed")
+        .unwrap_or_else(|| panic!("prompt_observed recorded: {kinds:?}"));
+    let started_at = kinds
+        .iter()
+        .position(|kind| *kind == "turn_started")
+        .expect("turn_started recorded");
+    let usage_at = kinds
+        .iter()
+        .position(|kind| *kind == "usage_recorded")
+        .expect("usage_recorded recorded");
+    let finished_at = kinds
+        .iter()
+        .position(|kind| *kind == "turn_finished")
+        .expect("turn_finished recorded");
+    assert!(prompt_at < started_at, "{kinds:?}");
+    assert!(started_at < usage_at, "{kinds:?}");
+    assert!(usage_at < finished_at, "{kinds:?}");
+    assert!(
+        kinds.iter().all(|kind| !kind.contains("delta")),
+        "deltas stay live-only: {kinds:?}"
+    );
+    // Contiguous seq from 1.
+    for (index, (seq, _, _, _)) in rows.iter().enumerate() {
+        assert_eq!(*seq, (index + 1) as i64, "{kinds:?}");
+    }
+    // The usage event id matches the legacy usage_events row.
+    let usage_payload = &rows[usage_at].2;
+    let usage: serde_json::Value = serde_json::from_str(usage_payload).unwrap();
+    let shadow_id = usage["usage_event_id"].as_str().unwrap();
+    let envelope_id = &rows[usage_at].3;
+    assert_eq!(
+        envelope_id, shadow_id,
+        "the usage envelope event id must reuse the legacy usage event id"
+    );
+    let legacy = {
+        let store = StateStore::daemon(directory.join("app.db"));
+        store
+            .usage_events_between(0, i64::MAX)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.event_id.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert!(legacy.contains(&shadow_id.to_owned()), "{legacy:?}");
+
+    drop(handle);
+    client.shutdown();
+    shutdown.store(true, Ordering::Release);
+    std::fs::remove_dir_all(directory).ok();
+}
+
+#[test]
+fn session_event_log_writes_nothing_when_disabled() {
+    let directory = std::env::temp_dir().join(format!("wakuwaku-shadow-off-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let workspace = directory.join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (client, session_id, mock, shutdown) =
+        gated_daemon_with_event_log(&directory, &workspace, false);
+    let session = {
+        let store = StateStore::daemon(directory.join("app.db"));
+        store
+            .load()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .unwrap()
+    };
+    let (wake, _) = smol::channel::bounded(1);
+    let (events, rx) = event_channel(wake);
+    let handle = DriverHandle::start_restoring(
+        client.clone(),
+        session_id,
+        start_options(workspace.clone()),
+        Some(StartTask {
+            generation: session.transcript_baseline_generation(),
+            project: None,
+            session,
+        }),
+        events,
+    )
+    .unwrap();
+    wait_event(&rx, Duration::from_secs(5), |event| {
+        matches!(event, DriverEvent::Connected)
+    });
+    handle.prompt(PromptInput::text("quiet prompt"));
+    mock.wait_arrival();
+    mock.release();
+    wait_event(&rx, Duration::from_secs(5), |event| {
+        matches!(event, DriverEvent::TurnFinished { success: true, .. })
+    });
+    thread::sleep(Duration::from_millis(200));
+    assert!(shadow_event_rows(&directory, session_id).is_empty());
+
     drop(handle);
     client.shutdown();
     shutdown.store(true, Ordering::Release);

@@ -30,13 +30,46 @@ use wakuwaku_protocol::ExternalProvider;
 /// bounded wake channel lets the UI sleep until at least one event is ready.
 #[derive(Clone)]
 pub struct DriverEventSender {
-    events: Sender<DriverEvent>,
+    events: Sender<DriverOutput>,
     wake: smol::channel::Sender<()>,
+}
+
+/// Worker-to-daemon payload. `TurnStarted` carries the admitted-prompt
+/// snapshot and blocks provider dispatch until the daemon has persisted it;
+/// every other delivery stays an ordinary [`DriverEvent`].
+pub(crate) enum DriverOutput {
+    Event(DriverEvent),
+    TurnStarted {
+        snapshot: Box<wakuwaku_harness::SessionSnapshot>,
+        ack: Sender<bool>,
+    },
 }
 
 impl DriverEventSender {
     pub fn send(&self, event: DriverEvent) -> bool {
-        if self.events.send(event).is_err() {
+        if self.events.send(DriverOutput::Event(event)).is_err() {
+            return false;
+        }
+        let _ = self.wake.try_send(());
+        true
+    }
+
+    /// Hands the daemon the admitted-prompt snapshot. Returns false when the
+    /// forwarding thread is gone, so the caller treats the prompt as
+    /// unpersisted.
+    pub(crate) fn turn_started(
+        &self,
+        snapshot: wakuwaku_harness::SessionSnapshot,
+        ack: Sender<bool>,
+    ) -> bool {
+        if self
+            .events
+            .send(DriverOutput::TurnStarted {
+                snapshot: Box::new(snapshot),
+                ack,
+            })
+            .is_err()
+        {
             return false;
         }
         let _ = self.wake.try_send(());
@@ -44,15 +77,15 @@ impl DriverEventSender {
     }
 }
 
-pub fn event_channel(
+pub(crate) fn event_channel(
     wake: smol::channel::Sender<()>,
-) -> (DriverEventSender, Receiver<DriverEvent>) {
+) -> (DriverEventSender, Receiver<DriverOutput>) {
     let (events, receiver) = unbounded();
     (DriverEventSender { events, wake }, receiver)
 }
 
 #[cfg(test)]
-pub(crate) fn test_event_channel() -> (DriverEventSender, Receiver<DriverEvent>) {
+pub(crate) fn test_event_channel() -> (DriverEventSender, Receiver<DriverOutput>) {
     let (wake, _wakes) = smol::channel::bounded(1);
     event_channel(wake)
 }
@@ -209,8 +242,14 @@ mod tests {
             wakes.try_recv(),
             Err(smol::channel::TryRecvError::Empty)
         ));
-        assert!(matches!(received.try_recv(), Ok(DriverEvent::TextDelta(text)) if text == "one"));
-        assert!(matches!(received.try_recv(), Ok(DriverEvent::TextDelta(text)) if text == "two"));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(DriverOutput::Event(DriverEvent::TextDelta(text))) if text == "one"
+        ));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(DriverOutput::Event(DriverEvent::TextDelta(text))) if text == "two"
+        ));
     }
 
     #[test]
@@ -243,8 +282,8 @@ mod tests {
             loop {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 match received.recv_timeout(remaining) {
-                    Ok(DriverEvent::Connected) => break,
-                    Ok(DriverEvent::Error(error)) => {
+                    Ok(DriverOutput::Event(DriverEvent::Connected)) => break,
+                    Ok(DriverOutput::Event(DriverEvent::Error(error))) => {
                         assert!(
                             !error.contains("installed")
                                 && !error.contains("尚未安装")

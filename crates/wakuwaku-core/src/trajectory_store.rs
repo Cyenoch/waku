@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 use parking_lot::{Condvar, Mutex};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
 use crate::persistence::{apply_migrations, configure_sqlite, open_sqlite_read_only};
@@ -50,6 +50,14 @@ impl From<rusqlite::Error> for TrajectoryError {
 type LiveSink = Arc<dyn Fn(TrajectoryLiveUpdate) + Send + Sync>;
 type Ack = Sender<Result<i64, TrajectoryError>>;
 
+/// Outcome of a nonblocking shadow-event enqueue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionEventEnqueue {
+    Queued,
+    Full,
+    Disconnected,
+}
+
 enum WriterCommand {
     Ensure {
         session_id: Uuid,
@@ -79,6 +87,15 @@ enum WriterCommand {
         session_id: Uuid,
         message: String,
         ack: Option<Ack>,
+    },
+    AppendSessionEvents {
+        session_id: Uuid,
+        events: Vec<crate::session_events::NewSessionEvent>,
+        ack: Option<Ack>,
+    },
+    FlushSessionEvents {
+        session_id: Uuid,
+        ack: Ack,
     },
     Shutdown {
         ack: Ack,
@@ -270,6 +287,51 @@ impl TrajectoryWriter {
         })
     }
 
+    /// Blocking append for callers that need the resulting head. The
+    /// single writer thread serializes all event access.
+    pub fn append_session_events(
+        &self,
+        session_id: Uuid,
+        events: Vec<crate::session_events::NewSessionEvent>,
+    ) -> Result<i64, TrajectoryError> {
+        let (ack, rx) = bounded(1);
+        self.tx
+            .send(WriterCommand::AppendSessionEvents {
+                session_id,
+                events,
+                ack: Some(ack),
+            })
+            .map_err(|_| TrajectoryError::Disconnected)?;
+        rx.recv_timeout(default_flush_timeout())
+            .map_err(|_| TrajectoryError::Timeout)?
+    }
+
+    /// Nonblocking append for shadow capture: never waits on a full queue and
+    /// distinguishes a full bounded channel from a stopped writer.
+    pub fn try_append_session_events(
+        &self,
+        session_id: Uuid,
+        events: Vec<crate::session_events::NewSessionEvent>,
+    ) -> SessionEventEnqueue {
+        match self.tx.try_send(WriterCommand::AppendSessionEvents {
+            session_id,
+            events,
+            ack: None,
+        }) {
+            Ok(()) => SessionEventEnqueue::Queued,
+            Err(crossbeam_channel::TrySendError::Full(_)) => SessionEventEnqueue::Full,
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                SessionEventEnqueue::Disconnected
+            }
+        }
+    }
+
+    /// FIFO barrier that returns the session's current event head, or 0 when
+    /// no stream exists yet. Does not touch trajectory revisions.
+    pub fn flush_session_events(&self, session_id: Uuid) -> Result<i64, TrajectoryError> {
+        self.call(|ack| WriterCommand::FlushSessionEvents { session_id, ack })
+    }
+
     pub fn committed_revision(&self, session_id: Uuid) -> i64 {
         self.revisions.committed(session_id)
     }
@@ -359,7 +421,7 @@ impl Drop for TrajectoryWriter {
 }
 
 fn writer_loop(
-    connection: Connection,
+    mut connection: Connection,
     rx: Receiver<WriterCommand>,
     revisions: Arc<RevisionGate>,
     live: LiveSink,
@@ -376,7 +438,7 @@ fn writer_loop(
                 ack,
             } => {
                 let result =
-                    ensure_initialized(&connection, session_id, *source, &revisions, &live);
+                    ensure_initialized(&mut connection, session_id, *source, &revisions, &live);
                 let _ = ack.send(result);
             }
             WriterCommand::Submit {
@@ -384,7 +446,7 @@ fn writer_loop(
                 promote_exact,
                 ack,
             } => {
-                let result = apply_batch(&connection, batch, promote_exact, &revisions, &live);
+                let result = apply_batch(&mut connection, batch, promote_exact, &revisions, &live);
                 if let Some(ack) = ack {
                     let _ = ack.send(result);
                 }
@@ -393,7 +455,7 @@ fn writer_loop(
                 let _ = ack.send(Ok(revisions.committed(session_id)));
             }
             WriterCommand::Fork { source, dest, ack } => {
-                let result = fork_session(&connection, source, dest, &revisions, &live);
+                let result = fork_session(&mut connection, source, dest, &revisions, &live);
                 let _ = ack.send(result);
             }
             WriterCommand::Rewind {
@@ -401,8 +463,13 @@ fn writer_loop(
                 retained_turn,
                 ack,
             } => {
-                let result =
-                    rewind_session(&connection, session_id, retained_turn, &revisions, &live);
+                let result = rewind_session(
+                    &mut connection,
+                    session_id,
+                    retained_turn,
+                    &revisions,
+                    &live,
+                );
                 let _ = ack.send(result);
             }
             WriterCommand::MarkError {
@@ -410,10 +477,23 @@ fn writer_loop(
                 message,
                 ack,
             } => {
-                let result = mark_error(&connection, session_id, &message, &revisions, &live);
+                let result = mark_error(&mut connection, session_id, &message, &revisions, &live);
                 if let Some(ack) = ack {
                     let _ = ack.send(result);
                 }
+            }
+            WriterCommand::AppendSessionEvents {
+                session_id,
+                events,
+                ack,
+            } => {
+                let result = append_session_events_on(&mut connection, session_id, events);
+                if let Some(ack) = ack {
+                    let _ = ack.send(result);
+                }
+            }
+            WriterCommand::FlushSessionEvents { session_id, ack } => {
+                let _ = ack.send(session_event_head_on(&connection, session_id));
             }
         }
     }
@@ -421,7 +501,7 @@ fn writer_loop(
 }
 
 fn ensure_initialized(
-    connection: &Connection,
+    connection: &mut Connection,
     session_id: Uuid,
     source: TrajectoryInitSource,
     revisions: &RevisionGate,
@@ -467,7 +547,7 @@ fn ensure_initialized(
 }
 
 fn apply_batch(
-    connection: &Connection,
+    connection: &mut Connection,
     batch: TrajectoryBatch,
     promote_exact: bool,
     revisions: &RevisionGate,
@@ -511,13 +591,13 @@ fn apply_batch(
 }
 
 fn persist_session_batch(
-    connection: &Connection,
+    connection: &mut Connection,
     session_id: Uuid,
     availability: TrajectoryAvailability,
     batch: &TrajectoryBatch,
     promote_exact: bool,
 ) -> Result<TrajectorySessionMeta, TrajectoryError> {
-    let txn = connection.unchecked_transaction()?;
+    let txn = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     insert_skeleton_on(&txn, session_id, availability)?;
     apply_ops_on(&txn, batch, promote_exact)?;
     let meta = load_meta_on(&txn, session_id)?
@@ -527,11 +607,11 @@ fn persist_session_batch(
 }
 
 fn persist_ops(
-    connection: &Connection,
+    connection: &mut Connection,
     batch: &TrajectoryBatch,
     promote_exact: bool,
 ) -> Result<TrajectorySessionMeta, TrajectoryError> {
-    let txn = connection.unchecked_transaction()?;
+    let txn = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     apply_ops_on(&txn, batch, promote_exact)?;
     let meta = load_meta_on(&txn, batch.session_id)?
         .ok_or_else(|| TrajectoryError::Store("trajectory session missing".into()))?;
@@ -750,7 +830,7 @@ fn set_availability(
 }
 
 fn fork_session(
-    connection: &Connection,
+    connection: &mut Connection,
     source: Uuid,
     dest: Uuid,
     revisions: &RevisionGate,
@@ -759,7 +839,7 @@ fn fork_session(
     let Some(source_meta) = load_meta(connection, source)? else {
         return Ok(0);
     };
-    let txn = connection.unchecked_transaction()?;
+    let txn = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     txn.execute(
         "INSERT INTO trajectory_sessions (
              session_id, schema_version, generation, revision, next_sequence, availability
@@ -834,7 +914,7 @@ fn fork_session(
 }
 
 fn rewind_session(
-    connection: &Connection,
+    connection: &mut Connection,
     session_id: Uuid,
     retained_turn: i64,
     revisions: &RevisionGate,
@@ -843,7 +923,7 @@ fn rewind_session(
     let Some(mut meta) = load_meta(connection, session_id)? else {
         return Ok(0);
     };
-    let txn = connection.unchecked_transaction()?;
+    let txn = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     txn.execute(
         "DELETE FROM trajectory_records
          WHERE session_id = ?1 AND turn_count > ?2",
@@ -879,7 +959,7 @@ fn rewind_session(
 }
 
 fn mark_error(
-    connection: &Connection,
+    connection: &mut Connection,
     session_id: Uuid,
     message: &str,
     revisions: &RevisionGate,
@@ -901,6 +981,205 @@ fn mark_error(
         op: TrajectoryLiveOp::Reset,
     });
     Ok(meta.revision)
+}
+
+fn append_session_events_on(
+    connection: &mut Connection,
+    session_id: Uuid,
+    events: Vec<crate::session_events::NewSessionEvent>,
+) -> Result<i64, TrajectoryError> {
+    use crate::session_events::SESSION_EVENT_SCHEMA_VERSION;
+
+    if events.is_empty() {
+        return Err(TrajectoryError::Store(
+            "session event append received an empty batch".into(),
+        ));
+    }
+
+    struct PreparedEvent {
+        event_id: String,
+        command_id: Option<String>,
+        payload_json: String,
+        kind: &'static str,
+        created_at_ms: i64,
+        runtime_id: Option<String>,
+        turn_id: Option<String>,
+    }
+    let prepared = events
+        .into_iter()
+        .map(|event| {
+            let kind = event.payload.kind();
+            let payload_json = serde_json::to_string(&event.payload)
+                .map_err(|error| TrajectoryError::Store(error.to_string()))?;
+            Ok(PreparedEvent {
+                event_id: event.event_id.to_string(),
+                command_id: event.command_id,
+                payload_json,
+                kind,
+                created_at_ms: event.created_at_ms,
+                runtime_id: event.runtime_id.map(|id| id.to_string()),
+                turn_id: event.turn_id.map(|id| id.to_string()),
+            })
+        })
+        .collect::<Result<Vec<_>, TrajectoryError>>()?;
+
+    let command_id = prepared
+        .iter()
+        .filter_map(|event| event.command_id.as_ref())
+        .try_fold(None::<&String>, |acc, next| match acc {
+            None => Ok(Some(next)),
+            Some(current) if current == next => Ok(Some(current)),
+            Some(_) => Err(TrajectoryError::Store(
+                "session event batch mixes multiple command ids".into(),
+            )),
+        })?
+        .cloned();
+
+    let txn_started_ms = crate::model::unix_time_millis() as i64;
+    let txn = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+    let stream_id = session_id.to_string();
+    let created_at_ms: Option<i64> = txn
+        .query_row(
+            "SELECT created_at FROM sessions WHERE id = ?1",
+            params![session_id.to_string()],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+    let Some(created_at_ms) = created_at_ms else {
+        return Err(TrajectoryError::Store(format!(
+            "session event append for unknown session {session_id}"
+        )));
+    };
+
+    txn.execute(
+        "INSERT OR IGNORE INTO session_streams (stream_id, session_id, created_at_ms)
+         VALUES (?1, ?2, ?3)",
+        params![
+            stream_id,
+            session_id.to_string(),
+            created_at_ms.saturating_mul(1000)
+        ],
+    )?;
+    txn.execute(
+        "INSERT OR IGNORE INTO session_heads (stream_id, head_seq, revision, schema_version, updated_at_ms)
+         VALUES (?1, 0, 0, ?2, ?3)",
+        params![
+            stream_id,
+            SESSION_EVENT_SCHEMA_VERSION,
+            txn_started_ms
+        ],
+    )?;
+
+    let (mut head_seq, revision, mut last_event_id, schema_version): (
+        i64,
+        i64,
+        Option<String>,
+        i64,
+    ) = txn.query_row(
+        "SELECT head_seq, revision, last_event_id, schema_version
+         FROM session_heads WHERE stream_id = ?1",
+        params![stream_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    if schema_version != SESSION_EVENT_SCHEMA_VERSION {
+        return Err(TrajectoryError::Store(format!(
+            "session event stream {stream_id} uses schema {schema_version}; expected {SESSION_EVENT_SCHEMA_VERSION}"
+        )));
+    }
+
+    if let Some(command_id) = &command_id {
+        let existing = {
+            let mut statement = txn.prepare(
+                "SELECT event_id, kind, payload_json, runtime_id, turn_id
+                 FROM session_events WHERE stream_id = ?1 AND command_id = ?2
+                 ORDER BY seq",
+            )?;
+            let rows = statement.query_map(params![stream_id, command_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        if !existing.is_empty() {
+            let matches = existing.len() == prepared.len()
+                && existing.iter().zip(&prepared).all(|(row, event)| {
+                    row.0 == event.event_id
+                        && row.1 == event.kind
+                        && row.2 == event.payload_json
+                        && row.3 == event.runtime_id
+                        && row.4 == event.turn_id
+                });
+            if matches {
+                txn.commit()?;
+                return Ok(head_seq);
+            }
+            return Err(TrajectoryError::Store(format!(
+                "session event command {command_id} already recorded with different events"
+            )));
+        }
+    }
+
+    for event in &prepared {
+        head_seq += 1;
+        txn.execute(
+            "INSERT INTO session_events (
+                 stream_id, seq, event_id, command_id, schema_version, kind,
+                 payload_json, created_at_ms, runtime_id, turn_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                stream_id,
+                head_seq,
+                event.event_id,
+                command_id,
+                SESSION_EVENT_SCHEMA_VERSION,
+                event.kind,
+                event.payload_json,
+                event.created_at_ms,
+                event.runtime_id,
+                event.turn_id,
+            ],
+        )?;
+        last_event_id = Some(event.event_id.clone());
+    }
+    txn.execute(
+        "UPDATE session_heads
+         SET head_seq = ?2, revision = ?3, last_event_id = ?4, updated_at_ms = ?5
+         WHERE stream_id = ?1",
+        params![
+            stream_id,
+            head_seq,
+            revision + 1,
+            last_event_id,
+            txn_started_ms
+        ],
+    )?;
+    txn.commit()?;
+    Ok(head_seq)
+}
+
+fn session_event_head_on(
+    connection: &Connection,
+    session_id: Uuid,
+) -> Result<i64, TrajectoryError> {
+    match connection.query_row(
+        "SELECT head_seq FROM session_heads WHERE stream_id = ?1",
+        params![session_id.to_string()],
+        |row| row.get(0),
+    ) {
+        Ok(head_seq) => Ok(head_seq),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+        Err(error) => Err(TrajectoryError::Store(error.to_string())),
+    }
 }
 
 fn load_meta(
@@ -1197,6 +1476,414 @@ mod tests {
                 model_hint: "m".into(),
             }],
         )
+    }
+
+    #[test]
+    fn immediate_transaction_waits_for_a_peer_write_lock_then_commits() {
+        let (directory, store, _writer, session_id) = fixture();
+        let seed_row = session_id.to_string();
+
+        // Seed one trajectory session row so both contenders UPDATE a row
+        // that already satisfies the FK to `sessions`.
+        let seed = Connection::open(store.path()).unwrap();
+        configure_sqlite(&seed).unwrap();
+        seed.execute(
+            "INSERT INTO trajectory_sessions (
+                 session_id, schema_version, generation, revision, next_sequence, availability
+             ) VALUES (?1, 1, 0, 0, 1, 'exact')",
+            [&seed_row],
+        )
+        .unwrap();
+        drop(seed);
+
+        let mut a = Connection::open(store.path()).unwrap();
+        configure_sqlite(&a).unwrap();
+        let mut b = Connection::open(store.path()).unwrap();
+        configure_sqlite(&b).unwrap();
+
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel::<()>();
+        let (committed_tx, committed_rx) = std::sync::mpsc::channel::<Instant>();
+        let holder_row = seed_row.clone();
+        let holder = std::thread::spawn(move || {
+            let txn = a
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            // The immediate transaction holds the write lock from here.
+            acquired_tx.send(()).unwrap();
+            txn.execute(
+                "UPDATE trajectory_sessions SET revision = revision + 1 WHERE session_id = ?1",
+                [&holder_row],
+            )
+            .unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            let committed = Instant::now();
+            txn.commit().unwrap();
+            committed_tx.send(committed).unwrap();
+        });
+
+        // B only starts once A provably holds the write lock.
+        acquired_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let waiter_row = seed_row;
+        let waiter = std::thread::spawn(move || {
+            let started = Instant::now();
+            let txn = b
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let acquired = Instant::now();
+            txn.execute(
+                "UPDATE trajectory_sessions SET generation = generation + 1 WHERE session_id = ?1",
+                [&waiter_row],
+            )
+            .unwrap();
+            txn.commit().unwrap();
+            (started, acquired)
+        });
+
+        holder.join().unwrap();
+        let holder_committed = committed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (waiter_started, waiter_acquired) = waiter.join().unwrap();
+
+        let connection = Connection::open(store.path()).unwrap();
+        configure_sqlite(&connection).unwrap();
+        let (revision, generation): (i64, i64) = connection
+            .query_row(
+                "SELECT revision, generation FROM trajectory_sessions WHERE session_id = ?1",
+                [session_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (revision, generation),
+            (1, 1),
+            "both writers must commit under the busy timeout"
+        );
+        assert!(
+            waiter_started < holder_committed,
+            "B must begin contending before A releases the lock"
+        );
+        assert!(
+            waiter_acquired > holder_committed,
+            "B's immediate transaction must have waited for A's commit"
+        );
+        drop(connection);
+        cleanup(directory);
+    }
+
+    fn observed_event(
+        payload: crate::session_events::SessionEventPayload,
+    ) -> crate::session_events::NewSessionEvent {
+        crate::session_events::NewSessionEvent::observed(None, None, payload)
+    }
+
+    #[test]
+    fn session_events_append_assigns_contiguous_seq_and_advances_head() {
+        let (directory, _store, writer, session_id) = fixture();
+        let first_event =
+            observed_event(crate::session_events::SessionEventPayload::TurnStarted {});
+        let second_event =
+            observed_event(crate::session_events::SessionEventPayload::TurnFinished {
+                success: true,
+                summary: Some("done".into()),
+            });
+        let head = writer
+            .append_session_events(session_id, vec![first_event, second_event])
+            .unwrap();
+        assert_eq!(head, 2);
+        assert_eq!(writer.flush_session_events(session_id).unwrap(), 2);
+
+        let final_event =
+            observed_event(crate::session_events::SessionEventPayload::ProcessExited {});
+        let expected_final_id = final_event.event_id;
+        let head = writer
+            .append_session_events(session_id, vec![final_event])
+            .unwrap();
+        assert_eq!(head, 3);
+
+        let connection = Connection::open(_store.path()).unwrap();
+        configure_sqlite(&connection).unwrap();
+        let seqs: Vec<i64> = connection
+            .prepare("SELECT seq FROM session_events WHERE stream_id = ?1 ORDER BY seq")
+            .unwrap()
+            .query_map([session_id.to_string()], |row| row.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 3]);
+        let (head_seq, revision, last_event_id): (i64, i64, Option<String>) = connection
+            .query_row(
+                "SELECT head_seq, revision, last_event_id FROM session_heads WHERE stream_id = ?1",
+                [session_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(head_seq, 3);
+        assert_eq!(revision, 2);
+        assert_eq!(
+            last_event_id.as_deref(),
+            Some(expected_final_id.to_string().as_str()),
+            "head must point at the final appended event"
+        );
+        let (stream_created_ms, session_created_s): (i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT created_at_ms FROM session_streams WHERE stream_id = ?1),
+                        (SELECT created_at FROM sessions WHERE id = ?1)",
+                [session_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            stream_created_ms,
+            session_created_s.saturating_mul(1000),
+            "stream creation derives from the session row's seconds timestamp"
+        );
+        drop(connection);
+        cleanup(directory);
+    }
+
+    #[test]
+    fn exact_command_retry_returns_existing_head_without_new_rows() {
+        let (directory, _store, writer, session_id) = fixture();
+        let command_id = "retry-1".to_string();
+        let first_event =
+            observed_event(crate::session_events::SessionEventPayload::TurnStarted {})
+                .with_command_id(command_id.clone());
+        let first = writer
+            .append_session_events(session_id, vec![first_event.clone()])
+            .unwrap();
+        // A retry replays the same command with identical events; only the
+        // created timestamp may differ.
+        let mut retried = first_event.clone();
+        retried.created_at_ms += 7;
+        let second = writer
+            .append_session_events(session_id, vec![retried])
+            .unwrap();
+        assert_eq!(first, second);
+        let connection = Connection::open(_store.path()).unwrap();
+        configure_sqlite(&connection).unwrap();
+        let (rows, head_seq, revision, last_event_id): (i64, i64, i64, Option<String>) = connection
+            .query_row(
+                "SELECT
+                        (SELECT COUNT(*) FROM session_events WHERE stream_id = ?1),
+                        head_seq, revision, last_event_id
+                     FROM session_heads WHERE stream_id = ?1",
+                [session_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(rows, 1, "an exact retry appends nothing");
+        assert_eq!(head_seq, 1);
+        assert_eq!(revision, 1, "an exact retry does not bump the revision");
+        assert_eq!(
+            last_event_id.as_deref(),
+            Some(first_event.event_id.to_string().as_str()),
+            "an exact retry keeps the original head event"
+        );
+        drop(connection);
+        cleanup(directory);
+    }
+
+    #[test]
+    fn mismatched_command_reuse_conflicts() {
+        let (directory, _store, writer, session_id) = fixture();
+        let command_id = "retry-2".to_string();
+        writer
+            .append_session_events(
+                session_id,
+                vec![
+                    observed_event(crate::session_events::SessionEventPayload::TurnStarted {})
+                        .with_command_id(command_id.clone()),
+                ],
+            )
+            .unwrap();
+        let error = writer
+            .append_session_events(
+                session_id,
+                vec![
+                    observed_event(crate::session_events::SessionEventPayload::ProcessExited {})
+                        .with_command_id(command_id.clone()),
+                ],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("different events"), "{error}");
+        assert_eq!(writer.flush_session_events(session_id).unwrap(), 1);
+        cleanup(directory);
+    }
+
+    #[test]
+    fn duplicate_event_id_rolls_back_whole_batch() {
+        let (directory, _store, writer, session_id) = fixture();
+        let seeded = observed_event(crate::session_events::SessionEventPayload::TurnStarted {});
+        let seeded_id = seeded.event_id;
+        writer
+            .append_session_events(session_id, vec![seeded.clone()])
+            .unwrap();
+        // A later batch reusing the committed event id must roll back without
+        // disturbing the committed head.
+        let error = writer
+            .append_session_events(
+                session_id,
+                vec![
+                    observed_event(crate::session_events::SessionEventPayload::ProcessExited {}),
+                    seeded,
+                    observed_event(crate::session_events::SessionEventPayload::Error {
+                        message: "x".into(),
+                    }),
+                ],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("UNIQUE"), "{error}");
+        let connection = Connection::open(_store.path()).unwrap();
+        configure_sqlite(&connection).unwrap();
+        let (rows, head_seq, revision, last_event_id): (i64, i64, i64, Option<String>) = connection
+            .query_row(
+                "SELECT
+                        (SELECT COUNT(*) FROM session_events WHERE stream_id = ?1),
+                        head_seq, revision, last_event_id
+                     FROM session_heads WHERE stream_id = ?1",
+                [session_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(head_seq, 1);
+        assert_eq!(revision, 1);
+        assert_eq!(
+            last_event_id.as_deref(),
+            Some(seeded_id.to_string().as_str()),
+            "rollback must preserve the committed head event"
+        );
+        drop(connection);
+        cleanup(directory);
+    }
+
+    #[test]
+    fn unknown_schema_and_bad_batches_reject_without_mutation() {
+        let (directory, store, writer, session_id) = fixture();
+        // Empty batch rejects before any transaction opens.
+        assert!(
+            writer
+                .append_session_events(session_id, Vec::new())
+                .is_err()
+        );
+        // Unknown session rejects and writes no stream.
+        assert!(
+            writer
+                .append_session_events(
+                    Uuid::new_v4(),
+                    vec![observed_event(
+                        crate::session_events::SessionEventPayload::TurnStarted {}
+                    )]
+                )
+                .is_err()
+        );
+        assert_eq!(
+            writer.flush_session_events(Uuid::new_v4()).unwrap(),
+            0,
+            "no stream exists for an unknown session"
+        );
+        {
+            let connection = Connection::open(store.path()).unwrap();
+            configure_sqlite(&connection).unwrap();
+            let streams: i64 = connection
+                .query_row("SELECT COUNT(*) FROM session_streams", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(streams, 0, "the rejected append must leave no stream");
+            drop(connection);
+        }
+
+        // Seed the fixture session's own head at schema 2; appends must
+        // refuse before writing any row.
+        drop(writer);
+        {
+            let mut connection = Connection::open(store.path()).unwrap();
+            configure_sqlite(&connection).unwrap();
+            let txn = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            txn.execute(
+                "INSERT INTO session_streams (stream_id, session_id, created_at_ms)
+                 VALUES (?1, ?2, 1)",
+                params![session_id.to_string(), session_id.to_string()],
+            )
+            .unwrap();
+            txn.execute(
+                "INSERT INTO session_heads (stream_id, schema_version, updated_at_ms)
+                 VALUES (?1, 2, 1)",
+                params![session_id.to_string()],
+            )
+            .unwrap();
+            txn.commit().unwrap();
+        }
+        let writer = TrajectoryWriter::open(store.path()).unwrap();
+        let error = writer
+            .append_session_events(
+                session_id,
+                vec![observed_event(
+                    crate::session_events::SessionEventPayload::TurnStarted {},
+                )],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("expected 1"), "{error}");
+        let connection = Connection::open(store.path()).unwrap();
+        configure_sqlite(&connection).unwrap();
+        let events: i64 = connection
+            .query_row("SELECT COUNT(*) FROM session_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(events, 0, "schema mismatch must not write rows");
+        drop(connection);
+        cleanup(directory);
+    }
+
+    #[test]
+    fn deleting_a_session_leaves_diagnostic_event_rows() {
+        let (directory, store, writer, session_id) = fixture();
+        writer
+            .append_session_events(
+                session_id,
+                vec![observed_event(
+                    crate::session_events::SessionEventPayload::TurnStarted {},
+                )],
+            )
+            .unwrap();
+        // Seed a legacy usage row so the deletion comparison is meaningful.
+        StateStore::daemon(store.path().to_path_buf())
+            .insert_usage_event(&crate::usage_history::UsageEvent {
+                event_id: Uuid::new_v4(),
+                session_id,
+                project_path: String::new(),
+                provider: crate::model::ProviderId::new("test"),
+                model: "m".into(),
+                timestamp_ms: 1,
+                input: 1,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: None,
+            })
+            .unwrap();
+        drop(writer);
+        let connection = Connection::open(store.path()).unwrap();
+        configure_sqlite(&connection).unwrap();
+        connection
+            .execute(
+                "DELETE FROM sessions WHERE id = ?1",
+                params![session_id.to_string()],
+            )
+            .unwrap();
+        let streams: i64 = connection
+            .query_row("SELECT COUNT(*) FROM session_streams", [], |row| row.get(0))
+            .unwrap();
+        let events: i64 = connection
+            .query_row("SELECT COUNT(*) FROM session_events", [], |row| row.get(0))
+            .unwrap();
+        let usage: i64 = connection
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(streams, 1, "diagnostic streams survive session delete");
+        assert_eq!(events, 1);
+        assert_eq!(usage, 1, "usage_events rows are never cascade-deleted");
+        drop(connection);
+        cleanup(directory);
     }
 
     #[test]

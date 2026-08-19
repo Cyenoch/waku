@@ -2972,6 +2972,206 @@ mod tests {
     }
 
     #[test]
+    fn session_event_migration_creates_shadow_log_tables() {
+        // Upgrade path: a real pre-0005 database applies 0000..=0004 first.
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(MIGRATIONS_TABLE).unwrap();
+        for (tag, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 1) {
+            connection
+                .execute_batch(sql)
+                .unwrap_or_else(|error| panic!("migration {tag} failed: {error}"));
+            connection
+                .execute(
+                    "INSERT INTO migrations(tag, applied_at) VALUES(?1, 0)",
+                    params![tag],
+                )
+                .unwrap();
+        }
+        let pre_upgrade: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (
+                     'session_streams', 'session_heads', 'session_events'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre_upgrade, 0, "pre-0005 databases have no event tables");
+        // Only 0005 remains to run.
+        assert_eq!(apply_migrations(&connection).unwrap(), 1);
+
+        let columns = |table: &str| -> Vec<String> {
+            connection
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect()
+        };
+        assert_eq!(
+            columns("session_streams"),
+            vec![
+                "stream_id",
+                "session_id",
+                "parent_stream_id",
+                "parent_seq",
+                "generation",
+                "created_at_ms",
+                "retired_at_ms"
+            ]
+        );
+        assert_eq!(
+            columns("session_heads"),
+            vec![
+                "stream_id",
+                "head_seq",
+                "revision",
+                "schema_version",
+                "last_event_id",
+                "updated_at_ms"
+            ]
+        );
+        assert_eq!(
+            columns("session_events"),
+            vec![
+                "stream_id",
+                "seq",
+                "event_id",
+                "command_id",
+                "schema_version",
+                "kind",
+                "payload_json",
+                "created_at_ms",
+                "runtime_id",
+                "turn_id"
+            ]
+        );
+
+        let indexes: Vec<String> = connection
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (
+                     'session_streams_by_session_generation',
+                     'session_events_by_event_id',
+                     'session_events_by_command',
+                     'session_events_by_kind',
+                     'session_events_by_turn'
+                 ) ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(indexes.len(), 5, "{indexes:?}");
+        // A command id identifies a whole batch, so its index is a plain
+        // lookup index rather than a uniqueness constraint.
+        let command_index_unique: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'session_events_by_command' AND sql LIKE '%UNIQUE%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(command_index_unique, 0);
+
+        // FK targets point at `session_streams`, and head/event deletes cascade.
+        let (stream_fk, head_fk, event_fk): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM pragma_foreign_key_list('session_streams')),
+                    (SELECT COUNT(*) FROM pragma_foreign_key_list('session_heads')),
+                    (SELECT COUNT(*) FROM pragma_foreign_key_list('session_events'))",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((stream_fk, head_fk, event_fk), (1, 1, 1));
+        connection
+            .execute(
+                "INSERT INTO session_streams (stream_id, session_id, created_at_ms) VALUES ('s1', 'x', 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_heads (stream_id, schema_version, updated_at_ms)
+                 VALUES ('s1', 1, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_events (
+                     stream_id, seq, event_id, schema_version, kind, payload_json, created_at_ms
+                 ) VALUES ('s1', 1, 'e1', 1, 'turn_started', '{}', 1)",
+                [],
+            )
+            .unwrap();
+        // CHECK constraints reject corrupt rows while the parent stream still
+        // exists, so a rejection can only come from the CHECK itself.
+        for sql in [
+            "INSERT INTO session_streams (stream_id, session_id, parent_seq, created_at_ms) VALUES ('s2', 'x', 0, 1)",
+            "INSERT INTO session_streams (stream_id, session_id, generation, created_at_ms) VALUES ('s2', 'x', -1, 1)",
+            "INSERT INTO session_heads (stream_id, head_seq, schema_version, updated_at_ms) VALUES ('s2', -1, 1, 1)",
+            "INSERT INTO session_heads (stream_id, schema_version, updated_at_ms) VALUES ('s2', 0, 1)",
+            "INSERT INTO session_heads (stream_id, revision, schema_version, updated_at_ms) VALUES ('s1', -1, 1, 1)",
+            "INSERT INTO session_events (stream_id, seq, event_id, schema_version, kind, payload_json, created_at_ms) VALUES ('s1', 0, 'e', 1, 'k', '{}', 1)",
+            "INSERT INTO session_events (stream_id, seq, event_id, schema_version, kind, payload_json, created_at_ms) VALUES ('s1', 2, 'e', 0, 'k', '{}', 1)",
+            "INSERT INTO session_events (stream_id, seq, event_id, schema_version, kind, payload_json, created_at_ms) VALUES ('s1', 2, 'e', 1, '', '{}', 1)",
+            "INSERT INTO session_events (stream_id, seq, event_id, schema_version, kind, payload_json, created_at_ms) VALUES ('s1', 2, 'e', 1, 'k', 'not json', 1)",
+        ] {
+            assert!(
+                connection.execute(sql, []).is_err(),
+                "CHECK must reject: {sql}"
+            );
+        }
+        // The rejected rows left nothing behind.
+        let (streams, heads, events): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM session_streams),
+                    (SELECT COUNT(*) FROM session_heads),
+                    (SELECT COUNT(*) FROM session_events)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((streams, heads, events), (1, 1, 1));
+        connection
+            .execute("DELETE FROM session_streams WHERE stream_id = 's1'", [])
+            .unwrap();
+        let (cascaded_heads, cascaded_events): (i64, i64) = connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM session_heads),
+                    (SELECT COUNT(*) FROM session_events)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cascaded_heads, 0);
+        assert_eq!(cascaded_events, 0);
+
+        // The journal and the embedded SQL files stay in lockstep.
+        let journal = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../db/migrations/meta/_journal.json"),
+        )
+        .unwrap();
+        let journal: serde_json::Value = serde_json::from_str(&journal).unwrap();
+        let tags: Vec<String> = journal["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["tag"].as_str().unwrap().to_string())
+            .collect();
+        let embedded: Vec<String> = MIGRATIONS.iter().map(|(tag, _)| tag.to_string()).collect();
+        assert_eq!(tags, embedded, "journal and SQL files must agree");
+    }
+
+    #[test]
     fn recorded_migrations_are_skipped() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(MIGRATIONS_TABLE).unwrap();

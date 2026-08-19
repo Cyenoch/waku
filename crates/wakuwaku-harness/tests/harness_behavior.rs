@@ -323,7 +323,13 @@ async fn openai_responses_round_trip_builds_request_and_parses_sse() {
     let mut events = Vec::new();
     let mut sink = |event| events.push(event);
     let message = provider
-        .complete(&context, &options, Some("test-model"), CancelToken::new(), &mut sink)
+        .complete(
+            &context,
+            &options,
+            Some("test-model"),
+            CancelToken::new(),
+            &mut sink,
+        )
         .await
         .unwrap();
 
@@ -476,7 +482,13 @@ async fn openai_chat_round_trip_preserves_interleaved_tools_reasoning_and_usage(
     let mut events = Vec::new();
     let mut sink = |event| events.push(event);
     let message = provider
-        .complete(&context, &options, Some("test-model"), CancelToken::new(), &mut sink)
+        .complete(
+            &context,
+            &options,
+            Some("test-model"),
+            CancelToken::new(),
+            &mut sink,
+        )
         .await
         .unwrap();
 
@@ -558,7 +570,13 @@ async fn anthropic_messages_round_trip_preserves_signature_usage_and_tool() {
     let mut events = Vec::new();
     let mut sink = |event| events.push(event);
     let message = provider
-        .complete(&context, &options, Some("test-model"), CancelToken::new(), &mut sink)
+        .complete(
+            &context,
+            &options,
+            Some("test-model"),
+            CancelToken::new(),
+            &mut sink,
+        )
         .await
         .unwrap();
 
@@ -625,7 +643,13 @@ async fn retry_after_retries_429_and_caps_server_delay_without_leaking_key() {
     let options = RequestOptions::default();
     let mut sink = |_| {};
     let message = provider
-        .complete(&context, &options, Some("test-model"), CancelToken::new(), &mut sink)
+        .complete(
+            &context,
+            &options,
+            Some("test-model"),
+            CancelToken::new(),
+            &mut sink,
+        )
         .await
         .unwrap();
     assert_eq!(message.stop_reason, StopReason::Stop);
@@ -651,7 +675,13 @@ async fn retry_after_retries_429_and_caps_server_delay_without_leaking_key() {
     .with_retry(retry);
     let mut sink = |_| {};
     let error = provider
-        .complete(&context, &options, Some("test-model"), CancelToken::new(), &mut sink)
+        .complete(
+            &context,
+            &options,
+            Some("test-model"),
+            CancelToken::new(),
+            &mut sink,
+        )
         .await
         .expect_err("expected an error");
     assert!(matches!(error, HarnessError::Http { status: 429, .. }));
@@ -727,7 +757,13 @@ async fn cancellation_interrupts_retry_delay_and_missing_terminal_is_error_state
     let task = tokio::spawn(async move {
         let mut sink = |_| {};
         provider
-            .complete(&context, &options, Some("test-model"), task_token, &mut sink)
+            .complete(
+                &context,
+                &options,
+                Some("test-model"),
+                task_token,
+                &mut sink,
+            )
             .await
     });
     sleep(Duration::from_millis(20)).await;
@@ -912,6 +948,65 @@ fn final_assistant() -> AssistantMessage {
         stop_reason: StopReason::Stop,
         error_message: None,
     }
+}
+
+#[tokio::test]
+async fn admit_prompt_then_continue_sends_one_user_message() {
+    let provider = Arc::new(ScriptedProvider::new(vec![final_assistant()]));
+    let harness = Harness::new(provider.clone());
+    let mut session = wakuwaku_harness::Session::new(None);
+    let admitted = session.admit_prompt("B");
+    let admitted_text = admitted
+        .transcript()
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => Some(
+                user.parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        wakuwaku_harness::UserPart::Text(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(admitted_text, vec!["B".to_owned()]);
+    assert!(
+        admitted.checkpoints.is_empty(),
+        "admission alone must not record a completed checkpoint"
+    );
+    let outcome = harness
+        .continue_run(&mut session, CancelToken::new(), |_| {}, ())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, RunOutcome::Completed));
+    let seen = provider.seen_messages.lock().unwrap();
+    assert_eq!(seen.len(), 1, "one provider request");
+    let user_texts: Vec<String> = seen[0]
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => Some(
+                user.parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        wakuwaku_harness::UserPart::Text(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        user_texts
+            .iter()
+            .filter(|text| text.as_str() == "B")
+            .count(),
+        1,
+        "admitted prompt appears exactly once in provider context"
+    );
 }
 
 #[tokio::test]
