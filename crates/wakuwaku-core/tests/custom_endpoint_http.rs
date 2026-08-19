@@ -13,7 +13,9 @@ use serde_json::json;
 use uuid::Uuid;
 use wakuwaku_client::driver::{DriverHandle, DriverStartOptions, event_channel};
 use wakuwaku_client::{DaemonClient, PromptInput};
-use wakuwaku_core::auth::{AuthRuntime, AuthService, MemoryCredentialStore};
+use wakuwaku_core::auth::{
+    AuthRuntime, AuthService, CredentialStore, MemoryCredentialStore, StoredCredential,
+};
 use wakuwaku_core::daemon::WakuBackend;
 use wakuwaku_core::persistence::{PersistedState, StateStore};
 use wakuwaku_core::{DaemonSettingsStore, ServerOptions, serve};
@@ -207,19 +209,25 @@ fn sse_anthropic(text: &str) -> String {
     .map(|event| format!("data: {event}\r\n\r\n"))
     .collect()
 }
-
 struct Harness {
     client: DaemonClient,
     workspace: std::path::PathBuf,
     session_id: Uuid,
     shutdown: Arc<AtomicBool>,
+    creds: Arc<MemoryCredentialStore>,
 }
 
 fn start_daemon(provider: Option<&str>, model: Option<&str>) -> Harness {
     let directory = std::env::temp_dir().join(format!("wakuwaku-custom-ep-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
     let workspace = directory.join("ws");
-    std::fs::create_dir_all(&workspace).unwrap();
+    let creds = Arc::new(MemoryCredentialStore::default());
+    let auth = AuthService::new(AuthRuntime::testing(
+        &directory,
+        creds.clone(),
+        AuthEndpoints::production(),
+    ))
+    .unwrap();
     let settings = DaemonSettingsStore::open(directory.join("settings.json")).unwrap();
     let store = StateStore::daemon(directory.join("app.db"));
     let mut state = PersistedState::fresh(workspace.clone());
@@ -233,12 +241,6 @@ fn start_daemon(provider: Option<&str>, model: Option<&str>) -> Harness {
     let session_id = state.sessions[0].id;
     state.mark_session_dirty(session_id);
     store.save(&mut state).unwrap();
-    let auth = AuthService::new(AuthRuntime::testing(
-        &directory,
-        Arc::new(MemoryCredentialStore::default()),
-        AuthEndpoints::production(),
-    ))
-    .unwrap();
     let backend = WakuBackend::new_with_auth(settings, store, auth).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -263,6 +265,7 @@ fn start_daemon(provider: Option<&str>, model: Option<&str>) -> Harness {
         workspace,
         session_id,
         shutdown,
+        creds,
     }
 }
 
@@ -301,7 +304,6 @@ fn update_settings_rejects_builtin_id_and_unusable_url() {
             "Looks configurable",
             "http://127.0.0.1:9/v1",
             ApiFormat::OpenAiResponses,
-            "gpt-5",
         )],
         extra: Default::default(),
     };
@@ -321,7 +323,6 @@ fn update_settings_rejects_builtin_id_and_unusable_url() {
             "Broken",
             "ftp://example.test/v1",
             ApiFormat::OpenAiChat,
-            "gpt-5",
         )],
         extra: Default::default(),
     };
@@ -341,7 +342,6 @@ fn update_settings_rejects_builtin_id_and_unusable_url() {
 fn custom_responses_discovers_and_routes_selected_model() {
     run_custom_format(CustomCase {
         id: "corp-responses",
-        env: "WAKUWAKU_CUSTOM_RESP_KEY",
         key: "sk-resp",
         format: ApiFormat::OpenAiResponses,
         models: openai_models_body(),
@@ -357,7 +357,6 @@ fn custom_responses_discovers_and_routes_selected_model() {
 fn custom_chat_discovers_and_routes_selected_model() {
     run_custom_format(CustomCase {
         id: "corp-chat",
-        env: "WAKUWAKU_CUSTOM_CHAT_KEY",
         key: "sk-chat",
         format: ApiFormat::OpenAiChat,
         models: openai_models_body(),
@@ -373,7 +372,6 @@ fn custom_chat_discovers_and_routes_selected_model() {
 fn custom_anthropic_discovers_and_routes_selected_model() {
     run_custom_format(CustomCase {
         id: "corp-anthropic",
-        env: "WAKUWAKU_CUSTOM_ANTH_KEY",
         key: "sk-ant",
         format: ApiFormat::Anthropic,
         models: anthropic_models_body(),
@@ -387,7 +385,6 @@ fn custom_anthropic_discovers_and_routes_selected_model() {
 
 struct CustomCase {
     id: &'static str,
-    env: &'static str,
     key: &'static str,
     format: ApiFormat,
     models: String,
@@ -399,18 +396,17 @@ struct CustomCase {
 }
 
 fn run_custom_format(case: CustomCase) {
-    unsafe {
-        std::env::set_var(case.env, case.key);
-    }
     let mock = MockHttp::new();
     mock.push("/v1/models", 200, case.models);
     mock.push(case.completion_path, 200, case.completion);
     let port = mock.bind();
     let base = format!("http://127.0.0.1:{port}/v1");
     let harness = start_daemon(Some(case.id), Some(case.select));
-    let mut provider =
-        ExternalProvider::new(case.id, case.id, base.clone(), case.format, case.select);
-    provider.api_key_env = Some(case.env.into());
+    let provider = ExternalProvider::new(case.id, case.id, base.clone(), case.format);
+    harness.creds.set(
+        &ProviderId::new(case.id),
+        StoredCredential::api_key(wakuwaku_protocol::SecretString::new(case.key)),
+    ).unwrap();
     harness
         .client
         .request(

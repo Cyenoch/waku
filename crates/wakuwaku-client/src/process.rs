@@ -293,6 +293,8 @@ struct SupervisorInner {
     target: Mutex<DaemonTarget>,
     exposure: Mutex<Option<DaemonExposureSettings>>,
     restart: Mutex<()>,
+    /// Serializes the background settings writer with confirmed UI commits.
+    settings_persist: Mutex<()>,
     settings: Mutex<DaemonSettings>,
     persisted_settings: Mutex<Option<DaemonSettings>>,
     settings_updates: Sender<DaemonSettings>,
@@ -375,6 +377,7 @@ impl DaemonSupervisor {
             target: Mutex::new(target),
             exposure: Mutex::new(exposure),
             restart: Mutex::new(()),
+            settings_persist: Mutex::new(()),
             settings: Mutex::new(settings),
             // Desktop-owned settings are written after the first successful
             // snapshot so a failed launch cannot overwrite a good document.
@@ -454,7 +457,6 @@ impl DaemonSupervisor {
         }
     }
 
-    /// Queue a daemon settings update without blocking the desktop UI thread.
     pub fn update_settings(&self, settings: DaemonSettings) -> anyhow::Result<()> {
         *self.inner.settings.lock() = settings.clone();
         if self.inner.persisted_settings.lock().as_ref() == Some(&settings) {
@@ -464,6 +466,28 @@ impl DaemonSupervisor {
             .settings_updates
             .send(settings)
             .map_err(|_| anyhow::anyhow!("WakuWaku daemon settings writer is closed"))
+    }
+
+    /// Persist daemon settings synchronously and report the daemon's Ack.
+    ///
+    /// Unlike [`Self::update_settings`], this does not publish a new desired
+    /// snapshot until the daemon has accepted it, so callers can keep their
+    /// local state and editor intact when the write fails.
+    pub fn update_settings_confirmed(&self, settings: DaemonSettings) -> anyhow::Result<()> {
+        let _persist = self.inner.settings_persist.lock();
+        let response = self.inner.target.lock().client().request(
+            Uuid::nil(),
+            Uuid::nil(),
+            Command::UpdateSettings {
+                settings: settings.clone(),
+            },
+        )?;
+        if !matches!(response, ResponsePayload::Ack) {
+            bail!("WakuWaku daemon returned an invalid settings update response");
+        }
+        *self.inner.settings.lock() = settings.clone();
+        *self.inner.persisted_settings.lock() = Some(settings);
+        Ok(())
     }
 }
 
@@ -558,17 +582,17 @@ fn replace_local_daemon(
     Ok(())
 }
 
-fn queue_settings_refresh(inner: &SupervisorInner) {
-    let settings = inner.settings.lock().clone();
-    *inner.persisted_settings.lock() = None;
-    let _ = inner.settings_updates.send(settings);
-}
-
 fn read_settings(client: &DaemonClient) -> anyhow::Result<DaemonSettings> {
     match client.request(Uuid::nil(), Uuid::nil(), Command::GetSettings)? {
         ResponsePayload::Settings { settings } => Ok(settings),
         _ => bail!("WakuWaku daemon returned an invalid settings response"),
     }
+}
+
+fn queue_settings_refresh(inner: &SupervisorInner) {
+    let settings = inner.settings.lock().clone();
+    *inner.persisted_settings.lock() = None;
+    let _ = inner.settings_updates.send(settings);
 }
 
 fn persist_settings(
@@ -583,9 +607,7 @@ fn persist_settings(
             let Some(inner) = weak_inner.upgrade() else {
                 return;
             };
-            if !inner.running.load(Ordering::Acquire) {
-                return;
-            }
+            let _persist = inner.settings_persist.lock();
             let desired = inner.settings.lock().clone();
             if desired != settings {
                 settings = desired;
@@ -610,6 +632,7 @@ fn persist_settings(
                     eprintln!("could not persist WakuWaku daemon settings: {error:#}");
                 }
             }
+            drop(_persist);
             drop(inner);
             std::thread::sleep(REBUILD_POLL_INTERVAL);
         }

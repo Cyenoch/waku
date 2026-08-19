@@ -53,6 +53,11 @@ const MENU_CONTEXT: &str = "WakuMenu";
 /// Vertical gap between a trigger and its anchored card.
 const TRIGGER_GAP: f32 = 4.0;
 
+/// Deferred-surface priority for open menus. Menus must paint above modal
+/// layers — command palette (3), dialogs (4), image preview (5) — because a
+/// modal like the provider dialog hosts dropdown triggers of its own.
+const MENU_SURFACE_PRIORITY: usize = 6;
+
 /// A text field inside an open panel, such as a picker's filter box.
 ///
 /// The field holds real focus the whole time — the list's selection is drawn,
@@ -786,7 +791,7 @@ where
                 px(TRIGGER_GAP),
                 px(8.0),
             ))
-            .with_priority(1),
+            .with_priority(MENU_SURFACE_PRIORITY),
         )
         .into_any_element()
 }
@@ -893,7 +898,7 @@ where
                         items: Rc::new(items),
                     }),
             )
-            .with_priority(1),
+            .with_priority(MENU_SURFACE_PRIORITY),
         )
         .into_any_element()
 }

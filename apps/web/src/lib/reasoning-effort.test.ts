@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { ModelCatalogEntry } from '@wakuwaku/client'
-import { canonicalReasoningEffortForModel, reasoningEffortForModel } from './reasoning-effort'
+import { canonicalReasoningEffortForModel, presentedReasoningEffort, reasoningEffortForModel } from './reasoning-effort'
 
 const model = {
   supported: true,
@@ -28,5 +28,13 @@ describe('reasoning effort mapping', () => {
 
   test('preserves a catalog-backed canonical effort', () => {
     expect(canonicalReasoningEffortForModel(model, 'low')).toBe('low')
+  })
+
+  test('does not invent a first-effort selection without a live default', () => {
+    expect(presentedReasoningEffort({ ...model, defaultReasoningEffort: undefined }, null)).toBeNull()
+  })
+
+  test('presents a live catalog default when no session effort is set', () => {
+    expect(presentedReasoningEffort({ ...model, defaultReasoningEffort: 'high' }, null)).toBe('high')
   })
 })

@@ -224,7 +224,7 @@ impl ApprovalGate<ToolCall> for ApprovalBridge {
 
 #[derive(Clone)]
 struct ConfigInput<'a> {
-    provider: &'a ExternalProvider,
+    limits: wakuwaku_protocol::ProviderLimits,
     mode: RuntimeMode,
     interaction_mode: InteractionMode,
     model: Option<&'a str>,
@@ -242,12 +242,13 @@ struct RuntimeConfig {
     service_tier: Option<wakuwaku_protocol::ServiceTier>,
     context_window: u64,
     capabilities: wakuwaku_protocol::ModelCapabilities,
+    limits: wakuwaku_protocol::ProviderLimits,
 }
 
 impl RuntimeConfig {
     fn from_start(options: &DriverStartOptions) -> anyhow::Result<Self> {
         Self::from_values(ConfigInput {
-            provider: &options.provider,
+            limits: options.limits,
             mode: options.mode,
             interaction_mode: options.interaction_mode,
             model: options.model.as_deref(),
@@ -259,26 +260,26 @@ impl RuntimeConfig {
     }
 
     fn with_options(provider: &ExternalProvider, options: &SessionOptions) -> anyhow::Result<Self> {
-        let capabilities = options
+        let _ = provider;
+        let reconfigure = options
             .reconfigure
             .as_ref()
-            .map(|reconfigure| reconfigure.capabilities)
             .ok_or_else(|| anyhow!("session apply is missing model capabilities"))?;
         Self::from_values(ConfigInput {
-            provider,
+            limits: reconfigure.limits,
             mode: options.mode,
             interaction_mode: options.interaction_mode,
             model: options.model.as_deref(),
             reasoning_effort: options.reasoning_effort.as_deref(),
             service_tier: options.service_tier,
             context_window: options.context_window.as_deref(),
-            capabilities,
+            capabilities: reconfigure.capabilities,
         })
     }
 
     fn from_values(input: ConfigInput<'_>) -> anyhow::Result<Self> {
         let ConfigInput {
-            provider,
+            limits,
             mode,
             interaction_mode,
             model,
@@ -290,24 +291,20 @@ impl RuntimeConfig {
         let model = match model {
             Some(model) if model.trim().is_empty() => bail!("model must not be empty"),
             Some(model) => model.trim().to_owned(),
-            None => {
-                let default_model = provider.default_model.trim();
-                if default_model.is_empty() {
-                    bail!("provider default model must not be empty");
-                }
-                default_model.to_owned()
-            }
+            // Endpoint config carries no default model: the picker only offers
+            // catalog models, so a session always names one explicitly.
+            None => bail!("a catalog model must be selected for this provider"),
         };
         if let Some(tier) = service_tier
             && !capabilities.service_tier
         {
             bail!("service tier {tier} is not supported by this model");
         }
-        let context_window = selected_context_window(provider, context_window)?;
-        if provider.max_output_tokens > context_window {
+        let context_window = selected_context_window(limits, context_window)?;
+        if limits.max_output_tokens > context_window {
             bail!(
                 "selected context window {context_window} is smaller than the provider output limit {}",
-                provider.max_output_tokens
+                limits.max_output_tokens
             );
         }
 
@@ -319,6 +316,7 @@ impl RuntimeConfig {
             service_tier: service_tier.filter(|_| capabilities.service_tier),
             context_window,
             capabilities,
+            limits,
         })
     }
 }
@@ -341,7 +339,7 @@ impl HarnessFactory {
             .with_tool_context(tool_context)
             .with_tools(build_tools(policy, &self.approvals))
             .with_model(config.model.clone())
-            .with_request_options(request_options(&self.provider, config)))
+            .with_request_options(request_options(config)))
     }
 }
 
@@ -398,9 +396,9 @@ fn build_tools(policy: ToolPolicy, approvals: &Arc<ApprovalBridge>) -> Vec<Arc<d
     tools
 }
 
-fn request_options(provider: &ExternalProvider, config: &RuntimeConfig) -> RequestOptions {
+fn request_options(config: &RuntimeConfig) -> RequestOptions {
     RequestOptions {
-        max_tokens: Some(provider.max_output_tokens.min(config.context_window)),
+        max_tokens: Some(config.limits.max_output_tokens.min(config.context_window)),
         temperature: None,
         reasoning: config
             .capabilities
@@ -415,22 +413,22 @@ fn request_options(provider: &ExternalProvider, config: &RuntimeConfig) -> Reque
     }
 }
 
-fn budget(provider: &ExternalProvider, config: &RuntimeConfig) -> Budget {
+fn budget(config: &RuntimeConfig) -> Budget {
     Budget {
         max_messages: None,
         // A context window contains both prompt and generated tokens. Reserving
         // the requested output limit prevents the driver from knowingly sending
         // a prompt which leaves no room for the response.
-        max_tokens: Some(config.context_window - provider.max_output_tokens),
+        max_tokens: Some(config.context_window - config.limits.max_output_tokens),
     }
 }
 
 fn selected_context_window(
-    provider: &ExternalProvider,
+    limits: wakuwaku_protocol::ProviderLimits,
     selected: Option<&str>,
 ) -> anyhow::Result<u64> {
     let Some(selected) = option_text(selected) else {
-        return Ok(provider.context_window);
+        return Ok(limits.context_window);
     };
     let context_window = selected
         .parse::<u64>()
@@ -438,10 +436,10 @@ fn selected_context_window(
     if context_window == 0 {
         bail!("context window must be a positive token count");
     }
-    if context_window > provider.context_window {
+    if context_window > limits.context_window {
         bail!(
             "selected context window {context_window} exceeds provider limit {}",
-            provider.context_window
+            limits.context_window
         );
     }
     Ok(context_window)
@@ -486,7 +484,7 @@ impl EmbeddedDriver {
         let harness = factory.build(&config)?;
         let session = Session::with_snapshot(options.snapshot)
             .map_err(|error| anyhow!(error.to_string()))?
-            .with_budget(budget(&options.provider, &config));
+            .with_budget(budget(&config));
         let session_steering = session.steering();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -664,6 +662,7 @@ impl Drop for EmbeddedDriver {
 fn build_provider(options: &DriverStartOptions) -> anyhow::Result<ProviderConfig> {
     Ok(ProviderConfig {
         endpoint: options.provider.clone(),
+        limits: options.limits,
         auth: options.auth.clone(),
         transport: options.transport,
         extra_auth_headers: options.extra_auth_headers.clone(),
@@ -734,6 +733,7 @@ fn apply_options(
             .live
             .replace_config(ProviderConfig {
                 endpoint: reconfigure.provider.clone(),
+                limits: reconfigure.limits,
                 auth: reconfigure.auth.clone(),
                 transport: reconfigure.transport,
                 extra_auth_headers: reconfigure.extra_auth_headers.clone(),
@@ -742,7 +742,7 @@ fn apply_options(
     }
     let next_config = RuntimeConfig::with_options(&factory.provider, &options)?;
     let next_harness = factory.build(&next_config)?;
-    session.set_budget(budget(&factory.provider, &next_config));
+    session.set_budget(budget(&next_config));
 
     *harness = next_harness;
     *config = next_config;

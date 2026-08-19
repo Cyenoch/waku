@@ -380,6 +380,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.discard_provider_dialog(cx);
         self.settings_page = None;
         if let Some(session_id) = self
             .session_navigation
@@ -633,6 +634,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         if self.settings_page.take().is_some() {
+            self.discard_provider_dialog(cx);
             let focus_handle = self.composer_focus(cx);
             window.focus(&focus_handle, cx);
             cx.notify();
@@ -643,6 +645,7 @@ impl Waku {
             return;
         };
         if let Some(target) = self.session_navigation.back_target() {
+            self.discard_provider_dialog(cx);
             self.settings_page = None;
             self.request_session_activation(
                 target,
@@ -666,6 +669,7 @@ impl Waku {
             return;
         };
         if let Some(target) = self.session_navigation.forward_target() {
+            self.discard_provider_dialog(cx);
             self.settings_page = None;
             self.request_session_activation(
                 target,
@@ -700,6 +704,7 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.discard_provider_dialog(cx);
         self.settings_page = None;
         let focus_handle = self.composer_focus(cx);
         window.focus(&focus_handle, cx);
@@ -713,6 +718,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) {
         if self.settings_page.take().is_some() {
+            self.discard_provider_dialog(cx);
             let focus_handle = self.composer_focus(cx);
             window.focus(&focus_handle, cx);
             cx.notify();
@@ -921,7 +927,7 @@ impl Waku {
         let Some((session_id, provider_changed)) = self
             .selected_session()
             .filter(|session| {
-                session.can_choose_model(provider.clone())
+                    session.can_choose_model()
                     && (session.provider != provider
                         || session.model.as_deref() != Some(model.as_str()))
             })
@@ -959,8 +965,8 @@ impl Waku {
             self.state.last_reasoning_effort = reasoning_effort;
             self.state.last_context_window = context_window;
             self.model_picker_tab = ModelPickerTab::Provider(provider.clone());
-            // A different provider is a different endpoint and catalog; only a
-            // model change within one provider can be applied in session.
+            // A provider change swaps the endpoint and its command registry;
+            // the runtime restarts and replays the session on the next start.
             if provider_changed {
                 self.reset_session_runtime(session_id);
                 // A different provider is also a different command registry.
@@ -983,10 +989,7 @@ impl Waku {
         if self.settings_page.is_some() {
             return;
         }
-        if !self
-            .selected_session()
-            .is_some_and(|session| session.can_choose_model(session.provider.clone()))
-        {
+        if !self.selected_session().is_some_and(|session| session.can_choose_model()) {
             return;
         }
         let menus = self.menus.borrow();

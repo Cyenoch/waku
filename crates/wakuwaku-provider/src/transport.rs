@@ -47,10 +47,10 @@ pub struct ModelCapabilities {
 }
 
 impl ModelCapabilities {
-    /// Official OpenAI API (api.openai.com). Service tier is provider-native.
+    /// Official OpenAI API. Fast/service_tier is catalog-grounded, not format-native.
     pub const fn openai_api(format: ApiFormat) -> Self {
         Self {
-            service_tier: matches!(format, ApiFormat::OpenAiResponses | ApiFormat::OpenAiChat),
+            service_tier: false,
             reasoning_effort: matches!(format, ApiFormat::OpenAiResponses | ApiFormat::OpenAiChat),
             reasoning_summary: matches!(format, ApiFormat::OpenAiResponses),
             sampling: true,
@@ -143,9 +143,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn service_tier_is_openai_api_only() {
-        assert!(ModelCapabilities::openai_api(ApiFormat::OpenAiResponses).service_tier);
-        assert!(ModelCapabilities::openai_api(ApiFormat::OpenAiChat).service_tier);
+    fn constructors_never_enable_service_tier() {
+        assert!(!ModelCapabilities::openai_api(ApiFormat::OpenAiResponses).service_tier);
+        assert!(!ModelCapabilities::openai_api(ApiFormat::OpenAiChat).service_tier);
         assert!(!ModelCapabilities::openai_compatible(ApiFormat::OpenAiResponses).service_tier);
         assert!(!ModelCapabilities::codex().service_tier);
         assert!(!ModelCapabilities::xai(true).service_tier);

@@ -560,7 +560,7 @@ impl Backend for WakuBackend {
                 let provider_id = options.provider.clone();
                 let settings = self.settings.get();
                 self.auth.set_custom_providers(settings.external_providers);
-                let (provider, transport, auth, extra_auth_headers, capabilities) = self
+                let (provider, transport, auth, extra_auth_headers, capabilities, limits) = self
                     .auth
                     .overlay_for_model(&provider_id, options.model.as_deref())?;
                 let reasoning_effort = self
@@ -586,6 +586,7 @@ impl Backend for WakuBackend {
                     transport,
                     extra_auth_headers,
                     capabilities,
+                    limits,
                 };
                 let (wake, _wake_events) = smol::channel::bounded(1);
                 let (event_sender, event_receiver) = driver::event_channel(wake);
@@ -1511,7 +1512,7 @@ fn ensure_fresh_driver_auth(
             .ok_or_else(|| anyhow!("the task is unavailable"))?;
         (session.provider.clone(), session.model.clone())
     };
-    let (_endpoint, _transport, auth, extra, _capabilities) = backend
+    let (_endpoint, _transport, auth, extra, _capabilities, _limits) = backend
         .auth
         .overlay_for_model(&provider_id, model.as_deref())?;
     driver.replace_auth(auth, extra)
@@ -1570,7 +1571,7 @@ fn handle_driver_command(
             backend
                 .auth
                 .set_custom_providers(backend.settings.get().external_providers);
-            let (provider, transport, auth, extra_auth_headers, capabilities) = backend
+            let (provider, transport, auth, extra_auth_headers, capabilities, limits) = backend
                 .auth
                 .overlay_for_model(&provider_id, options.model.as_deref())?;
             let reasoning_effort = backend.auth.resolve_reasoning_effort(
@@ -1597,6 +1598,7 @@ fn handle_driver_command(
                     transport,
                     extra_auth_headers,
                     capabilities,
+                    limits,
                 }),
             });
             if applied {

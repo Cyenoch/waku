@@ -20,6 +20,9 @@ pub type ExtraHeaders = Vec<(String, String)>;
 #[derive(Clone)]
 pub struct ProviderConfig {
     pub endpoint: wakuwaku_provider::ExternalProvider,
+    /// Token budget for requests against this endpoint, from the selected
+    /// catalog entry (or the default when no catalog informed the session).
+    pub limits: wakuwaku_provider::ProviderLimits,
     pub auth: Auth,
     pub transport: wakuwaku_provider::TransportProfile,
     pub extra_auth_headers: ExtraHeaders,
@@ -29,6 +32,7 @@ impl std::fmt::Debug for ProviderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderConfig")
             .field("endpoint", &self.endpoint)
+            .field("limits", &self.limits)
             .field("auth", &self.auth)
             .field("transport", &self.transport)
             .field("extra_auth_headers", &"<redacted-names-only>")
@@ -40,6 +44,7 @@ impl ProviderConfig {
     pub fn new(endpoint: wakuwaku_provider::ExternalProvider, auth: Auth) -> Self {
         Self {
             endpoint,
+            limits: wakuwaku_provider::ProviderLimits::default(),
             auth,
             transport: wakuwaku_provider::TransportProfile::Standard,
             extra_auth_headers: Vec::new(),
@@ -124,7 +129,9 @@ impl Providers {
         &self.http
     }
 
-    /// Resolve the model id for a request: explicit or the provider default.
+    /// Resolve the model id for a request. Endpoint config carries no default
+    /// model — models come from the endpoint's catalog — so callers must name
+    /// one explicitly.
     pub fn resolve_model(
         &self,
         provider_id: &str,
@@ -134,8 +141,14 @@ impl Providers {
             .get(provider_id)
             .ok_or_else(|| HarnessError::UnknownProvider(provider_id.to_string()))?;
         let model_id = model
-            .map(str::to_string)
-            .unwrap_or_else(|| provider.endpoint.default_model.clone());
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                HarnessError::InvalidRequest(format!(
+                    "provider {provider_id} requires an explicit catalog model"
+                ))
+            })?;
         Ok((provider, model_id))
     }
 
@@ -182,6 +195,10 @@ impl Providers {
 fn validate_provider(provider: &ProviderConfig) -> Result<(), HarnessError> {
     provider
         .endpoint
+        .validate()
+        .map_err(HarnessError::InvalidRequest)?;
+    provider
+        .limits
         .validate()
         .map_err(HarnessError::InvalidRequest)?;
     provider
@@ -291,10 +308,9 @@ mod tests {
                 name: "P".into(),
                 base_url: "https://example.test/v1".into(),
                 api_format: format,
-                api_key_env: None,
                 headers: vec![("x-extra".into(), "1".into())],
-                models: Vec::new(),
-                default_model: "m".into(),
+            },
+            limits: wakuwaku_provider::ProviderLimits {
                 context_window: 100_000,
                 max_output_tokens: 8_192,
             },
@@ -363,7 +379,7 @@ mod tests {
         );
 
         let mut invalid = provider(ApiFormat::OpenAiResponses, Auth::None);
-        invalid.endpoint.max_output_tokens = 0;
+        invalid.limits.max_output_tokens = 0;
         assert!(providers.set_providers(vec![invalid]).is_err());
     }
 

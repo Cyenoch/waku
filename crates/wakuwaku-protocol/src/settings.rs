@@ -59,7 +59,6 @@ mod tests {
                 "Override",
                 "http://127.0.0.1:9/v1",
                 ApiFormat::OpenAiResponses,
-                "gpt-5",
             )],
             extra: Default::default(),
         };
@@ -75,7 +74,6 @@ mod tests {
                 "Corp",
                 "http://127.0.0.1:9/v1",
                 ApiFormat::OpenAiResponses,
-                "gpt-5",
             )],
             extra: Default::default(),
         };

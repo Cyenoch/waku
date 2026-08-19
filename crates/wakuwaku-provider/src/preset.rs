@@ -143,17 +143,12 @@ impl ProviderPreset {
     }
 
     pub fn endpoint(self) -> ExternalProvider {
-        let mut provider = ExternalProvider::new(
+        ExternalProvider::new(
             self.id(),
             self.display_name(),
             self.default_base_url(),
             self.default_format(),
-            self.default_model(),
-        );
-        if let Some(env) = self.env_key() {
-            provider = provider.with_api_key_env(env);
-        }
-        provider
+        )
     }
 }
 

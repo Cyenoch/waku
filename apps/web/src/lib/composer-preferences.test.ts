@@ -78,6 +78,11 @@ describe('composer preferences', () => {
       serviceTier: 'priority',
       contextWindow: '1m',
     })).toEqual({ reasoningEffort: 'high', serviceTier: 'priority', contextWindow: '1m' })
+    expect(selectedModelTraits({ ...model, defaultReasoningEffort: null }, undefined)).toEqual({
+      reasoningEffort: null,
+      serviceTier: null,
+      contextWindow: null,
+    })
   })
 })
 

@@ -107,17 +107,17 @@ impl ModelProvider for HttpProvider {
         Box::pin(async move {
             let (config, model_id) = self.providers.resolve_model(&self.provider_id, model)?;
             let needed = estimate_tokens(&ctx.messages);
-            if needed > config.endpoint.context_window {
+            if needed > config.limits.context_window {
                 return Err(HarnessError::ContextOverflow {
                     needed,
-                    budget: config.endpoint.context_window,
+                    budget: config.limits.context_window,
                 });
             }
             let mut effective_options = opts.clone();
             effective_options.max_tokens = Some(
                 opts.max_tokens
-                    .unwrap_or(config.endpoint.max_output_tokens)
-                    .min(config.endpoint.max_output_tokens),
+                    .unwrap_or(config.limits.max_output_tokens)
+                    .min(config.limits.max_output_tokens),
             );
             let target = ProviderModel {
                 provider: wakuwaku_provider::ProviderId::new(self.provider_id.as_str()),
@@ -470,13 +470,12 @@ mod tests {
                 name: "P".into(),
                 base_url: "https://gateway.example/v1".into(),
                 api_format: ApiFormat::OpenAiChat,
-                api_key_env: None,
                 headers: vec![(
                     "x-gateway-token".into(),
                     "gateway-token-should-never-leak".into(),
                 )],
-                models: Vec::new(),
-                default_model: "m".into(),
+            },
+            limits: wakuwaku_provider::ProviderLimits {
                 context_window: 1000,
                 max_output_tokens: 100,
             },

@@ -6,6 +6,7 @@
 mod auth_wire;
 mod catalog;
 mod endpoints;
+mod models_dev;
 mod preset;
 mod secret;
 mod transport;
@@ -18,6 +19,10 @@ pub use catalog::{
     parse_openai_models_envelope, route_opencode_model, xai_oauth_seed,
 };
 pub use endpoints::{AuthEndpoints, is_pinned_xai_token_endpoint};
+pub use models_dev::{
+    MODELS_DEV_API_URL, ModelsDevCatalog, enrich_catalog_from_models_dev, models_dev_source_key,
+    parse_models_dev_document,
+};
 pub use preset::{PresetAuthKind, ProviderPreset};
 pub use secret::SecretString;
 pub use transport::{CatalogSource, ModelCapabilities, TransportProfile, UnsupportedReason};
@@ -200,7 +205,12 @@ impl ProviderLimits {
     }
 }
 
-/// Serializable endpoint configuration. It intentionally has no secret value.
+/// Serializable endpoint configuration. It intentionally has no secret value:
+/// API keys live in the OS credential store, and model limits arrive with the
+/// discovered catalog entry rather than being configured per endpoint.
+///
+/// The model list is never stored here either: models are discovered from the
+/// endpoint's standard `/models` interface and cached as a catalog.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalProvider {
@@ -208,25 +218,8 @@ pub struct ExternalProvider {
     pub name: String,
     pub base_url: String,
     pub api_format: ApiFormat,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_env: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<(String, String)>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-    pub default_model: String,
-    #[serde(default = "default_context_window")]
-    pub context_window: u64,
-    #[serde(default = "default_max_output_tokens")]
-    pub max_output_tokens: u64,
-}
-
-fn default_context_window() -> u64 {
-    ProviderLimits::default().context_window
-}
-
-fn default_max_output_tokens() -> u64 {
-    ProviderLimits::default().max_output_tokens
 }
 
 impl ExternalProvider {
@@ -235,27 +228,14 @@ impl ExternalProvider {
         name: impl Into<String>,
         base_url: impl Into<String>,
         api_format: ApiFormat,
-        default_model: impl Into<String>,
     ) -> Self {
-        let limits = ProviderLimits::default();
         Self {
             id: id.into(),
             name: name.into(),
             base_url: base_url.into(),
             api_format,
-            api_key_env: None,
             headers: Vec::new(),
-            models: Vec::new(),
-            default_model: default_model.into(),
-            context_window: limits.context_window,
-            max_output_tokens: limits.max_output_tokens,
         }
-    }
-
-    pub fn with_api_key_env(mut self, name: impl Into<String>) -> Self {
-        let name = name.into();
-        self.api_key_env = (!name.trim().is_empty()).then_some(name);
-        self
     }
 
     pub fn standard_defaults() -> Vec<Self> {
@@ -265,53 +245,20 @@ impl ExternalProvider {
                 "OpenAI Responses",
                 "https://api.openai.com/v1",
                 ApiFormat::OpenAiResponses,
-                "gpt-5",
-            )
-            .with_api_key_env("OPENAI_API_KEY"),
+            ),
             Self::new(
                 ProviderId::OPENAI_CHAT,
                 "OpenAI Chat",
                 "https://api.openai.com/v1",
                 ApiFormat::OpenAiChat,
-                "gpt-5",
-            )
-            .with_api_key_env("OPENAI_API_KEY"),
+            ),
             Self::new(
                 ProviderId::ANTHROPIC,
                 "Anthropic",
                 "https://api.anthropic.com/v1",
                 ApiFormat::Anthropic,
-                "claude-sonnet-4-5",
-            )
-            .with_api_key_env("ANTHROPIC_API_KEY"),
+            ),
         ]
-    }
-
-    pub fn limits(&self) -> ProviderLimits {
-        ProviderLimits {
-            context_window: self.context_window,
-            max_output_tokens: self.max_output_tokens,
-        }
-    }
-
-    /// Normalized non-empty model ids, borrowed. If `models` is empty, yields
-    /// the default model when it is non-empty.
-    pub fn models(&self) -> impl Iterator<Item = &str> {
-        let listed = self
-            .models
-            .iter()
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|model| !model.is_empty());
-        let default = self.default_model.trim();
-        let fallback = self
-            .models
-            .iter()
-            .map(String::as_str)
-            .map(str::trim)
-            .all(|model| model.is_empty())
-            && !default.is_empty();
-        listed.chain(fallback.then_some(default))
     }
 
     pub fn request_url(&self) -> Result<String, String> {
@@ -331,9 +278,6 @@ impl ExternalProvider {
             return Err("provider name must not be empty".to_owned());
         }
         parse_api_root(&self.base_url)?;
-        if let Some(api_key_env) = &self.api_key_env {
-            validate_env_identifier(api_key_env)?;
-        }
         let mut seen_headers = std::collections::HashSet::new();
         for (name, value) in &self.headers {
             let lowered = name.to_ascii_lowercase();
@@ -357,53 +301,7 @@ impl ExternalProvider {
                 return Err(format!("invalid value for header: {name}"));
             }
         }
-        let default_model = self.default_model.trim();
-        if default_model.is_empty() {
-            return Err("provider default model must not be empty".to_owned());
-        }
-        let mut seen_models = std::collections::HashSet::new();
-        let mut listed = false;
-        for model in self
-            .models
-            .iter()
-            .map(|model| model.trim())
-            .filter(|model| !model.is_empty())
-        {
-            listed = true;
-            if !seen_models.insert(model) {
-                return Err(format!("duplicate model id: {model}"));
-            }
-        }
-        if listed && !seen_models.contains(default_model) {
-            return Err(format!(
-                "provider default model {default_model} is not in the model list"
-            ));
-        }
-        self.limits().validate()
-    }
-
-    pub fn resolve_auth(&self) -> Result<Auth, String> {
-        self.validate()?;
-        let auth = match self.api_key_env.as_deref() {
-            Some(name) => {
-                validate_env_identifier(name)?;
-                let key = std::env::var(name)
-                    .map_err(|_| format!("environment variable {name} is not configured"))?;
-                if key.trim().is_empty() {
-                    return Err(format!("environment variable {name} is empty"));
-                }
-                match self.api_format {
-                    ApiFormat::Anthropic => Auth::AnthropicApiKey {
-                        key,
-                        version: "2023-06-01".into(),
-                    },
-                    ApiFormat::OpenAiResponses | ApiFormat::OpenAiChat => Auth::Bearer(key),
-                }
-            }
-            None => Auth::None,
-        };
-        auth.validate_for_format(self.api_format)?;
-        Ok(auth)
+        Ok(())
     }
 }
 
@@ -423,20 +321,6 @@ fn parse_api_root(base_url: &str) -> Result<Url, String> {
         return Err("provider base URL must not include a fragment".to_owned());
     }
     Ok(url)
-}
-
-fn validate_env_identifier(name: &str) -> Result<(), String> {
-    let name = name.trim();
-    let mut bytes = name.bytes();
-    let Some(first) = bytes.next() else {
-        return Err("provider api key environment name is invalid".to_owned());
-    };
-    if !(first.is_ascii_alphabetic() || first == b'_')
-        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        return Err("provider api key environment name is invalid".to_owned());
-    }
-    Ok(())
 }
 
 fn is_reserved_header(name: &str) -> bool {
@@ -502,15 +386,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ids_are_owned_and_defaults_carry_only_secret_names() {
+    fn ids_are_owned_and_defaults_carry_only_endpoint_facts() {
         let providers = ExternalProvider::standard_defaults();
         assert_eq!(providers.len(), 3);
         assert_eq!(providers[0].id.as_str(), ProviderId::OPENAI_RESPONSES);
         assert_eq!(providers[0].base_url, "https://api.openai.com/v1");
         assert_eq!(providers[2].base_url, "https://api.anthropic.com/v1");
         let json = serde_json::to_string(&providers).unwrap();
-        assert!(json.contains("OPENAI_API_KEY"));
+        assert!(json.contains("apiFormat"));
         assert!(!json.contains("sk-"));
+        assert!(
+            !json.contains("apiKeyEnv"),
+            "endpoint config must not name credentials"
+        );
     }
 
     #[test]
@@ -542,13 +430,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_credentials_query_fragment_and_bad_env() {
+    fn validate_rejects_credentials_query_fragment_and_reserved_headers() {
         let mut p = ExternalProvider::new(
             "local",
             "Local",
             "https://api.openai.com/v1",
             ApiFormat::OpenAiResponses,
-            "gpt",
         );
         p.base_url = "https://user:pass@api.openai.com/v1".into();
         assert!(p.validate().unwrap_err().contains("credentials"));
@@ -557,33 +444,8 @@ mod tests {
         p.base_url = "https://api.openai.com/v1#frag".into();
         assert!(p.validate().unwrap_err().contains("fragment"));
         p.base_url = "https://api.openai.com/v1".into();
-        p.api_key_env = Some("1BAD".into());
-        assert!(p.validate().unwrap_err().contains("environment"));
-        p.api_key_env = Some("_OK".into());
         p.headers = vec![("anthropic-version".into(), "2023-06-01".into())];
         assert!(p.validate().unwrap_err().contains("reserved"));
-    }
-
-    #[test]
-    fn models_are_unique_and_default_must_belong() {
-        let mut p = ExternalProvider::new(
-            "local",
-            "Local",
-            "https://api.openai.com/v1",
-            ApiFormat::OpenAiResponses,
-            "gpt-5",
-        );
-        p.models = vec!["gpt-5".into(), "gpt-4.1".into()];
-        p.validate().unwrap();
-        assert_eq!(p.models().collect::<Vec<_>>(), vec!["gpt-5", "gpt-4.1"]);
-        p.models = vec!["gpt-4.1".into(), "gpt-4.1".into()];
-        assert!(p.validate().unwrap_err().contains("duplicate"));
-        p.models = vec!["gpt-4.1".into()];
-        assert!(p.validate().unwrap_err().contains("not in the model list"));
-        p.models.clear();
-        p.default_model = "solo".into();
-        p.validate().unwrap();
-        assert_eq!(p.models().collect::<Vec<_>>(), vec!["solo"]);
     }
 
     #[test]

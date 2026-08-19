@@ -141,6 +141,7 @@ pub struct TrajectorySessionState {
     pub selected_row_index: Option<usize>,
     pub inspector_open: bool,
     pub inspector_width: f32,
+    pub inspector_resize_anchor: Option<(f32, f32)>,
     pub selected_section: TrajectoryDetailSection,
     pub timeline_layout: TimelineLayout,
     pub ledger_rows: Vec<TrajectoryLedgerRow>,
@@ -178,6 +179,7 @@ impl TrajectorySessionState {
             selected_row_index: None,
             inspector_open: false,
             inspector_width: 380.0,
+            inspector_resize_anchor: None,
             selected_section: TrajectoryDetailSection::Summary,
             timeline_layout: TimelineLayout::default(),
             ledger_rows: Vec::new(),
@@ -376,6 +378,10 @@ impl TrajectorySessionState {
         }
     }
 
+    pub fn set_inspector_width(&mut self, width: f32, available_width: f32) {
+        self.inspector_width = clamp_inspector_width(width, available_width);
+    }
+
     pub fn close_inspector(&mut self) {
         self.inspector_open = false;
         if let Some(idx) = self.selected_row_index {
@@ -436,7 +442,12 @@ impl TrajectorySessionState {
             &self.prebuilt_search_index,
         );
         let count = self.ledger_rows.len();
-        self.list_state.reset(count);
+        let old_count = self.list_state.item_count();
+        if old_count == 0 {
+            self.list_state.reset(count);
+        } else if old_count != count {
+            self.list_state.splice(0..old_count, count);
+        }
 
         if let Some(record_id) = self.selected_record_id {
             self.selected_row_index = self
@@ -541,6 +552,153 @@ pub fn lane_display_name(lane: TrajectoryLane) -> &'static str {
         TrajectoryLane::Input => "input",
         TrajectoryLane::Model => "model",
         TrajectoryLane::Tools => "tools",
+    }
+}
+
+pub fn localized_lane_name(lane: TrajectoryLane) -> String {
+    match lane {
+        TrajectoryLane::Input => tr!("trajectory.lane_input"),
+        TrajectoryLane::Model => tr!("trajectory.lane_model"),
+        TrajectoryLane::Tools => tr!("trajectory.lane_tools"),
+    }
+}
+
+pub fn localized_status_name(status: TrajectoryStatus) -> String {
+    match status {
+        TrajectoryStatus::Pending => tr!("trajectory.status_pending"),
+        TrajectoryStatus::Running => tr!("trajectory.status_running"),
+        TrajectoryStatus::Completed => tr!("trajectory.status_completed"),
+        TrajectoryStatus::Failed => tr!("trajectory.status_failed"),
+        TrajectoryStatus::Cancelled => tr!("trajectory.status_cancelled"),
+        TrajectoryStatus::Unavailable => tr!("trajectory.status_unavailable"),
+    }
+}
+
+pub fn record_count_label(count: usize) -> String {
+    tr!("trajectory.record_count", count = count)
+}
+
+pub fn item_count_label(count: usize) -> String {
+    tr!("trajectory.item_count", count = count)
+}
+
+pub fn status_marker(status: TrajectoryStatus) -> &'static str {
+    match status {
+        TrajectoryStatus::Completed => "✓",
+        TrajectoryStatus::Failed => "✕",
+        TrajectoryStatus::Cancelled => "–",
+        TrajectoryStatus::Running => "▶",
+        TrajectoryStatus::Pending => "…",
+        TrajectoryStatus::Unavailable => "?",
+    }
+}
+
+pub fn localized_kind_name(kind: TrajectoryKind) -> String {
+    match kind {
+        TrajectoryKind::System => tr!("trajectory.kind_system"),
+        TrajectoryKind::User => tr!("trajectory.kind_user"),
+        TrajectoryKind::Context => tr!("trajectory.kind_context"),
+        TrajectoryKind::Request => tr!("trajectory.kind_request"),
+        TrajectoryKind::Assistant => tr!("trajectory.kind_assistant"),
+        TrajectoryKind::Tool => tr!("trajectory.kind_tool"),
+    }
+}
+
+pub fn json_object_preview(count: usize) -> String {
+    tr!("trajectory.json_object", count = count)
+}
+
+pub fn json_array_preview(count: usize) -> String {
+    tr!("trajectory.json_array", count = count)
+}
+
+pub fn json_bool_preview(value: bool) -> String {
+    if value {
+        tr!("trajectory.json_true")
+    } else {
+        tr!("trajectory.json_false")
+    }
+}
+
+pub fn json_null_preview() -> String {
+    tr!("trajectory.json_null")
+}
+
+pub fn step_ledger_selection(current: Option<usize>, len: usize, key: &str) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    match key {
+        "up" => Some(current.unwrap_or(0).saturating_sub(1)),
+        "down" => Some(current.unwrap_or(0).saturating_add(1).min(len - 1)),
+        "home" => Some(0),
+        "end" => Some(len - 1),
+        _ => current.filter(|&index| index < len),
+    }
+}
+
+pub const TRAJECTORY_SPLIT_MIN_WIDTH: f32 = 720.0;
+pub const TRAJECTORY_INSPECTOR_MIN_WIDTH: f32 = 320.0;
+pub const TRAJECTORY_INSPECTOR_MAX_WIDTH: f32 = 720.0;
+pub const TRAJECTORY_LEDGER_MIN_WIDTH: f32 = 280.0;
+pub const TRAJECTORY_INSPECTOR_RESIZE_STEP: f32 = 16.0;
+
+pub fn inspector_uses_split(available_width: f32) -> bool {
+    available_width >= TRAJECTORY_SPLIT_MIN_WIDTH
+}
+
+pub fn clamp_inspector_width(width: f32, available_width: f32) -> f32 {
+    let max_for_ledger = (available_width - TRAJECTORY_LEDGER_MIN_WIDTH).clamp(
+        TRAJECTORY_INSPECTOR_MIN_WIDTH,
+        TRAJECTORY_INSPECTOR_MAX_WIDTH,
+    );
+    width.clamp(TRAJECTORY_INSPECTOR_MIN_WIDTH, max_for_ledger)
+}
+
+pub fn inspector_width_after_nudge(width: f32, steps: i32, available_width: f32) -> f32 {
+    clamp_inspector_width(
+        width + steps as f32 * TRAJECTORY_INSPECTOR_RESIZE_STEP,
+        available_width,
+    )
+}
+
+pub fn inspector_width_after_drag(
+    start_width: f32,
+    start_x: f32,
+    current_x: f32,
+    available_width: f32,
+) -> f32 {
+    clamp_inspector_width(start_width + (start_x - current_x), available_width)
+}
+
+pub fn step_detail_section(
+    current: TrajectoryDetailSection,
+    allowed: &[TrajectoryDetailSection],
+    key: &str,
+) -> Option<TrajectoryDetailSection> {
+    let index = allowed.iter().position(|section| *section == current)?;
+    match key {
+        "left" | "up" => index
+            .checked_sub(1)
+            .and_then(|index| allowed.get(index))
+            .copied(),
+        "right" | "down" => allowed.get(index + 1).copied(),
+        "home" => allowed.first().copied(),
+        "end" => allowed.last().copied(),
+        _ => None,
+    }
+}
+
+pub fn step_json_tree_selection(current: usize, len: usize, key: &str) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    match key {
+        "up" => Some(current.saturating_sub(1)),
+        "down" => Some(current.saturating_add(1).min(len - 1)),
+        "home" => Some(0),
+        "end" => Some(len - 1),
+        _ => Some(current.min(len - 1)),
     }
 }
 
@@ -959,12 +1117,11 @@ fn flatten_json_value(
     match value {
         Value::Object(map) => {
             let expanded = expanded_paths.contains(path);
-            let preview = format!("Object ({} entries)", map.len());
             out.push(JsonTreeNode {
                 id: path.to_string(),
                 path: path.to_string(),
                 key: key.map(String::from),
-                value_preview: preview,
+                value_preview: json_object_preview(map.len()),
                 value_type: JsonValueType::Object,
                 depth,
                 expandable: !map.is_empty(),
@@ -980,12 +1137,11 @@ fn flatten_json_value(
         }
         Value::Array(items) => {
             let expanded = expanded_paths.contains(path);
-            let preview = format!("Array ({} items)", items.len());
             out.push(JsonTreeNode {
                 id: path.to_string(),
                 path: path.to_string(),
                 key: key.map(String::from),
-                value_preview: preview,
+                value_preview: json_array_preview(items.len()),
                 value_type: JsonValueType::Array,
                 depth,
                 expandable: !items.is_empty(),
@@ -1038,7 +1194,7 @@ fn flatten_json_value(
                 id: path.to_string(),
                 path: path.to_string(),
                 key: key.map(String::from),
-                value_preview: b.to_string(),
+                value_preview: json_bool_preview(*b),
                 value_type: JsonValueType::Boolean,
                 depth,
                 expandable: false,
@@ -1051,7 +1207,7 @@ fn flatten_json_value(
                 id: path.to_string(),
                 path: path.to_string(),
                 key: key.map(String::from),
-                value_preview: "null".to_string(),
+                value_preview: json_null_preview(),
                 value_type: JsonValueType::Null,
                 depth,
                 expandable: false,
@@ -1695,7 +1851,6 @@ mod tests {
 
         let mut trajectory_sessions: HashMap<Uuid, TrajectorySessionState> = HashMap::new();
 
-        // Session A initializes trajectory state with records
         let mut state_a = TrajectorySessionState::new(session_a);
         let rec_a = make_test_record(
             Uuid::new_v4(),
@@ -1725,27 +1880,108 @@ mod tests {
         assert_eq!(state_a.selected_record_id, Some(rec_a.record_id));
         trajectory_sessions.insert(session_a, state_a);
 
-        // Session B initializes trajectory state independently
         let state_b = TrajectorySessionState::new(session_b);
         assert!(!state_b.inspector_open);
         assert_eq!(state_b.selected_record_id, None);
         assert!(state_b.records.is_empty());
         trajectory_sessions.insert(session_b, state_b);
 
-        // Mutating Session A's trajectory does not mutate Session B
         let a = trajectory_sessions.get_mut(&session_a).unwrap();
         a.close_inspector();
         assert!(!a.inspector_open);
-        assert_eq!(a.selected_record_id, Some(rec_a.record_id)); // row focus preserved
+        assert_eq!(a.selected_record_id, Some(rec_a.record_id));
 
         let b = trajectory_sessions.get(&session_b).unwrap();
         assert!(!b.inspector_open);
         assert_eq!(b.selected_record_id, None);
         assert!(b.records.is_empty());
 
-        // Removing Session A only clears Session A from map
         trajectory_sessions.remove(&session_a);
         assert!(!trajectory_sessions.contains_key(&session_a));
         assert!(trajectory_sessions.contains_key(&session_b));
+    }
+
+    #[test]
+    fn inspector_split_and_resize_follow_plan_bounds() {
+        assert!(!inspector_uses_split(719.0));
+        assert!(inspector_uses_split(720.0));
+        assert_eq!(clamp_inspector_width(380.0, 720.0), 380.0);
+        assert_eq!(clamp_inspector_width(200.0, 1_000.0), 320.0);
+        assert_eq!(clamp_inspector_width(900.0, 1_000.0), 720.0);
+        assert_eq!(clamp_inspector_width(500.0, 720.0), 440.0);
+        assert_eq!(inspector_width_after_nudge(380.0, 1, 1_000.0), 396.0);
+        assert_eq!(inspector_width_after_nudge(380.0, -2, 1_000.0), 348.0);
+        assert_eq!(
+            inspector_width_after_drag(380.0, 800.0, 784.0, 1_000.0),
+            396.0
+        );
+    }
+
+    #[test]
+    fn inspector_section_and_json_tree_keys_step() {
+        use TrajectoryDetailSection::{Preview, Raw, Summary};
+        let allowed = [Summary, Preview, Raw];
+        assert_eq!(
+            step_detail_section(Summary, &allowed, "right"),
+            Some(Preview)
+        );
+        assert_eq!(
+            step_detail_section(Preview, &allowed, "left"),
+            Some(Summary)
+        );
+        assert_eq!(
+            step_detail_section(Preview, &allowed, "home"),
+            Some(Summary)
+        );
+        assert_eq!(step_detail_section(Summary, &allowed, "end"), Some(Raw));
+        assert_eq!(step_json_tree_selection(0, 3, "down"), Some(1));
+        assert_eq!(step_json_tree_selection(2, 3, "down"), Some(2));
+        assert_eq!(step_json_tree_selection(1, 3, "home"), Some(0));
+        assert_eq!(step_json_tree_selection(0, 0, "down"), None);
+    }
+
+    #[test]
+    fn step_ledger_selection_moves_and_clamps() {
+        assert_eq!(step_ledger_selection(None, 0, "down"), None);
+        assert_eq!(step_ledger_selection(None, 4, "down"), Some(1));
+        assert_eq!(step_ledger_selection(Some(0), 4, "up"), Some(0));
+        assert_eq!(step_ledger_selection(Some(3), 4, "down"), Some(3));
+        assert_eq!(step_ledger_selection(Some(2), 4, "home"), Some(0));
+        assert_eq!(step_ledger_selection(Some(0), 4, "end"), Some(3));
+    }
+
+    #[test]
+    fn localized_labels_are_not_hardcoded_english_tokens() {
+        assert_eq!(localized_lane_name(TrajectoryLane::Input), "Input");
+        assert_eq!(localized_lane_name(TrajectoryLane::Model), "Model");
+        assert_eq!(localized_lane_name(TrajectoryLane::Tools), "Tools");
+        assert_eq!(localized_status_name(TrajectoryStatus::Failed), "Failed");
+        assert_eq!(record_count_label(3), "3 records");
+        assert_eq!(item_count_label(2), "2 items");
+        assert_eq!(status_marker(TrajectoryStatus::Completed), "✓");
+        assert_eq!(status_marker(TrajectoryStatus::Failed), "✕");
+        assert_eq!(json_object_preview(4), "Object (4 entries)");
+        assert_eq!(json_array_preview(2), "Array (2 items)");
+        assert_eq!(json_bool_preview(true), "true");
+        assert_eq!(json_bool_preview(false), "false");
+        assert_eq!(json_null_preview(), "null");
+        assert_eq!(localized_kind_name(TrajectoryKind::Request), "Request");
+
+        let nodes = flatten_json_tree(
+            &json!({"a": [true, null]}),
+            &HashSet::from(["$".into(), "$.a".into()]),
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.value_preview == "Object (1 entries)")
+        );
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.value_preview == "Array (2 items)")
+        );
+        assert!(nodes.iter().any(|node| node.value_preview == "true"));
+        assert!(nodes.iter().any(|node| node.value_preview == "null"));
     }
 }

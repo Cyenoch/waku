@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
 use serde_json::Value;
 use wakuwaku_harness::{Auth, auth_headers, parse_models_payload};
 use wakuwaku_protocol::{
     ApiFormat, AuthEndpoints, ExternalProvider, ModelCatalogEntry, ProviderId, ProviderPreset,
-    SecretString, TransportProfile,
+    SecretString, TransportProfile, enrich_catalog_from_models_dev, models_dev_source_key,
+    parse_models_dev_document,
 };
 
 use super::error::AuthError;
@@ -17,6 +18,7 @@ use super::jwt;
 use super::store::StoredCredential;
 
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(20);
+const MODELS_DEV_TIMEOUT: Duration = Duration::from_secs(3);
 const ACCESS_SKEW_MS: u64 = 5 * 60 * 1000;
 #[derive(Debug)]
 pub struct OauthTokens {
@@ -37,6 +39,13 @@ pub fn now_ms() -> u64 {
 pub fn http_client() -> Result<Client, AuthError> {
     Client::builder()
         .timeout(TOKEN_TIMEOUT)
+        .build()
+        .map_err(|_| AuthError::failed("could not build HTTP client"))
+}
+
+pub fn models_dev_http_client() -> Result<Client, AuthError> {
+    Client::builder()
+        .timeout(MODELS_DEV_TIMEOUT)
         .build()
         .map_err(|_| AuthError::failed("could not build HTTP client"))
 }
@@ -434,6 +443,7 @@ pub fn fetch_models(
 ) -> Result<Vec<ModelCatalogEntry>, AuthError> {
     let config = wakuwaku_harness::ProviderConfig {
         endpoint: endpoint.clone(),
+        limits: wakuwaku_protocol::ProviderLimits::default(),
         auth,
         transport,
         extra_auth_headers,
@@ -465,6 +475,29 @@ pub fn fetch_models(
         transport,
     )
     .map_err(|error| AuthError::failed(error.to_string()))
+}
+
+pub fn fetch_models_dev_document(http: &Client, url: &str) -> Option<Value> {
+    let response = http.get(url).header(USER_AGENT, "wakuwaku").send().ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json().ok()
+}
+
+pub fn enrich_models(
+    http: &Client,
+    models_dev_url: &str,
+    preset: ProviderPreset,
+    models: Vec<ModelCatalogEntry>,
+) -> Vec<ModelCatalogEntry> {
+    if models_dev_source_key(preset).is_none() {
+        return models;
+    }
+    let Some(document) = fetch_models_dev_document(http, models_dev_url) else {
+        return models;
+    };
+    enrich_catalog_from_models_dev(models, preset, &parse_models_dev_document(&document))
 }
 
 pub fn validate_api_key(

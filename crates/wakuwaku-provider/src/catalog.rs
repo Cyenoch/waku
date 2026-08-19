@@ -317,7 +317,7 @@ fn default_reasoning_effort(
     efforts.iter().any(|effort| effort.id == id).then_some(id)
 }
 
-fn normalize_reasoning_effort(value: &str, entry: &ModelCatalogEntry) -> String {
+pub(crate) fn normalize_reasoning_effort(value: &str, entry: &ModelCatalogEntry) -> String {
     let normalized = value
         .trim()
         .to_ascii_lowercase()
@@ -563,6 +563,8 @@ mod tests {
         .unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-5");
+        assert!(!models[0].capabilities.service_tier);
+        assert!(models[0].reasoning_efforts.is_empty());
     }
 
     #[test]

@@ -17,7 +17,9 @@ use uuid::Uuid;
 use crate::{Command, DaemonExposureSettings, DaemonSettings, DaemonSupervisor, ResponsePayload};
 use wakuwaku_protocol::i18n::AppLanguage;
 use wakuwaku_protocol::identity::DATA_DIRECTORY_NAME;
-use wakuwaku_protocol::model::{AgentSession, FavoriteModel, Project, ProviderId};
+use wakuwaku_protocol::model::{
+    AgentSession, ExternalProvider, FavoriteModel, Project, ProviderId,
+};
 use wakuwaku_protocol::theme::ThemePreference;
 
 pub use wakuwaku_protocol::persistence::{
@@ -44,7 +46,18 @@ fn default_analytics_enabled() -> bool {
 }
 
 fn default_provider() -> ProviderId {
-    ProviderId::new(ProviderId::OPENAI_RESPONSES)
+    first_configured_provider(&[])
+}
+
+/// First configured HTTP endpoint, or the standard OpenAI Responses id.
+///
+/// Client persistence never stores secrets. Endpoint rows only carry an
+/// environment-variable *name* (`api_key_env`), never a key value.
+pub fn first_configured_provider(providers: &[ExternalProvider]) -> ProviderId {
+    providers
+        .first()
+        .map(|provider| provider.id.clone())
+        .unwrap_or_else(|| ProviderId::new(ProviderId::OPENAI_RESPONSES))
 }
 
 fn default_sidebar_width() -> f32 {
@@ -55,6 +68,10 @@ fn default_right_panel_width() -> f32 {
     DEFAULT_RIGHT_PANEL_WIDTH
 }
 
+/// Explicit trait choices remembered for one provider model.
+///
+/// Reasoning effort is a model capability, so its option id must not leak
+/// into another endpoint merely because that endpoint uses the same string.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RememberedModelTraits {
     provider: ProviderId,
@@ -297,7 +314,7 @@ pub struct PersistedState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_state: Option<PersistedWindowState>,
     #[serde(default)]
-    pub external_providers: Vec<wakuwaku_protocol::ExternalProvider>,
+    pub external_providers: Vec<ExternalProvider>,
     #[serde(skip)]
     daemon_settings_extra: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
@@ -329,7 +346,7 @@ impl PersistedState {
             sessions: Vec::new(),
             selected_project: None,
             selected_session: None,
-            last_provider: ProviderId::new(ProviderId::OPENAI_RESPONSES),
+            last_provider: first_configured_provider(&[]),
             last_model: None,
             last_reasoning_effort: None,
             last_service_tier: None,
@@ -351,15 +368,39 @@ impl PersistedState {
     }
 
     pub fn fresh(cwd: PathBuf) -> Self {
+        let mut state = Self::empty();
         let project = Project::from_path(cwd);
-        let session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_RESPONSES));
-        Self {
-            selected_project: Some(project.id),
-            selected_session: Some(session.id),
-            projects: vec![project],
-            sessions: vec![session],
-            ..Self::empty()
-        }
+        let session = AgentSession::new(project.id, state.configured_provider());
+        state.selected_project = Some(project.id);
+        state.selected_session = Some(session.id);
+        state.projects = vec![project];
+        state.sessions = vec![session];
+        state
+    }
+
+    pub fn configured_provider(&self) -> ProviderId {
+        first_configured_provider(&self.external_providers)
+    }
+
+    /// Returns whether any persisted desktop/task state still points at a provider.
+    ///
+    /// Provider settings are daemon-owned while these references are split
+    /// across app state and task state. Callers must reject an identity rename
+    /// when this is true rather than attempting a non-atomic two-store update.
+    pub fn has_provider_reference(&self, provider: &ProviderId) -> bool {
+        self.last_provider == *provider
+            || self
+                .sessions
+                .iter()
+                .any(|session| session.provider == *provider)
+            || self
+                .favorite_models
+                .iter()
+                .any(|favorite| favorite.provider == *provider)
+            || self
+                .remembered_model_traits
+                .iter()
+                .any(|traits| traits.provider == *provider)
     }
 
     pub fn new_session(&self, project_id: Uuid, provider: ProviderId) -> AgentSession {
@@ -433,6 +474,9 @@ impl PersistedState {
     pub fn apply_daemon_settings(&mut self, settings: DaemonSettings) {
         self.external_providers = settings.external_providers;
         self.daemon_settings_extra = settings.extra;
+        if self.last_provider.as_str().trim().is_empty() || !self.last_provider.is_valid() {
+            self.last_provider = self.configured_provider();
+        }
     }
 
     fn app_settings(&self) -> AppSettings {
@@ -519,6 +563,9 @@ impl PersistedState {
 
     fn migrate_loaded(&mut self) {
         self.version = STATE_VERSION;
+        if self.last_provider.as_str().trim().is_empty() || !self.last_provider.is_valid() {
+            self.last_provider = self.configured_provider();
+        }
         self.backfill_remembered_selection();
     }
 
@@ -974,5 +1021,63 @@ mod tests {
         restore_task_state_skeletons(&mut sessions);
         assert!(!sessions[0].detail_loaded);
         assert!(sessions[0].has_started());
+    }
+
+    #[test]
+    fn configured_provider_prefers_first_endpoint_then_openai_responses() {
+        let mut state = PersistedState::empty();
+        assert_eq!(
+            state.configured_provider().as_str(),
+            ProviderId::OPENAI_RESPONSES
+        );
+        assert_eq!(state.last_provider.as_str(), ProviderId::OPENAI_RESPONSES);
+
+        state.apply_daemon_settings(DaemonSettings {
+            external_providers: vec![ExternalProvider::new(
+                "corp-responses",
+                "Corp",
+                "http://127.0.0.1:9/v1",
+                wakuwaku_protocol::ApiFormat::OpenAiResponses,
+            )],
+            extra: Default::default(),
+        });
+        assert_eq!(state.configured_provider().as_str(), "corp-responses");
+        assert_eq!(
+            state.last_provider.as_str(),
+            ProviderId::OPENAI_RESPONSES,
+            "a valid remembered provider is kept"
+        );
+
+        state.last_provider = ProviderId::new("");
+        state.apply_daemon_settings(state.daemon_settings());
+        assert_eq!(state.last_provider.as_str(), "corp-responses");
+    }
+
+    #[test]
+    fn provider_reference_guard_covers_persisted_state() {
+        let provider = ProviderId::new("corp");
+        let mut state = PersistedState::empty();
+        assert!(!state.has_provider_reference(&provider));
+
+        state.last_provider = provider.clone();
+        assert!(state.has_provider_reference(&provider));
+        state.last_provider = ProviderId::new(ProviderId::OPENAI_RESPONSES);
+
+        let project_id = Uuid::new_v4();
+        state
+            .sessions
+            .push(AgentSession::new(project_id, provider.clone()));
+        assert!(state.has_provider_reference(&provider));
+        state.sessions.clear();
+
+        state.favorite_models.push(FavoriteModel {
+            provider: provider.clone(),
+            model: "model".into(),
+        });
+        assert!(state.has_provider_reference(&provider));
+        state.favorite_models.clear();
+
+        state.remember_model_traits(provider.clone(), "model", Some("high".into()), None);
+        assert!(state.has_provider_reference(&provider));
     }
 }

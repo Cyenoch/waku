@@ -41,7 +41,8 @@ import {
 } from '@/lib/daemon-api'
 import { useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
-import { canonicalReasoningEffortForModel } from '@/lib/reasoning-effort'
+import { canonicalReasoningEffortForModel, presentedReasoningEffort } from '@/lib/reasoning-effort'
+import { readyCatalogModels, resolvedCatalogModel } from '@/lib/model-picker-presentation'
 import {
   composerAutocompleteRows,
   detectComposerTrigger,
@@ -146,6 +147,10 @@ export function Composer({
   const composerCommands = useComposerCommands(session.provider, cwd)
   const modelCatalog = useModelCatalog(session.provider)
   const daemonSettings = useDaemonSettings()
+  const selectedCatalogModel = resolvedCatalogModel(
+    session.model,
+    readyCatalogModels(modelCatalog),
+  )
   const [prompt, setPrompt] = useState(initialComposerDraft?.text ?? '')
   const [attachments, setAttachments] = useState<MessageAttachment[]>(
     () => initialComposerDraft?.attachments ?? [],
@@ -427,8 +432,12 @@ export function Composer({
     selectedModel?: Pick<ModelCatalogEntry, 'supported' | 'capabilities' | 'apiFormat' | 'reasoningEfforts' | 'defaultReasoningEffort'>,
   ) {
     const candidate = { ...session, ...patch }
+    const catalogModels = readyCatalogModels(modelCatalog)
     const model = selectedModel
-      ?? modelCatalog.data?.models.find((entry) => entry.id === candidate.model)
+      ?? resolvedCatalogModel(
+        candidate.model,
+        catalogModels,
+      )
     const next = {
       ...candidate,
       service_tier: serviceTierForModel(model, candidate.service_tier),
@@ -669,14 +678,14 @@ export function Composer({
               }}
             />
             <ReasoningEffortControl
-              model={modelCatalog.data?.models.find((candidate) => candidate.id === session.model)}
+              model={selectedCatalogModel}
               session={session}
-              onPatch={savePatch}
+              onPatch={(patch) => savePatch(patch, selectedCatalogModel)}
             />
             <FastModeControl
-              model={modelCatalog.data?.models.find((candidate) => candidate.id === session.model)}
+              model={selectedCatalogModel}
               session={session}
-              onPatch={savePatch}
+              onPatch={(patch) => savePatch(patch, selectedCatalogModel)}
             />
             <AccessControl returnFocus={composerInput} session={session} onPatch={savePatch} />
             <InteractionModeControl session={session} onPatch={savePatch} />
@@ -1231,12 +1240,10 @@ function ReasoningEffortControl({
   const { t } = useI18n()
   const efforts = model?.reasoningEfforts ?? []
   if (!model?.supported || !model.capabilities.reasoningEffort || !efforts.length) return null
-  const selected = efforts.some((effort) => effort.id === session.reasoning_effort)
-    ? session.reasoning_effort!
-    : model.defaultReasoningEffort && efforts.some((effort) => effort.id === model.defaultReasoningEffort)
-      ? model.defaultReasoningEffort
-      : efforts[0]!.id
-  const selectedLabel = efforts.find((effort) => effort.id === selected)?.label ?? selected
+  const selected = presentedReasoningEffort(model, session.reasoning_effort)
+  const selectedLabel = selected
+    ? efforts.find((effort) => effort.id === selected)?.label ?? selected
+    : t('models.reasoning')
   return (
     <ControlMenu
       icon="sparkle"

@@ -719,11 +719,17 @@ impl Waku {
 
     pub(super) fn save(&mut self) {
         self.last_stream_save = Instant::now();
-        let daemon_error = self
-            .daemon
-            .update_settings(self.state.daemon_settings())
-            .err()
-            .map(|error| error.to_string());
+        // Provider settings stay in the old local state until the confirmed
+        // daemon write receives Ack. Publishing that snapshot here would let
+        // a concurrent background save overwrite the confirmed provider set.
+        let daemon_error = if self.provider_settings_apply_pending.is_some() {
+            None
+        } else {
+            self.daemon
+                .update_settings(self.state.daemon_settings())
+                .err()
+                .map(|error| error.to_string())
+        };
         let app_error = self
             .store
             .save(&mut self.state)
@@ -1485,9 +1491,6 @@ impl Waku {
             anyhow::bail!("provider {} is not configured", session.provider.as_str());
         };
         endpoint.id.validate().map_err(anyhow::Error::msg)?;
-        if endpoint.default_model.trim().is_empty() {
-            anyhow::bail!("provider {:?} has no default model", endpoint.id.as_str());
-        }
         let SessionOptions {
             mode,
             interaction_mode,
@@ -2266,6 +2269,21 @@ pub(crate) fn gated_reasoning_effort<'a>(
     })
 }
 
+pub(crate) fn presented_reasoning_effort<'a>(
+    effort: Option<&'a str>,
+    entry: &'a wakuwaku_client::ModelCatalogEntry,
+) -> Option<&'a str> {
+    gated_reasoning_effort(effort, Some(entry)).or_else(|| {
+        entry.default_reasoning_effort.as_deref().filter(|default| {
+            catalog_allows_reasoning_effort(Some(entry))
+                && entry
+                    .reasoning_efforts
+                    .iter()
+                    .any(|candidate| candidate.id == *default)
+        })
+    })
+}
+
 pub(crate) fn provider_reasoning_effort<'a>(
     effort: Option<&str>,
     entry: Option<&'a wakuwaku_client::ModelCatalogEntry>,
@@ -2340,7 +2358,7 @@ pub(super) fn provider_endpoint_for_start(
 mod model_options_tests {
     use super::{
         catalog_allows_reasoning_effort, catalog_allows_service_tier, gated_reasoning_effort,
-        gated_service_tier, provider_reasoning_effort,
+        gated_service_tier, presented_reasoning_effort, provider_reasoning_effort,
     };
     use wakuwaku_client::{
         ApiFormat, ModelCapabilities, ModelCatalogEntry, ProviderId, ServiceTier, TransportProfile,
@@ -2360,10 +2378,10 @@ mod model_options_tests {
             reasoning: false,
             reasoning_efforts: Vec::new(),
             default_reasoning_effort: None,
-            capabilities: if service_tier {
-                ModelCapabilities::openai_api(ApiFormat::OpenAiResponses)
-            } else {
-                ModelCapabilities::openai_compatible(ApiFormat::OpenAiResponses)
+            capabilities: {
+                let mut capabilities = ModelCapabilities::openai_api(ApiFormat::OpenAiResponses);
+                capabilities.service_tier = service_tier;
+                capabilities
             },
             supported,
             unsupported_reason: (!supported).then_some(UnsupportedReason::NonChat),
@@ -2417,6 +2435,10 @@ mod model_options_tests {
             Some("provider-deep")
         );
         assert_eq!(gated_reasoning_effort(Some("medium"), Some(&model)), None);
+        assert_eq!(presented_reasoning_effort(None, &model), None);
+        model.default_reasoning_effort = Some("high".into());
+        assert_eq!(presented_reasoning_effort(None, &model), Some("high"));
+        assert_eq!(presented_reasoning_effort(Some("low"), &model), Some("low"));
         assert_eq!(
             provider_reasoning_effort(Some("medium"), Some(&model)),
             None
@@ -2453,7 +2475,6 @@ mod start_route_tests {
             let endpoint = provider_endpoint_for_start(&preset.provider_id(), &[])
                 .unwrap_or_else(|| panic!("{} must start without a custom endpoint", preset.id()));
             assert_eq!(endpoint.id, preset.provider_id());
-            assert!(!endpoint.default_model.trim().is_empty(), "{}", preset.id());
             assert!(endpoint.base_url.starts_with("https://"), "{}", preset.id());
         }
     }
@@ -2477,11 +2498,10 @@ mod start_route_tests {
             "Corp",
             "https://example.test/v1",
             Default::default(),
-            "local-model",
         );
         let endpoint =
             provider_endpoint_for_start(&ProviderId::new("corp"), &[custom]).expect("custom");
-        assert_eq!(endpoint.default_model, "local-model");
+        assert_eq!(endpoint.base_url, "https://example.test/v1");
     }
 }
 

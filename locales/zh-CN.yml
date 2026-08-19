@@ -44,6 +44,7 @@ command_palette.show_sidebar: 显示侧边栏
 command_palette.hide_sidebar: 隐藏侧边栏
 command_palette.show_right_panel: 显示右侧面板
 command_palette.hide_right_panel: 隐藏右侧面板
+command_palette.open_trajectory: 打开轨迹
 command_palette.current: 当前
 command_palette.you: 你
 command_palette.agent: 智能体
@@ -161,16 +162,24 @@ providers.add: 添加服务商
 providers.configure_first: 请先配置服务商，再选择模型
 providers.connected: 已连接
 providers.api_format: API 格式
-providers.edit_title: 编辑服务商
+providers.api_format_openai_responses: OpenAI Responses API
+providers.api_format_openai_chat: OpenAI Chat Completions API
+providers.api_format_anthropic: Anthropic Messages API
 providers.id: 服务商 ID
 providers.name: 名称
 providers.base_url: 基础 URL
-providers.api_key_env: API 密钥环境变量
-providers.models: 模型
-providers.context_window: 上下文窗口
-providers.max_output_tokens: 最大输出 token 数
+providers.api_key: API 密钥
+providers.api_key_saved_placeholder: "已保存密钥——输入新值可替换"
 providers.headers: 附加请求头
+providers.edit_title: 编辑服务商
+providers.id_placeholder: openai
+providers.name_placeholder: OpenAI
+providers.base_url_placeholder: https://api.openai.com/v1
+providers.headers_placeholder: "X-Custom-Header: value"
+providers.models_auto_fetch: 保存后自动从服务商接口获取模型列表
+providers.headers_hint: "每行一个请求头，格式为 Name: value"
 providers.invalid_configuration: 服务商配置无效或不完整
+providers.required_fields: 服务商 ID、名称和基础 URL 为必填项
 providers.device_code: "请在 %{url} 输入 %{code}"
 settings.local_by_default: 默认存储在本地
 settings.local_by_default_description: 项目、对话和设置均存储在这台 Mac 上
@@ -181,7 +190,6 @@ settings.share_anonymous_usage_data: 分享匿名使用数据
 settings.share_anonymous_usage_data_description: 分享功能使用情况和可靠性数据，帮助改进 WakuWaku。不会包含提示词、回复、项目名称、文件路径等个人信息
 providers.description: 直接配置模型端点。WakuWaku 不会显示或存储 API 密钥值
 providers.web_description: 直接在守护进程主机上配置模型端点。WakuWaku 不会显示或存储 API 密钥值
-providers.catalog_models: 来自实时目录的模型
 providers.not_authenticated: 未连接
 providers.api_key_placeholder: 输入 API 密钥（提交后清除）
 providers.connect: 连接
@@ -409,7 +417,6 @@ models.catalog_error: 模型目录不可用
 models.catalog_live: 实时
 models.catalog_cache: 缓存
 models.catalog_seed: 内置
-models.unsupported: 不支持
 models.context_window: 上下文窗口
 model_option.none: 无
 model_option.none_description: 不发送服务等级覆盖值
@@ -908,20 +915,13 @@ usage.resets_in_hours: "%{count} 小时后重置"
 usage.resets_in_hours_minutes: "%{hours} 小时 %{minutes} 分钟后重置"
 usage.resets_date: 将于 %{date} 重置
 
-providers.default_model: 默认模型
 
 providers.duplicate_id: 服务商 ID 已在使用
 providers.in_use: 会话或收藏仍引用此服务商
 
-providers.duplicate_models: 不允许重复的模型 ID
-
-providers.invalid_context_window: 上下文窗口必须是正整数
-providers.invalid_max_output_tokens: 最大输出 token 必须是正整数
 providers.invalid_header_format: "每个请求头必须使用 Name: value 格式"
 providers.invalid_headers: 请求头不能为空或重复，也不能使用保留名称：Authorization、x-api-key、Host、Content-Length、Content-Type、Anthropic-Version
 
-trajectory.tab_chat: 对话
-trajectory.tab_trajectory: 轨迹
 trajectory.search_placeholder: 过滤轨迹（AND 匹配）...
 trajectory.duration_projection: 耗时预估
 trajectory.unfold_all_turns: 展开所有轮次
@@ -933,6 +933,7 @@ trajectory.legacy_partial_banner: 显示早期会话版本的部分轨迹
 trajectory.missing_snapshot_banner: 延续快照不可用；轨迹可能不完整
 trajectory.error_banner: 轨迹加载失败
 trajectory.retry: 重试
+trajectory.unexpected_response: 意外的轨迹响应
 trajectory.empty: 暂无轨迹事件
 trajectory.empty_description: Agent 执行事件和步骤将显示在此处。
 trajectory.turn_divider: "第 %{turn} 轮"
@@ -958,3 +959,34 @@ trajectory.tab_result: 结果
 trajectory.tab_schema: 模式
 trajectory.bytes_loaded:
   zh-CN: "已加载 %{loaded} / %{total} 字节"
+trajectory.lane_input: 输入
+trajectory.lane_model: 模型
+trajectory.lane_tools: 工具
+trajectory.assistant_label: 助手
+trajectory.tool_label: 工具
+trajectory.record_count: "%{count} 条记录"
+trajectory.item_count: "%{count} 项"
+trajectory.status_pending: 等待中
+trajectory.status_running: 进行中
+trajectory.status_completed: 已完成
+trajectory.status_failed: 失败
+trajectory.status_cancelled: 已取消
+trajectory.status_unavailable: 不可用
+trajectory.selected: 已选中
+trajectory.collapsed: 已折叠
+trajectory.json_object: "对象（%{count} 项）"
+trajectory.json_array: "数组（%{count} 项）"
+trajectory.json_true: 真
+trajectory.json_false: 假
+trajectory.json_null: 空
+trajectory.meta_kind: "类型：%{kind}"
+trajectory.meta_status: "状态：%{status}"
+trajectory.meta_duration: "耗时：%{duration}"
+trajectory.no_content: 无内容
+trajectory.kind_system: 系统
+trajectory.kind_user: 用户
+trajectory.kind_context: 上下文
+trajectory.kind_request: 请求
+trajectory.kind_assistant: 助手
+trajectory.kind_tool: 工具
+trajectory.expanded: 已展开

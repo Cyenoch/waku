@@ -46,6 +46,7 @@ command_palette.show_sidebar: サイドバーを表示
 command_palette.hide_sidebar: サイドバーを隠す
 command_palette.show_right_panel: 右パネルを表示
 command_palette.hide_right_panel: 右パネルを隠す
+command_palette.open_trajectory: トラジェクトリを開く
 command_palette.current: 現在
 command_palette.you: あなた
 command_palette.agent: エージェント
@@ -167,16 +168,24 @@ providers.add: プロバイダーを追加
 providers.configure_first: モデルを選ぶ前にプロバイダーを設定してください
 providers.connected: 接続済み
 providers.api_format: API 形式
-providers.edit_title: プロバイダーを編集
+providers.api_format_openai_responses: OpenAI Responses API
+providers.api_format_openai_chat: OpenAI Chat Completions API
+providers.api_format_anthropic: Anthropic Messages API
 providers.id: プロバイダー ID
 providers.name: 名前
 providers.base_url: ベース URL
-providers.api_key_env: API キーの環境変数
-providers.models: モデル
-providers.context_window: コンテキストウインドウ
-providers.max_output_tokens: 最大出力トークン数
+providers.api_key: API キー
+providers.api_key_saved_placeholder: "キー保存済み——入力で置き換えます"
 providers.headers: 追加ヘッダー
+providers.edit_title: プロバイダーを編集
+providers.id_placeholder: openai
+providers.name_placeholder: OpenAI
+providers.base_url_placeholder: https://api.openai.com/v1
+providers.headers_placeholder: "X-Custom-Header: value"
+providers.models_auto_fetch: 保存後にプロバイダーの API からモデル一覧を取得します
+providers.headers_hint: "1 行に 1 つのヘッダー、Name: value 形式"
 providers.invalid_configuration: プロバイダーの設定が無効または不完全です
+providers.required_fields: プロバイダー ID、名前、ベース URL は必須です
 providers.device_code: "%{url} で %{code} を入力"
 
 settings.local_by_default: デフォルトでローカルに保存
@@ -189,7 +198,6 @@ settings.share_anonymous_usage_data_description: 機能の利用状況と信頼�
 
 providers.description: モデルエンドポイントを直接設定します。API キーの値を WakuWaku が表示・保存することはありません
 providers.web_description: デーモンホスト上のモデルエンドポイントを直接設定します。API キーの値を WakuWaku が表示・保存することはありません
-providers.catalog_models: ライブカタログのモデル
 providers.not_authenticated: 未接続
 providers.api_key_placeholder: API キーを入力（送信後に消去）
 providers.connect: 接続
@@ -430,7 +438,6 @@ models.catalog_error: モデルカタログを利用できません
 models.catalog_live: ライブ
 models.catalog_cache: キャッシュ
 models.catalog_seed: 組み込み
-models.unsupported: 非対応
 
 model_option.none: なし
 model_option.none_description: サービスティアを指定しない
@@ -954,20 +961,13 @@ usage.resets_in_hours: "%{count} 時間後にリセット"
 usage.resets_in_hours_minutes: "%{hours} 時間 %{minutes} 分後にリセット"
 usage.resets_date: "%{date} にリセット"
 
-providers.default_model: デフォルトモデル
 
 providers.duplicate_id: プロバイダー ID は既に使用されています
 providers.in_use: セッションまたはお気に入りがこのプロバイダーを参照しています
 
-providers.duplicate_models: モデル ID の重複は許可されません
-
-providers.invalid_context_window: コンテキストウィンドウは正の整数で入力してください
-providers.invalid_max_output_tokens: 最大出力トークンは正の整数で入力してください
 providers.invalid_header_format: "ヘッダーは Name: value 形式で入力してください"
 providers.invalid_headers: ヘッダーは空欄・重複・予約名を使用できません：Authorization、x-api-key、Host、Content-Length、Content-Type、Anthropic-Version
 
-trajectory.tab_chat: チャット
-trajectory.tab_trajectory: トラジェクトリ
 trajectory.search_placeholder: 軌跡を絞り込み（AND検索）...
 trajectory.duration_projection: 所要時間予測
 trajectory.unfold_all_turns: すべてのターンを展開
@@ -979,6 +979,7 @@ trajectory.legacy_partial_banner: 以前のセッションバージョンの部�
 trajectory.missing_snapshot_banner: 継続スナップショットが利用できません。軌跡が不完全な可能性があります
 trajectory.error_banner: 軌跡の読み込みに失敗しました
 trajectory.retry: 再試行
+trajectory.unexpected_response: 予期しない軌跡応答
 trajectory.empty: 軌跡イベントはありません
 trajectory.empty_description: エージェントの実行イベントとステップがここに表示されます。
 trajectory.turn_divider: "ターン %{turn}"
@@ -1002,5 +1003,37 @@ trajectory.tab_timing: タイミング
 trajectory.tab_payload: ペイロード
 trajectory.tab_result: 結果
 trajectory.tab_schema: スキーマ
+trajectory.lane_input: 入力
+trajectory.lane_model: モデル
+trajectory.lane_tools: ツール
+trajectory.assistant_label: アシスタント
+trajectory.tool_label: ツール
+trajectory.record_count: "%{count} 件のレコード"
+trajectory.item_count: "%{count} 件"
+trajectory.status_pending: 保留中
+trajectory.status_running: 実行中
+trajectory.status_completed: 完了
+trajectory.status_failed: 失敗
+trajectory.status_cancelled: キャンセル
+trajectory.status_unavailable: 利用不可
+trajectory.selected: 選択中
+trajectory.collapsed: 折りたたみ
+trajectory.expanded: 展開済み
+trajectory.json_object: "オブジェクト（%{count} 件）"
+trajectory.json_array: "配列（%{count} 件）"
+trajectory.json_true: 真
+trajectory.json_false: 偽
+trajectory.json_null: 空
+trajectory.meta_kind: "種類: %{kind}"
+trajectory.meta_status: "状態: %{status}"
+trajectory.meta_duration: "所要時間: %{duration}"
+trajectory.no_content: 内容なし
+trajectory.kind_system: システム
+trajectory.kind_user: ユーザー
+trajectory.kind_context: コンテキスト
+trajectory.kind_request: リクエスト
+trajectory.kind_assistant: アシスタント
+trajectory.kind_tool: ツール
+
 trajectory.bytes_loaded:
   ja: "%{loaded} / %{total} バイトを読み込みました"

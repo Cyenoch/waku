@@ -1,5 +1,30 @@
 import type { ProviderId } from '@wakuwaku/client'
 
+export function resolvedSessionModel(
+  sessionModel: string | null | undefined,
+  models: readonly { id: string; supported: boolean }[],
+): string | undefined {
+  const requested = sessionModel?.trim()
+  if (requested && models.some((model) => model.id === requested && model.supported)) return requested
+  return models.find((model) => model.supported)?.id
+}
+
+export function resolvedCatalogModel<T extends { id: string; supported: boolean }>(
+  sessionModel: string | null | undefined,
+  models: readonly T[] | undefined,
+): T | undefined {
+  if (!models?.length) return undefined
+  const id = resolvedSessionModel(sessionModel, models)
+  return id ? models.find((model) => model.id === id) : undefined
+}
+
+export function readyCatalogModels<T>(
+  query: { isError: boolean; isFetched: boolean; data?: { models?: readonly T[] } },
+): readonly T[] | undefined {
+  if (query.isError || !query.isFetched || query.data === undefined) return undefined
+  return query.data.models
+}
+
 export interface ModelPickerRow {
   provider: ProviderId
   model: { id: string }

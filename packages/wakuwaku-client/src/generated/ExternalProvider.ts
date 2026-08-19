@@ -3,6 +3,11 @@ import type { ApiFormat } from "./ApiFormat";
 import type { ProviderId } from "./ProviderId";
 
 /**
- * Serializable endpoint configuration. It intentionally has no secret value.
+ * Serializable endpoint configuration. It intentionally has no secret value:
+ * API keys live in the OS credential store, and model limits arrive with the
+ * discovered catalog entry rather than being configured per endpoint.
+ *
+ * The model list is never stored here either: models are discovered from the
+ * endpoint's standard `/models` interface and cached as a catalog.
  */
-export type ExternalProvider = { id: ProviderId, name: string, baseUrl: string, apiFormat: ApiFormat, apiKeyEnv?: string | null, headers?: Array<[string, string]>, models?: Array<string>, defaultModel: string, contextWindow: number, maxOutputTokens: number, };
+export type ExternalProvider = { id: ProviderId, name: string, baseUrl: string, apiFormat: ApiFormat, headers?: Array<[string, string]>, };

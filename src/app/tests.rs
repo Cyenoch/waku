@@ -1771,40 +1771,64 @@ fn configured_provider_models_are_visible_and_searchable() {
     use super::ModelPickerTab;
     use super::composer::visible_picker_models;
     use crate::model::{ExternalProvider, FavoriteModel};
-    let mut claude = ExternalProvider::new(
+    let claude = ExternalProvider::new(
         "corp-anthropic",
         "Claude",
         "https://example.test",
         Default::default(),
-        "claude-sonnet-5",
     );
-    claude.models = vec!["claude-sonnet-5".into(), "claude-haiku".into()];
     let codex = ExternalProvider::new(
         "corp-codex",
         "Codex",
         "https://example.test",
         Default::default(),
-        "gpt-5",
     );
     let providers = [claude, codex];
+    let catalogs = std::collections::HashMap::from([(
+        ProviderId::new("corp-anthropic"),
+        wakuwaku_client::ModelCatalog {
+            provider: ProviderId::new("corp-anthropic"),
+            models: ["claude-sonnet-5", "claude-haiku"]
+                .into_iter()
+                .map(|id| wakuwaku_client::ModelCatalogEntry {
+                    id: id.to_owned(),
+                    name: id.to_owned(),
+                    provider: ProviderId::new("corp-anthropic"),
+                    api_format: wakuwaku_client::ApiFormat::OpenAiResponses,
+                    transport: wakuwaku_client::TransportProfile::Standard,
+                    base_url: "https://example.test".to_owned(),
+                    context_window: 128_000,
+                    max_output_tokens: 16_384,
+                    reasoning: false,
+                    reasoning_efforts: Vec::new(),
+                    default_reasoning_effort: None,
+                    capabilities: wakuwaku_client::ModelCapabilities::openai_api(
+                        wakuwaku_client::ApiFormat::OpenAiResponses,
+                    ),
+                    supported: true,
+                    unsupported_reason: None,
+                })
+                .collect(),
+            source: wakuwaku_client::CatalogSource::Live,
+            fetched_at_ms: 1,
+        },
+    )]);
     let favorites = [FavoriteModel {
         provider: ProviderId::new("corp-anthropic"),
         model: "claude-haiku".into(),
     }];
     let models = visible_picker_models(
         &providers,
-        &std::collections::HashMap::new(),
+        &catalogs,
         &favorites,
-        None,
         &ModelPickerTab::Provider(ProviderId::new("corp-anthropic")),
         "",
     );
     assert_eq!(models.len(), 2);
     let models = visible_picker_models(
         &providers,
-        &std::collections::HashMap::new(),
+        &catalogs,
         &favorites,
-        None,
         &ModelPickerTab::Favorites,
         "haiku",
     );

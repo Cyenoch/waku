@@ -20,8 +20,10 @@ use wakuwaku_core::model::{
 use wakuwaku_core::persistence::{PersistedState, StateStore};
 use wakuwaku_core::protocol::{Command, ResponsePayload, StartTask};
 use wakuwaku_core::{DaemonSettings, DaemonSettingsStore, ServerOptions, serve};
-use wakuwaku_protocol::{ApiFormat, ExternalProvider};
-
+use wakuwaku_core::auth::{
+    AuthRuntime, AuthService, CredentialStore, MemoryCredentialStore, StoredCredential,
+};
+use wakuwaku_protocol::{ApiFormat, AuthEndpoints, ExternalProvider, SecretString};
 const TOKEN: &str = "restore-token";
 const PROVIDER: &str = "restore-openai";
 
@@ -171,17 +173,12 @@ fn start_daemon(
 ) {
     let mock = MockHttp::new(vec![model_sse("restored")]);
     let port = mock.bind();
-    unsafe {
-        std::env::set_var("WAKUWAKU_RESTORE_KEY", "sk-restore");
-    }
-    let mut provider = ExternalProvider::new(
+    let provider = ExternalProvider::new(
         PROVIDER,
         "Restore OpenAI",
         format!("http://127.0.0.1:{port}/v1"),
         ApiFormat::OpenAiResponses,
-        "restore-model",
     );
-    provider.api_key_env = Some("WAKUWAKU_RESTORE_KEY".into());
     let settings = DaemonSettingsStore::open(directory.join("settings.json")).unwrap();
     settings
         .replace(DaemonSettings {
@@ -189,6 +186,19 @@ fn start_daemon(
             extra: Default::default(),
         })
         .unwrap();
+    let creds = Arc::new(MemoryCredentialStore::default());
+    creds
+        .set(
+            &ProviderId::new(PROVIDER),
+            StoredCredential::api_key(SecretString::new("sk-restore")),
+        )
+        .unwrap();
+    let auth = AuthService::new(AuthRuntime::testing(
+        &directory,
+        creds,
+        AuthEndpoints::production(),
+    ))
+    .unwrap();
     let store = StateStore::daemon(directory.join("app.db"));
     let mut state = PersistedState::fresh(workspace.to_path_buf());
     let mut session = failed_pre_provider_session(state.projects[0].id, PROVIDER);
@@ -204,7 +214,7 @@ fn start_daemon(
     }
     let project = state.projects[0].clone();
     session.project_id = project.id;
-    let backend = WakuBackend::new(settings, store).unwrap();
+    let backend = WakuBackend::new_with_auth(settings, store, auth).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -469,17 +479,12 @@ fn genuine_provider_termination_surfaces_real_failure() {
     std::fs::create_dir_all(&workspace).unwrap();
     let mock = MockHttp::new(Vec::new());
     let port = mock.bind();
-    unsafe {
-        std::env::set_var("WAKUWAKU_RESTORE_KEY", "sk-restore");
-    }
-    let mut provider = ExternalProvider::new(
+    let provider = ExternalProvider::new(
         PROVIDER,
         "Restore OpenAI",
         format!("http://127.0.0.1:{port}/v1"),
         ApiFormat::OpenAiResponses,
-        "restore-model",
     );
-    provider.api_key_env = Some("WAKUWAKU_RESTORE_KEY".into());
     let settings = DaemonSettingsStore::open(directory.join("settings.json")).unwrap();
     settings
         .replace(DaemonSettings {
@@ -614,20 +619,14 @@ fn equal_timestamp_stale_client_closes_rejected_runtime() {
     std::fs::create_dir_all(&directory).unwrap();
     let workspace = directory.join("ws");
     std::fs::create_dir_all(&workspace).unwrap();
-
-    unsafe {
-        std::env::set_var("WAKUWAKU_RESTORE_KEY", "sk-restore");
-    }
     let mock = MockHttp::new(vec![model_sse("unused")]);
     let port = mock.bind();
-    let mut provider = ExternalProvider::new(
+    let provider = ExternalProvider::new(
         PROVIDER,
         "Restore OpenAI",
         format!("http://127.0.0.1:{port}/v1"),
         ApiFormat::OpenAiResponses,
-        "restore-model",
     );
-    provider.api_key_env = Some("WAKUWAKU_RESTORE_KEY".into());
     let settings = DaemonSettingsStore::open(directory.join("settings.json")).unwrap();
     settings
         .replace(DaemonSettings {

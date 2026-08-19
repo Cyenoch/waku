@@ -790,6 +790,35 @@ fn reusable_surface_index(
     }
 }
 
+fn open_surface_in_list(
+    surfaces: &mut Vec<RightPanelSurface>,
+    requested: RightPanelSurface,
+) -> usize {
+    if let Some(index) = reusable_surface_index(surfaces, &requested) {
+        index
+    } else {
+        surfaces.push(requested);
+        surfaces.len() - 1
+    }
+}
+
+fn select_surface_after_close(
+    remaining: usize,
+    closed_index: usize,
+    previous_active: Option<usize>,
+) -> Option<usize> {
+    if remaining == 0 {
+        None
+    } else {
+        Some(match previous_active {
+            Some(active) if active > closed_index => active - 1,
+            Some(active) if active == closed_index => closed_index.saturating_sub(1),
+            Some(active) => active.min(remaining - 1),
+            None => 0,
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 enum TabScrollFadeSide {
     Left,
@@ -1373,6 +1402,7 @@ mod tests {
             browser,
             terminal,
             background,
+            RightPanelSurface::Trajectory,
             RightPanelSurface::Files,
             RightPanelSurface::Diff,
         ];
@@ -1396,12 +1426,16 @@ mod tests {
             Some(2)
         );
         assert_eq!(
-            reusable_surface_index(&surfaces, &RightPanelSurface::Files),
+            reusable_surface_index(&surfaces, &RightPanelSurface::Trajectory),
             Some(3)
         );
         assert_eq!(
-            reusable_surface_index(&surfaces, &RightPanelSurface::Diff),
+            reusable_surface_index(&surfaces, &RightPanelSurface::Files),
             Some(4)
+        );
+        assert_eq!(
+            reusable_surface_index(&surfaces, &RightPanelSurface::Diff),
+            Some(5)
         );
     }
 
@@ -1463,6 +1497,47 @@ mod tests {
         assert!(restored_b.visible);
         assert_eq!(restored_b.surfaces, vec![RightPanelSurface::Files]);
         assert_eq!(restored_b.active_surface, Some(0));
+    }
+
+    #[test]
+    fn opening_trajectory_reuses_one_tab_and_keeps_other_surfaces() {
+        let mut surfaces = Vec::new();
+        let files = open_surface_in_list(&mut surfaces, RightPanelSurface::Files);
+        let trajectory = open_surface_in_list(&mut surfaces, RightPanelSurface::Trajectory);
+        let again = open_surface_in_list(&mut surfaces, RightPanelSurface::Trajectory);
+        assert_eq!(files, 0);
+        assert_eq!(trajectory, 1);
+        assert_eq!(again, 1);
+        assert_eq!(
+            surfaces,
+            vec![RightPanelSurface::Files, RightPanelSurface::Trajectory]
+        );
+    }
+
+    #[test]
+    fn closing_trajectory_selects_neighbor_or_hides_panel() {
+        let mut surfaces = vec![
+            RightPanelSurface::Files,
+            RightPanelSurface::Trajectory,
+            RightPanelSurface::Diff,
+        ];
+        let closed = 1;
+        surfaces.remove(closed);
+        assert_eq!(
+            select_surface_after_close(surfaces.len(), closed, Some(1)),
+            Some(0)
+        );
+        assert_eq!(
+            select_surface_after_close(surfaces.len(), closed, Some(2)),
+            Some(1)
+        );
+
+        let mut only_trajectory = vec![RightPanelSurface::Trajectory];
+        only_trajectory.remove(0);
+        assert_eq!(
+            select_surface_after_close(only_trajectory.len(), 0, Some(0)),
+            None
+        );
     }
 
     #[test]
@@ -1797,13 +1872,7 @@ impl Waku {
         }
         // Browser views are created on the surface's first render, which has
         // the `Window` their webview must attach to.
-        let index = match reusable_index {
-            Some(index) => index,
-            None => {
-                self.right_panel_surfaces.push(surface);
-                self.right_panel_surfaces.len() - 1
-            }
-        };
+        let index = open_surface_in_list(&mut self.right_panel_surfaces, surface);
         self.right_panel_active_surface = Some(index);
         self.reveal_right_panel_tab(index);
         self.request_active_terminal_focus();
@@ -1900,16 +1969,11 @@ impl Waku {
             self.right_panel_browsers.remove(&browser_id);
         }
         self.right_panel_surfaces.remove(index);
-        self.right_panel_active_surface = if self.right_panel_surfaces.is_empty() {
-            None
-        } else {
-            Some(match self.right_panel_active_surface {
-                Some(active) if active > index => active - 1,
-                Some(active) if active == index => index.saturating_sub(1),
-                Some(active) => active.min(self.right_panel_surfaces.len() - 1),
-                None => 0,
-            })
-        };
+        self.right_panel_active_surface = select_surface_after_close(
+            self.right_panel_surfaces.len(),
+            index,
+            self.right_panel_active_surface,
+        );
         if let Some(active) = self.right_panel_active_surface {
             self.reveal_right_panel_tab(active);
             self.request_active_terminal_focus();
@@ -2189,7 +2253,10 @@ impl Waku {
             .items_center()
             .gap(px(4.0))
             .overflow_x_scroll()
-            .track_scroll(&self.right_panel_tabs_scroll_handle);
+            .track_scroll(&self.right_panel_tabs_scroll_handle)
+            .tab_index(0)
+            .tab_group()
+            .tab_stop(false);
         for (index, surface) in self.right_panel_surfaces.iter().cloned().enumerate() {
             let active = active_surface == Some(index);
             let dirty = self.right_panel_surface_is_dirty(&surface);
@@ -2225,6 +2292,25 @@ impl Waku {
                     .items_center()
                     .gap(px(6.0))
                     .cursor_default()
+                    .track_focus(
+                        &self.transcript_control_focus(format!("right-panel-tab-{index}"), cx),
+                    )
+                    .tab_index(index as isize)
+                    .focus_visible(|element| element.border_1().border_color(theme.accent))
+                    .on_key_down({
+                        let activate_weak = activate_weak.clone();
+                        move |event: &KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                cx.stop_propagation();
+                                let _ = activate_weak.update(cx, |this, cx| {
+                                    this.right_panel_active_surface = Some(index);
+                                    this.reveal_right_panel_tab(index);
+                                    this.request_active_terminal_focus();
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                         cx.stop_propagation();
                     })
@@ -2411,6 +2497,9 @@ impl Waku {
                     .flex()
                     .flex_col()
                     .items_center()
+                    .tab_index(0)
+                    .tab_group()
+                    .tab_stop(false)
                     .child(
                         div()
                             .text_size(px(13.0))
@@ -2495,6 +2584,23 @@ impl Waku {
             .flex_col()
             .items_start()
             .cursor_default()
+            .track_focus(
+                &self.transcript_control_focus(
+                    format!("right-panel-card-{}", label.to_lowercase()),
+                    cx,
+                ),
+            )
+            .tab_index(0)
+            .focus_visible(|element| element.border_color(theme.accent))
+            .on_key_down({
+                let surface = surface.clone();
+                cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.open_right_panel_surface(surface.clone(), cx);
+                        cx.stop_propagation();
+                    }
+                })
+            })
             .hover(|element| element.bg(theme.raised).border_color(theme.text_ghost))
             .active(|element| element.bg(theme.overlay_strong))
             .child(icon(icon_path, 18.0, theme.text_secondary))

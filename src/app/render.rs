@@ -95,7 +95,16 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let chat_viewport_width = self.chat_viewport_width(window);
-        self.render_transcript(window, chat_viewport_width, cx)
+        // The transcript's own element sizes itself with `flex_1`, which only
+        // stretches inside a flex parent. A cached pane lays its content out
+        // as a root, so give it that parent here or its height collapses to
+        // the zero flex basis.
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .child(self.render_transcript(window, chat_viewport_width, cx))
             .into_any_element()
     }
 
@@ -137,6 +146,7 @@ impl Render for Waku {
         if self.settings_page.is_some() {
             let command_palette = self.render_command_palette(window, cx);
             let commit_dialog = self.render_commit_dialog(cx);
+            let provider_dialog = self.render_provider_dialog(window, cx);
             let toast = self.render_active_toast(cx);
             let content = div()
                 .relative()
@@ -146,6 +156,7 @@ impl Render for Waku {
                 .children(toast)
                 .children(command_palette)
                 .children(commit_dialog)
+                .children(provider_dialog)
                 .children(image_preview)
                 .into_any_element();
             return self.render_window_frame(content, window, cx);

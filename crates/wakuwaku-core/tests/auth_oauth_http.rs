@@ -1066,6 +1066,7 @@ fn openai_official_responses_sends_requested_service_tier() {
                 catalog_stub(ProviderPreset::OpenAiResponses.id(), "gpt-5", "GPT-5", base);
             entry.capabilities =
                 ModelCapabilities::openai_api(wakuwaku_protocol::ApiFormat::OpenAiResponses);
+            entry.capabilities.service_tier = true;
             entry_base = Some(entry.capabilities.service_tier);
             vec![entry]
         },
@@ -1095,6 +1096,7 @@ fn openai_official_chat_sends_requested_service_tier() {
             entry.api_format = wakuwaku_protocol::ApiFormat::OpenAiChat;
             entry.capabilities =
                 ModelCapabilities::openai_api(wakuwaku_protocol::ApiFormat::OpenAiChat);
+            entry.capabilities.service_tier = true;
             assert!(entry.capabilities.service_tier);
             vec![entry]
         },

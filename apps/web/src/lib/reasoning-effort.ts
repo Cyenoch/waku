@@ -17,3 +17,11 @@ export function canonicalReasoningEffortForModel(
     ? canonicalEffort
     : null
 }
+
+export function presentedReasoningEffort(
+  model: Pick<ModelCatalogEntry, 'supported' | 'capabilities' | 'reasoningEfforts' | 'defaultReasoningEffort'> | undefined,
+  canonicalEffort: string | null | undefined,
+): string | null {
+  return canonicalReasoningEffortForModel(model, canonicalEffort)
+    ?? canonicalReasoningEffortForModel(model, model?.defaultReasoningEffort)
+}

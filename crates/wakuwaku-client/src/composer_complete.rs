@@ -1,10 +1,13 @@
 //! Pure client-side composer matching over daemon-provided command/file lists.
+//!
+//! Matching is provider-neutral: every configured HTTP endpoint sees the same
+//! command/file helpers. Fast-mode and Codex CLI command catalogs were removed.
 
 use std::ops::Range;
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
-pub use wakuwaku_protocol::composer::{CommandScope, FileEntry, SlashCommand};
+pub use wakuwaku_protocol::composer::{CommandScope, FileEntry, ReportedCommand, SlashCommand};
 
 pub const FILTER_CAP: usize = 64;
 pub const FILE_INDEX_CAP: usize = 50_000;
@@ -90,6 +93,40 @@ pub fn expand_command_template(template: &str, args: &str) -> String {
         expanded.push_str(args);
     }
     expanded
+}
+
+/// Merge workspace-discovered commands with extra names reported by the
+/// daemon. Provider-specific CLI catalogs are not consulted.
+pub fn merge_reported_commands(
+    discovered: &[SlashCommand],
+    reported: &[ReportedCommand],
+) -> Vec<SlashCommand> {
+    let mut commands = discovered.to_vec();
+    for report in reported {
+        if let Some(existing) = commands
+            .iter_mut()
+            .find(|command| command.name == report.name)
+        {
+            if existing.description.trim().is_empty() {
+                existing.description.clone_from(&report.description);
+            }
+            continue;
+        }
+        commands.push(SlashCommand {
+            name: report.name.clone(),
+            description: report.description.clone(),
+            scope: CommandScope::Builtin,
+            argument_hint: None,
+            template: None,
+        });
+    }
+    commands.sort_by(|left, right| {
+        left.scope
+            .display_rank()
+            .cmp(&right.scope.display_rank())
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    commands
 }
 
 pub fn expanded_submission(prompt: &str, commands: &[SlashCommand]) -> Option<String> {
@@ -230,5 +267,35 @@ mod tests {
             Some(TriggerKind::File)
         );
         assert!(detect_trigger("user@example", 12).is_none());
+    }
+
+    #[test]
+    fn reported_commands_merge_without_cli_catalogs() {
+        let discovered = vec![SlashCommand {
+            name: "review".into(),
+            description: String::new(),
+            scope: CommandScope::Project,
+            argument_hint: None,
+            template: Some("Review $ARGUMENTS".into()),
+        }];
+        let reported = vec![
+            ReportedCommand {
+                name: "review".into(),
+                description: "Review changes".into(),
+            },
+            ReportedCommand {
+                name: "compact".into(),
+                description: "Compact context".into(),
+            },
+        ];
+        let merged = merge_reported_commands(&discovered, &reported);
+        let review = merged
+            .iter()
+            .find(|command| command.name == "review")
+            .unwrap();
+        assert_eq!(review.description, "Review changes");
+        assert_eq!(review.scope, CommandScope::Project);
+        assert!(merged.iter().any(|command| command.name == "compact"));
+        assert!(merged.iter().all(|command| command.name != "fast"));
     }
 }

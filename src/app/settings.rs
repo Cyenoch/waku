@@ -3,7 +3,7 @@ use gpui::actions;
 use super::composer::next_picker_highlight;
 use super::*;
 
-actions!(waku_settings, [ClearSearch]);
+actions!(waku_settings, [ClearSearch, DismissProviderDialog]);
 
 const SETTINGS_CONTENT_MAX_WIDTH: f32 = 760.0;
 
@@ -20,6 +20,11 @@ const SETTINGS_SIDEBAR_CONTEXT: &str = "SettingsSidebar";
 /// they arrive as actions, which consume the keystroke before the field sees
 /// it.
 const SETTINGS_SEARCH_CONTEXT: &str = "SettingsSidebar > ComposerInput";
+
+/// Key context the custom-provider Add/Edit overlay declares so Escape
+/// dismisses the modal instead of falling through to close Settings.
+const PROVIDER_DIALOG_CONTEXT: &str = "ProviderDialog";
+const PROVIDER_DIALOG_INPUT_CONTEXT: &str = "ProviderDialog > ComposerInput";
 
 /// The sidebar's rows in display order, each with the keyword haystack the
 /// search field filters against.
@@ -72,7 +77,24 @@ pub fn init(cx: &mut App) {
         // field the handler propagates, so the keystroke falls through to
         // `CancelTurn`, which closes settings.
         KeyBinding::new("escape", ClearSearch, Some(SETTINGS_SEARCH_CONTEXT)),
+        KeyBinding::new(
+            "escape",
+            DismissProviderDialog,
+            Some(PROVIDER_DIALOG_CONTEXT),
+        ),
+        KeyBinding::new(
+            "escape",
+            DismissProviderDialog,
+            Some(PROVIDER_DIALOG_INPUT_CONTEXT),
+        ),
     ]);
+}
+
+pub(super) struct ProviderDialogState {
+    editing_id: ProviderId,
+    focus: FocusHandle,
+    previous_focus: Option<FocusHandle>,
+    generation: u64,
 }
 
 /// The sidebar rows the query leaves visible, in display order. `query` must
@@ -222,6 +244,7 @@ impl Waku {
                         .child(icon("icons/arrow-left.svg", 15.0, theme.text_tertiary))
                         .child(tr!("settings.back"))
                         .on_click(cx.listener(|this, _, window, cx| {
+                            this.discard_provider_dialog(cx);
                             this.settings_page = None;
                             let focus_handle = this.composer_focus(cx);
                             window.focus(&focus_handle, cx);
@@ -231,6 +254,7 @@ impl Waku {
                             if !event.keystroke.modifiers.modified()
                                 && matches!(event.keystroke.key.as_str(), "enter" | "space")
                             {
+                                this.discard_provider_dialog(cx);
                                 this.settings_page = None;
                                 let focus_handle = this.composer_focus(cx);
                                 window.focus(&focus_handle, cx);
@@ -1501,7 +1525,6 @@ impl Waku {
 
     fn render_providers_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
-        let editing = self.expanded_provider_settings.clone();
         div()
             .mt(px(15.0))
             .w_full()
@@ -1510,7 +1533,6 @@ impl Waku {
             .gap(px(12.0))
             .child(self.render_builtin_provider_cards(cx))
             .child(self.render_custom_provider_list(theme, cx))
-            .children(editing.map(|provider_id| self.render_provider_form(provider_id, theme, cx)))
             .into_any_element()
     }
 
@@ -1521,12 +1543,12 @@ impl Waku {
             theme.text_secondary,
             theme,
         )
-        .on_click(cx.listener(|this, _, _, cx| this.begin_provider_edit(None, cx)))
-        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+        .on_click(cx.listener(|this, _, window, cx| this.begin_provider_edit(None, window, cx)))
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
             if !event.keystroke.modifiers.modified()
                 && matches!(event.keystroke.key.as_str(), "enter" | "space")
             {
-                this.begin_provider_edit(None, cx);
+                this.begin_provider_edit(None, window, cx);
                 cx.stop_propagation();
             }
         }));
@@ -1556,14 +1578,29 @@ impl Waku {
             let id_for_edit = id.clone();
             let id_for_edit_keyboard = id.clone();
             let id_for_delete = id.clone();
-            let detail = if provider.default_model.is_empty() {
-                format!(
+            let supported_models = self
+                .model_catalogs
+                .get(&provider.id)
+                .map(|catalog| {
+                    catalog
+                        .models
+                        .iter()
+                        .filter(|entry| entry.supported)
+                        .count()
+                })
+                .unwrap_or(0);
+            let detail = match supported_models {
+                0 => provider.base_url.clone(),
+                1 => format!(
                     "{} · {}",
                     provider.base_url,
-                    tr!("providers.catalog_models")
-                )
-            } else {
-                format!("{} · {}", provider.base_url, provider.default_model)
+                    tr!("providers.model_count_one", count = 1)
+                ),
+                count => format!(
+                    "{} · {}",
+                    provider.base_url,
+                    tr!("providers.model_count_many", count = count)
+                ),
             };
             group = group
                 .child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border))
@@ -1589,11 +1626,15 @@ impl Waku {
                                         theme.text_secondary,
                                         theme,
                                     )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.begin_provider_edit(Some(id_for_edit.clone()), cx);
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.begin_provider_edit(
+                                            Some(id_for_edit.clone()),
+                                            window,
+                                            cx,
+                                        );
                                     }))
                                     .on_key_down(cx.listener(
-                                        move |this, event: &KeyDownEvent, _, cx| {
+                                        move |this, event: &KeyDownEvent, window, cx| {
                                             if !event.keystroke.modifiers.modified()
                                                 && matches!(
                                                     event.keystroke.key.as_str(),
@@ -1602,6 +1643,7 @@ impl Waku {
                                             {
                                                 this.begin_provider_edit(
                                                     Some(id_for_edit_keyboard.clone()),
+                                                    window,
                                                     cx,
                                                 );
                                                 cx.stop_propagation();
@@ -1618,18 +1660,18 @@ impl Waku {
                                         theme.danger,
                                         theme,
                                     )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.delete_provider(&id_for_delete, cx);
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.delete_provider(&id_for_delete, window, cx);
                                     }))
                                     .on_key_down(cx.listener(
-                                        move |this, event: &KeyDownEvent, _, cx| {
+                                        move |this, event: &KeyDownEvent, window, cx| {
                                             if !event.keystroke.modifiers.modified()
                                                 && matches!(
                                                     event.keystroke.key.as_str(),
                                                     "enter" | "space"
                                                 )
                                             {
-                                                this.delete_provider(&id, cx);
+                                                this.delete_provider(&id, window, cx);
                                                 cx.stop_propagation();
                                             }
                                         },
@@ -1644,7 +1686,7 @@ impl Waku {
     fn render_builtin_provider_cards(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let mut group = settings_group(theme);
-        for (index, preset) in wakuwaku_client::ProviderPreset::ALL.into_iter().enumerate() {
+        for (index, preset) in AUTHENTICATED_PROVIDER_PRESETS.into_iter().enumerate() {
             if index > 0 {
                 group = group.child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border));
             }
@@ -1833,129 +1875,279 @@ impl Waku {
         id: &str,
         input: Entity<ComposerInput>,
         label: String,
+        hint: Option<String>,
         theme: Theme,
     ) -> Div {
-        div()
+        let mut field = div()
+            .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_secondary)
-                    .child(label),
+            .gap(px(6.0))
+            .child(provider_field_label(label, theme))
+            .child(TextField::new(SharedString::from(id.to_owned()), input).w_full());
+        if let Some(hint) = hint {
+            field = field.child(provider_field_hint(hint, theme));
+        }
+        field
+    }
+
+    pub(super) fn render_provider_dialog(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let dialog = self.provider_dialog.as_ref()?;
+        let theme = Theme::current(cx);
+        let provider_id = dialog.editing_id.clone();
+        let focus = dialog.focus.clone();
+        let generation = dialog.generation;
+        let card = self.render_provider_form(provider_id, theme, window, cx);
+        let scrim = if theme.is_dark {
+            gpui::hsla(0.0, 0.0, 0.0, 0.34)
+        } else {
+            gpui::hsla(0.0, 0.0, 0.0, 0.16)
+        };
+        let layer = div()
+            .id(SharedString::from(format!(
+                "provider-dialog-layer-{generation}"
+            )))
+            .absolute()
+            .inset_0()
+            .occlude()
+            .track_focus(&focus)
+            .key_context(PROVIDER_DIALOG_CONTEXT)
+            .on_action(cx.listener(|this, _: &DismissProviderDialog, window, cx| {
+                this.close_provider_dialog(window, cx);
+            }))
+            .tab_group()
+            .tab_stop(false)
+            .bg(scrim)
+            .p(px(24.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.close_provider_dialog(window, cx)),
             )
-            .child(TextField::new(SharedString::from(id.to_owned()), input).w_full())
+            .child(card);
+        Some(gpui::deferred(layer).with_priority(4).into_any_element())
     }
 
     fn render_provider_form(
         &self,
         provider_id: ProviderId,
         theme: Theme,
+        window: &Window,
         cx: &mut Context<Self>,
-    ) -> Div {
+    ) -> Stateful<Div> {
         let existing = self
             .state
             .external_providers
             .iter()
             .find(|provider| provider.id == provider_id);
-        let api_formats = wakuwaku_client::ApiFormat::ALL;
         let format = self.provider_api_format;
-        let format_button = div()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_secondary)
-                    .child(tr!("providers.api_format")),
-            )
-            .child(
-                settings_row_action(
-                    "provider-api-format",
-                    format.as_str(),
-                    theme.text_secondary,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let index = api_formats
-                        .iter()
-                        .position(|candidate| *candidate == this.provider_api_format)
-                        .unwrap_or(0);
-                    this.provider_api_format = api_formats[(index + 1) % api_formats.len()];
-                    cx.notify();
-                }))
-                .on_key_down(cx.listener(
-                    move |this, event: &KeyDownEvent, _, cx| {
-                        if !event.keystroke.modifiers.modified()
-                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
-                        {
-                            let index = api_formats
-                                .iter()
-                                .position(|candidate| *candidate == this.provider_api_format)
-                                .unwrap_or(0);
-                            this.provider_api_format = api_formats[(index + 1) % api_formats.len()];
-                            cx.notify();
-                            cx.stop_propagation();
-                        }
-                    },
-                )),
-            );
+        let format_handle = self.menu_handle("provider-api-format", cx);
+        let format_weak = cx.entity().downgrade();
+        let format_selector = dropdown_menu(
+            MenuChip::new("provider-api-format")
+                .label(provider_api_format_label(format))
+                .outlined()
+                .selected(format_handle.is_open())
+                .height(px(28.0))
+                .background(theme.inset)
+                .w_full()
+                .justify_between(),
+            "provider-api-format-menu",
+            &format_handle,
+            MenuAlign::BelowLeft,
+            move |_| {
+                wakuwaku_client::ApiFormat::ALL
+                    .into_iter()
+                    .map(|candidate| {
+                        let weak = format_weak.clone();
+                        MenuItem::new(provider_api_format_label(candidate), move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.provider_api_format = candidate;
+                                cx.notify();
+                            });
+                        })
+                        .selected(candidate == format)
+                    })
+                    .collect()
+            },
+        );
         let save_id = provider_id.clone();
         let save_key_id = provider_id.clone();
-        let save = settings_row_action(
-            "save-provider",
-            tr!("common.save"),
-            theme.text_secondary,
-            theme,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| this.save_provider(&save_id, cx)))
-        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-            if !event.keystroke.modifiers.modified()
-                && matches!(event.keystroke.key.as_str(), "enter" | "space")
-            {
-                this.save_provider(&save_key_id, cx);
-                cx.stop_propagation();
-            }
-        }));
-        let cancel = settings_row_action(
-            "cancel-provider",
-            tr!("common.cancel"),
-            theme.text_secondary,
-            theme,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.expanded_provider_settings = None;
-            this.clear_provider_form(cx);
-            cx.notify();
-        }))
-        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-            if !event.keystroke.modifiers.modified()
-                && matches!(event.keystroke.key.as_str(), "enter" | "space")
-            {
-                this.expanded_provider_settings = None;
-                this.clear_provider_form(cx);
-                cx.notify();
-                cx.stop_propagation();
-            }
-        }));
-        let models_label = match existing.map(|provider| provider.models.len()).unwrap_or(0) {
-            0 => tr!("providers.models"),
-            1 => tr!("providers.model_count_one", count = 1),
-            count => tr!("providers.model_count_many", count = count),
-        };
-        div()
-            .w_full()
+        let save = div()
+            .id("save-provider")
+            .tab_index(0)
+            .h(px(28.0))
+            .px(px(12.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(theme.accent)
+            .bg(theme.accent)
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_none()
+            .cursor_default()
+            .text_size(px(12.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.on_inverse)
+            .focus_visible(|style| style.border_color(theme.text))
+            .child(tr!("common.save"))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.save_provider(&save_id, window, cx)),
+            )
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    this.save_provider(&save_key_id, window, cx);
+                    cx.stop_propagation();
+                }
+            }));
+        let cancel = div()
+            .id("cancel-provider")
+            .tab_index(0)
+            .h(px(28.0))
+            .px(px(12.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(theme.border_strong)
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_none()
+            .cursor_default()
+            .text_size(px(12.0))
+            .text_color(theme.text)
+            .focus_visible(|style| style.border_color(theme.accent))
+            .hover(|element| element.bg(theme.overlay))
+            .child(tr!("common.cancel"))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.close_provider_dialog(window, cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                {
+                    this.close_provider_dialog(window, cx);
+                    cx.stop_propagation();
+                }
+            }));
+        let headers_focused = self
+            .provider_headers_input
+            .read(cx)
+            .is_visually_focused(window);
+        let form = div()
             .flex()
             .flex_col()
-            .px(px(20.0))
-            .py(px(15.0))
-            .rounded(px(13.0))
-            .bg(theme.raised)
+            .gap(px(14.0))
             .child(
                 div()
-                    .text_size(px(13.5))
+                    .flex()
+                    .gap(px(10.0))
+                    .child(
+                        self.provider_field(
+                            "provider-id",
+                            self.provider_id_input.clone(),
+                            tr!("providers.id"),
+                            None,
+                            theme,
+                        )
+                        .flex_1(),
+                    )
+                    .child(
+                        self.provider_field(
+                            "provider-name",
+                            self.provider_name_input.clone(),
+                            tr!("providers.name"),
+                            None,
+                            theme,
+                        )
+                        .flex_1(),
+                    ),
+            )
+            .child(self.provider_field(
+                "provider-base-url",
+                self.provider_base_url_input.clone(),
+                tr!("providers.base_url"),
+                None,
+                theme,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(10.0))
+                    .child(
+                        self.provider_field(
+                            "provider-api-key",
+                            self.provider_api_key_input.clone(),
+                            tr!("providers.api_key"),
+                            None,
+                            theme,
+                        )
+                        .flex_1(),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.0))
+                            .child(provider_field_label(tr!("providers.api_format"), theme))
+                            .child(format_selector),
+                    ),
+            )
+            .child(provider_field_hint(tr!("providers.models_auto_fetch"), theme))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(provider_field_label(tr!("providers.headers"), theme))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_h(px(76.0))
+                            .px(px(8.0))
+                            .py(px(6.0))
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(if headers_focused {
+                                theme.accent
+                            } else {
+                                theme.border_strong
+                            })
+                            .bg(theme.inset)
+                            .text_size(px(11.5))
+                            .line_height(px(16.0))
+                            .child(self.provider_headers_input.clone()),
+                    )
+                    .child(provider_field_hint(tr!("providers.headers_hint"), theme)),
+            );
+        div()
+            .id("provider-dialog-card")
+            .w_full()
+            .max_w(px(560.0))
+            .max_h(px(640.0))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .rounded(px(18.0))
+            .bg(theme.composer)
+            .shadow_xl()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px(px(20.0))
+                    .pt(px(16.0))
+                    .pb(px(12.0))
+                    .text_size(px(14.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(if existing.is_some() {
@@ -1966,109 +2158,67 @@ impl Waku {
             )
             .child(
                 div()
-                    .mt(px(10.0))
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(10.0))
-                    .child(if existing.is_some() {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(theme.text_secondary)
-                                    .child(tr!("providers.id")),
-                            )
-                            .child(
-                                div()
-                                    .px(px(9.0))
-                                    .py(px(7.0))
-                                    .rounded(px(6.0))
-                                    .bg(theme.inset)
-                                    .text_color(theme.text_secondary)
-                                    .child(SharedString::from(provider_id.to_string())),
-                            )
-                    } else {
-                        self.provider_field(
-                            "provider-id",
-                            self.provider_id_input.clone(),
-                            tr!("providers.id"),
-                            theme,
-                        )
-                    })
-                    .child(self.provider_field(
-                        "provider-name",
-                        self.provider_name_input.clone(),
-                        tr!("providers.name"),
-                        theme,
-                    ))
-                    .child(self.provider_field(
-                        "provider-base-url",
-                        self.provider_base_url_input.clone(),
-                        tr!("providers.base_url"),
-                        theme,
-                    ))
-                    .child(self.provider_field(
-                        "provider-api-key-env",
-                        self.provider_api_key_env_input.clone(),
-                        tr!("providers.api_key_env"),
-                        theme,
-                    ))
-                    .child(self.provider_field(
-                        "provider-models",
-                        self.provider_model_input.clone(),
-                        models_label,
-                        theme,
-                    ))
-                    .child(self.provider_field(
-                        "provider-default-model",
-                        self.provider_default_model_input.clone(),
-                        tr!("providers.default_model"),
-                        theme,
-                    ))
-                    .child(self.provider_field(
-                        "provider-limits-context",
-                        self.provider_context_window_input.clone(),
-                        tr!("providers.context_window"),
-                        theme,
-                    ))
-                    .child(self.provider_field(
-                        "provider-limits-output",
-                        self.provider_max_output_tokens_input.clone(),
-                        tr!("providers.max_output_tokens"),
-                        theme,
-                    ))
-                    .child(self.provider_field(
-                        "provider-headers",
-                        self.provider_headers_input.clone(),
-                        tr!("providers.headers"),
-                        theme,
+                    .id("provider-dialog-scroll")
+                    .relative()
+                    .min_h_0()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.provider_dialog_scroll)
+                    .child(div().px(px(20.0)).pb(px(2.0)).child(form))
+                    .child(scrollbar::vertical(
+                        &self.provider_dialog_scroll,
+                        &self.provider_dialog_scrollbar,
                     )),
             )
-            .child(div().mt(px(10.0)).child(format_button))
             .child(
                 div()
-                    .mt(px(10.0))
+                    .mx(px(20.0))
+                    .mt(px(12.0))
+                    .mb(px(14.0))
+                    .pt(px(12.0))
+                    .border_t_1()
+                    .border_color(theme.border)
                     .flex()
                     .items_center()
+                    .justify_end()
                     .gap(px(8.0))
-                    .child(save)
-                    .child(cancel),
+                    .child(cancel)
+                    .child(save),
             )
     }
 
-    fn begin_provider_edit(&mut self, provider: Option<ProviderId>, cx: &mut Context<Self>) {
-        let provider = provider
-            .unwrap_or_else(|| ProviderId::new(format!("provider-{}", Uuid::new_v4().simple())));
+    fn begin_provider_edit(
+        &mut self,
+        provider: Option<ProviderId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let provider = provider.unwrap_or_else(|| ProviderId::new(""));
+        self.provider_dialog_scroll
+            .set_offset(point(px(0.0), px(0.0)));
         let existing = self
             .state
             .external_providers
             .iter()
             .find(|candidate| candidate.id == provider)
             .cloned();
-        self.expanded_provider_settings = Some(provider.clone());
+        let previous_focus = self
+            .provider_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.previous_focus.clone())
+            .or_else(|| window.focused(cx));
+        let generation = self
+            .provider_dialog
+            .as_ref()
+            .map(|dialog| dialog.generation.wrapping_add(1))
+            .unwrap_or(1);
+        let focus = cx.focus_handle();
+        self.provider_dialog = Some(ProviderDialogState {
+            editing_id: provider.clone(),
+            focus,
+            previous_focus,
+            generation,
+        });
         self.provider_api_format = existing
             .as_ref()
             .map(|provider| provider.api_format)
@@ -2100,14 +2250,21 @@ impl Waku {
                 cx,
             )
         });
-        self.provider_api_key_env_input.update(cx, |input, cx| {
-            input.set_content(
-                existing
-                    .as_ref()
-                    .and_then(|provider| provider.api_key_env.clone())
-                    .unwrap_or_default(),
+        let has_stored_key = existing.as_ref().is_some_and(|provider| {
+            self.auth_statuses
+                .get(&provider.id)
+                .is_some_and(|status| status.method == wakuwaku_client::AuthMethod::StoredApiKey)
+        });
+        self.provider_api_key_input.update(cx, |input, cx| {
+            input.clear(cx);
+            input.set_placeholder(
+                if has_stored_key {
+                    tr!("providers.api_key_saved_placeholder")
+                } else {
+                    tr!("providers.api_key_placeholder")
+                },
                 cx,
-            )
+            );
         });
         self.provider_headers_input.update(cx, |input, cx| {
             input.set_content(
@@ -2125,50 +2282,22 @@ impl Waku {
                 cx,
             );
         });
-        self.provider_model_input.update(cx, |input, cx| {
-            input.set_content(
-                existing
-                    .as_ref()
-                    .map(|provider| {
-                        (if provider.models.is_empty() {
-                            vec![provider.default_model.clone()]
-                        } else {
-                            provider.models.clone()
-                        })
-                        .join(", ")
-                    })
-                    .unwrap_or_default(),
-                cx,
-            )
-        });
-        self.provider_default_model_input.update(cx, |input, cx| {
-            input.set_content(
-                existing
-                    .as_ref()
-                    .map(|provider| provider.default_model.clone())
-                    .unwrap_or_default(),
-                cx,
-            )
-        });
-        self.provider_context_window_input.update(cx, |input, cx| {
-            input.set_content(
-                existing
-                    .as_ref()
-                    .map(|provider| provider.context_window.to_string())
-                    .unwrap_or_else(|| "128000".to_owned()),
-                cx,
-            )
-        });
-        self.provider_max_output_tokens_input
-            .update(cx, |input, cx| {
-                input.set_content(
-                    existing
+        let name_focus = self.provider_name_input.read(cx).focus();
+        let weak = cx.entity().downgrade();
+        window.on_next_frame(move |window, _| {
+            window.on_next_frame(move |window, cx| {
+                let mut should_focus = false;
+                let _ = weak.update(cx, |this, _| {
+                    should_focus = this
+                        .provider_dialog
                         .as_ref()
-                        .map(|provider| provider.max_output_tokens.to_string())
-                        .unwrap_or_else(|| "16384".to_owned()),
-                    cx,
-                )
+                        .is_some_and(|dialog| dialog.generation == generation);
+                });
+                if should_focus {
+                    window.focus(&name_focus, cx);
+                }
             });
+        });
         cx.notify();
     }
 
@@ -2177,46 +2306,60 @@ impl Waku {
             &self.provider_id_input,
             &self.provider_name_input,
             &self.provider_base_url_input,
-            &self.provider_api_key_env_input,
             &self.provider_headers_input,
-            &self.provider_model_input,
-            &self.provider_default_model_input,
-            &self.provider_context_window_input,
-            &self.provider_max_output_tokens_input,
+            &self.provider_api_key_input,
         ] {
             input.update(cx, |input, cx| input.clear(cx));
         }
+        self.provider_pending_api_key = None;
     }
 
-    fn delete_provider(&mut self, id: &ProviderId, cx: &mut Context<Self>) {
-        if self.state.last_provider == *id
-            || self
-                .state
-                .sessions
-                .iter()
-                .any(|session| &session.provider == id)
-            || self
-                .state
-                .favorite_models
-                .iter()
-                .any(|favorite| &favorite.provider == id)
-        {
+    pub(super) fn discard_provider_dialog(&mut self, cx: &mut Context<Self>) {
+        self.provider_dialog = None;
+        self.clear_provider_form(cx);
+        self.provider_api_format = Default::default();
+    }
+
+    fn close_provider_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.provider_dialog.take() else {
+            return;
+        };
+        self.clear_provider_form(cx);
+        self.provider_api_format = Default::default();
+        if let Some(previous_focus) = dialog.previous_focus {
+            window.focus(&previous_focus, cx);
+        } else {
+            window.focus(&self.settings_focus, cx);
+        }
+        cx.notify();
+    }
+
+    fn delete_provider(&mut self, id: &ProviderId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.has_provider_reference(id) {
             self.show_toast(tr!("providers.in_use"));
             cx.notify();
             return;
         }
-        self.state
+        let close_dialog = self
+            .provider_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.editing_id == *id);
+        let next = self
+            .state
             .external_providers
-            .retain(|provider| &provider.id != id);
-        self.bump_model_picker_catalog_generation();
-        if self.expanded_provider_settings.as_ref() == Some(id) {
-            self.expanded_provider_settings = None;
-        }
-        self.save();
-        cx.notify();
+            .iter()
+            .filter(|provider| &provider.id != id)
+            .cloned()
+            .collect();
+        self.apply_provider_settings(next, vec![id.clone()], close_dialog, window, cx);
     }
 
-    fn save_provider(&mut self, editing_id: &ProviderId, cx: &mut Context<Self>) {
+    fn save_provider(
+        &mut self,
+        editing_id: &ProviderId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let id = ProviderId::new(self.provider_id_input.read(cx).content().trim());
         let name = self
             .provider_name_input
@@ -2230,197 +2373,146 @@ impl Waku {
             .content()
             .trim()
             .to_owned();
-        let api_key_env_input = self
-            .provider_api_key_env_input
-            .read(cx)
-            .content()
-            .trim()
-            .to_owned();
-        let model_input = self.provider_model_input.read(cx).content().to_owned();
-        let default_input = self
-            .provider_default_model_input
-            .read(cx)
-            .content()
-            .trim()
-            .to_owned();
-        let context_input = self
-            .provider_context_window_input
-            .read(cx)
-            .content()
-            .trim()
-            .to_owned();
-        let output_input = self
-            .provider_max_output_tokens_input
-            .read(cx)
-            .content()
-            .trim()
-            .to_owned();
         let header_input = self.provider_headers_input.read(cx).content().to_owned();
-        if let Err(error) = parse_provider_draft_policy(ProviderDraftPolicy {
+        let mut provider = match parse_provider_draft_policy(ProviderDraftPolicy {
             id: id.as_str(),
             name: &name,
             base_url: &base_url,
-            api_key_env: Some(&api_key_env_input),
-            models_text: &model_input,
-            default_model: &default_input,
-            context_window: &context_input,
-            max_output_tokens: &output_input,
             headers_text: &header_input,
         }) {
-            self.show_toast(error);
-            cx.notify();
-            return;
-        }
-        let models = self
-            .provider_model_input
-            .read(cx)
-            .content()
-            .split(',')
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let mut seen_models = std::collections::HashSet::new();
-        if models
-            .iter()
-            .any(|model| !seen_models.insert(model.to_ascii_lowercase()))
-        {
-            self.show_toast(tr!("providers.duplicate_models"));
-            cx.notify();
-            return;
-        }
-        let default_model = self
-            .provider_default_model_input
-            .read(cx)
-            .content()
-            .trim()
-            .to_owned();
-        let context_window = match self
-            .provider_context_window_input
-            .read(cx)
-            .content()
-            .trim()
-            .parse::<u64>()
-        {
-            Ok(value) => value,
-            Err(_) => {
-                self.show_toast(tr!("providers.invalid_context_window").to_owned());
+            Ok(provider) => provider,
+            Err(error) => {
+                self.show_toast(error);
                 cx.notify();
                 return;
             }
         };
-        let max_output_tokens = match self
-            .provider_max_output_tokens_input
-            .read(cx)
-            .content()
-            .trim()
-            .parse::<u64>()
-        {
-            Ok(value) => value,
-            Err(_) => {
-                self.show_toast(tr!("providers.invalid_max_output_tokens").to_owned());
-                cx.notify();
-                return;
-            }
-        };
-        if id.validate().is_err()
-            || (editing_id.is_valid() && id != *editing_id)
-            || name.is_empty()
-            || base_url.is_empty()
-            || models.is_empty()
-            || !models.iter().any(|model| model == &default_model)
-        {
-            self.show_toast(tr!("providers.invalid_configuration"));
-            cx.notify();
-            return;
-        }
-        let api_key_env = self
-            .provider_api_key_env_input
-            .read(cx)
-            .content()
-            .trim()
-            .to_owned();
-        let mut headers = Vec::new();
-        let mut header_names = std::collections::HashSet::new();
-        for line in self
-            .provider_headers_input
-            .read(cx)
-            .content()
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-        {
-            let Some((header_name, header_value)) = line.split_once(':') else {
-                self.show_toast(tr!("providers.invalid_header_format").to_owned());
-                cx.notify();
-                return;
-            };
-            let header_name = header_name.trim().to_owned();
-            let header_value = header_value.trim().to_owned();
-            if header_name.is_empty()
-                || header_value.is_empty()
-                || !header_names.insert(header_name.to_ascii_lowercase())
-                || matches!(
-                    header_name.to_ascii_lowercase().as_str(),
-                    "authorization"
-                        | "x-api-key"
-                        | "host"
-                        | "content-length"
-                        | "content-type"
-                        | "anthropic-version"
-                )
-            {
-                self.show_toast(tr!("providers.invalid_headers").to_owned());
-                cx.notify();
-                return;
-            }
-            headers.push((header_name, header_value));
-        }
-        let provider = ExternalProvider {
-            id: id.clone(),
-            name,
-            base_url,
-            api_format: self.provider_api_format,
-            api_key_env: (!api_key_env.is_empty()).then_some(api_key_env),
-            headers,
-            models,
-            default_model,
-            context_window,
-            max_output_tokens,
-        };
+        provider.api_format = self.provider_api_format;
         if let Err(error) = provider.validate() {
             self.show_toast(error);
             cx.notify();
             return;
         }
-        if self
-            .state
-            .external_providers
-            .iter()
-            .any(|candidate| candidate.id == id && &candidate.id != editing_id)
-        {
+        if provider_id_conflicts(&self.state.external_providers, &id, editing_id) {
             self.show_toast(tr!("providers.duplicate_id"));
             cx.notify();
             return;
         }
-        if let Some(existing) = self
-            .state
-            .external_providers
+        if editing_id.is_valid()
+            && id != *editing_id
+            && self.state.has_provider_reference(editing_id)
+        {
+            self.show_toast(tr!("providers.in_use"));
+            cx.notify();
+            return;
+        }
+        let mut next = self.state.external_providers.clone();
+        if let Some(existing) = next
             .iter_mut()
             .find(|candidate| &candidate.id == editing_id)
         {
             *existing = provider;
         } else {
-            self.state.external_providers.push(provider);
+            next.push(provider);
         }
-        self.bump_model_picker_catalog_generation();
-        self.expanded_provider_settings = Some(id.clone());
-        if self.state.last_provider == ProviderId::new("")
-            || self.state.last_provider == *editing_id
-        {
-            self.state.last_provider = id;
+        let affected = [editing_id.clone(), id.clone()]
+            .into_iter()
+            .filter(|provider| provider.is_valid())
+            .collect();
+        let api_key = self
+            .provider_api_key_input
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        self.provider_pending_api_key = (!api_key.is_empty()).then_some((id, api_key));
+        self.apply_provider_settings(next, affected, true, window, cx);
+    }
+
+    fn apply_provider_settings(
+        &mut self,
+        next: Vec<ExternalProvider>,
+        affected: Vec<ProviderId>,
+        close_dialog: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.provider_settings_apply_pending.is_some() {
+            return;
         }
-        self.save();
+        self.provider_settings_generation = self.provider_settings_generation.wrapping_add(1);
+        let generation = self.provider_settings_generation;
+        self.provider_settings_apply_pending = Some(generation);
+        let daemon = self.daemon.clone();
+        let settings = wakuwaku_client::DaemonSettings {
+            external_providers: next.clone(),
+            ..self.state.daemon_settings()
+        };
+        let window_handle = window.window_handle();
+        let result = cx
+            .background_executor()
+            .spawn(async move { daemon.update_settings_confirmed(settings) });
+        cx.spawn(async move |this, cx| {
+            let result = result.await;
+            let focus = this
+                .update(cx, |this, cx| {
+                    if this.provider_settings_apply_pending != Some(generation) {
+                        return None;
+                    }
+                    this.provider_settings_apply_pending = None;
+                    match result {
+                        Ok(()) => {
+                            this.state.external_providers = next;
+                            for provider in &affected {
+                                this.model_catalogs.remove(provider);
+                                this.model_catalog_pending.remove(provider);
+                                this.model_catalog_error.remove(provider);
+                            }
+                            // A key typed in the dialog is submitted as a
+                            // login once the daemon has accepted the new
+                            // endpoint, so it lands in the credential store
+                            // instead of the settings file.
+                            if let Some((provider, key)) = this.provider_pending_api_key.take() {
+                                this.submit_provider_api_key(provider, key, cx);
+                            }
+                            this.bump_model_picker_catalog_generation();
+                            if let Err(error) = this.store.save(&mut this.state) {
+                                this.show_toast(tr!("errors.save_local_state", error = error));
+                            }
+                            if close_dialog {
+                                Some(this.finish_provider_dialog_apply(cx))
+                            } else {
+                                cx.notify();
+                                None
+                            }
+                        }
+                        Err(error) => {
+                            this.show_toast(tr!("errors.save_local_state", error = error));
+                            cx.notify();
+                            None
+                        }
+                    }
+                })
+                .ok()
+                .flatten()
+                .flatten();
+            if let Some(focus) = focus {
+                let _ = window_handle.update(cx, |_, window, cx| window.focus(&focus, cx));
+            }
+        })
+        .detach();
         cx.notify();
+    }
+
+    fn finish_provider_dialog_apply(&mut self, cx: &mut Context<Self>) -> Option<FocusHandle> {
+        let dialog = self.provider_dialog.take()?;
+        self.clear_provider_form(cx);
+        self.provider_api_format = Default::default();
+        Some(
+            dialog
+                .previous_focus
+                .unwrap_or_else(|| self.settings_focus.clone()),
+        )
     }
     fn render_settings_drag_region(
         &self,
@@ -2505,6 +2597,9 @@ impl Waku {
         });
         self.usage_project_filter.update(cx, |input, cx| {
             input.set_placeholder(tr!("input.filter_projects"), cx)
+        });
+        self.trajectory_search.update(cx, |input, cx| {
+            input.set_placeholder(tr!("trajectory.search_placeholder"), cx)
         });
         self.refresh_command_palette_localized_text(cx);
         self.refresh_file_search_localized_text(cx);
@@ -2793,6 +2888,58 @@ impl Waku {
             .update(cx, |input, cx| input.clear(cx));
     }
 
+    /// Store an API key typed in the provider dialog: start an API-key login
+    /// for the freshly saved endpoint, then complete it immediately. Failure
+    /// surfaces through the shared auth error toast; the endpoint itself
+    /// stays saved.
+    fn submit_provider_api_key(
+        &mut self,
+        provider: ProviderId,
+        key: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.auth_generation = self.auth_generation.wrapping_add(1);
+        let generation = self.auth_generation;
+        self.auth_pending.insert(provider.clone());
+        let client = self.daemon.client();
+        // The inner `async move` block consumes `provider`; the outer cleanup
+        // keeps its own clone so pending state clears even on failure.
+        let cleanup_target_provider = provider.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let login_target_provider = provider.clone();
+                    let phase =
+                        client.start_login(provider, wakuwaku_client::LoginMethod::ApiKey)?;
+                    let wakuwaku_client::ResponsePayload::Login {
+                        phase: wakuwaku_client::AuthPhase::AwaitingApiKey { login_id, .. },
+                    } = &phase
+                    else {
+                        anyhow::bail!("unexpected login phase");
+                    };
+                    client.complete_api_key_login(
+                        *login_id,
+                        login_target_provider.clone(),
+                        wakuwaku_client::SecretString::new(key),
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if generation != this.auth_generation {
+                    return;
+                }
+                if let Err(error) = result {
+                    this.show_toast(error.to_string());
+                }
+                this.auth_pending.remove(&cleanup_target_provider);
+                this.refresh_provider_auth_statuses(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn logout_provider(&mut self, provider: ProviderId, cx: &mut Context<Self>) {
         self.clear_auth_api_key(cx);
         let client = self.daemon.client();
@@ -2849,6 +2996,21 @@ fn settings_row_copy(
                 .text_color(theme.text_secondary)
                 .child(description.into()),
         )
+}
+
+fn provider_field_label(label: String, theme: Theme) -> Div {
+    div()
+        .text_size(px(12.0))
+        .text_color(theme.text_secondary)
+        .child(label)
+}
+
+fn provider_field_hint(hint: String, theme: Theme) -> Div {
+    div()
+        .text_size(px(11.0))
+        .line_height(px(15.0))
+        .text_color(theme.text_tertiary)
+        .child(hint)
 }
 
 fn settings_row_action(
@@ -2955,6 +3117,35 @@ fn auth_status_label(status: Option<&wakuwaku_client::ProviderAuthStatus>) -> St
     }
 }
 
+const AUTHENTICATED_PROVIDER_PRESETS: [wakuwaku_client::ProviderPreset; 5] = [
+    wakuwaku_client::ProviderPreset::OpenAiCodex,
+    wakuwaku_client::ProviderPreset::OpenCodeGo,
+    wakuwaku_client::ProviderPreset::OpenCodeZen,
+    wakuwaku_client::ProviderPreset::Xai,
+    wakuwaku_client::ProviderPreset::XaiOauth,
+];
+
+fn provider_api_format_label(format: wakuwaku_client::ApiFormat) -> String {
+    match format {
+        wakuwaku_client::ApiFormat::OpenAiResponses => {
+            tr!("providers.api_format_openai_responses")
+        }
+        wakuwaku_client::ApiFormat::OpenAiChat => tr!("providers.api_format_openai_chat"),
+        wakuwaku_client::ApiFormat::Anthropic => tr!("providers.api_format_anthropic"),
+    }
+}
+
+fn provider_id_conflicts(
+    providers: &[ExternalProvider],
+    next_id: &ProviderId,
+    editing_id: &ProviderId,
+) -> bool {
+    (next_id != editing_id && wakuwaku_client::ProviderPreset::parse_id(next_id.as_str()).is_some())
+        || providers
+            .iter()
+            .any(|candidate| &candidate.id == next_id && &candidate.id != editing_id)
+}
+
 fn preset_login_methods(preset_id: &str) -> &'static [wakuwaku_client::LoginMethod] {
     match preset_id {
         wakuwaku_client::ProviderId::OPENAI_CODEX => &[
@@ -2996,11 +3187,6 @@ struct ProviderDraftPolicy<'a> {
     id: &'a str,
     name: &'a str,
     base_url: &'a str,
-    api_key_env: Option<&'a str>,
-    models_text: &'a str,
-    default_model: &'a str,
-    context_window: &'a str,
-    max_output_tokens: &'a str,
     headers_text: &'a str,
 }
 
@@ -3011,33 +3197,9 @@ fn parse_provider_draft_policy(
         id,
         name,
         base_url,
-        api_key_env,
-        models_text,
-        default_model,
-        context_window,
-        max_output_tokens,
         headers_text,
     } = policy;
 
-    let models = models_text
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut seen = std::collections::HashSet::new();
-    if models
-        .iter()
-        .any(|model| !seen.insert(model.to_ascii_lowercase()))
-    {
-        return Err(tr!("providers.duplicate_models").to_owned());
-    }
-    let context_window = context_window
-        .parse::<u64>()
-        .map_err(|_| tr!("providers.invalid_context_window").to_owned())?;
-    let max_output_tokens = max_output_tokens
-        .parse::<u64>()
-        .map_err(|_| tr!("providers.invalid_max_output_tokens").to_owned())?;
     let mut headers = Vec::new();
     let mut names = std::collections::HashSet::new();
     for line in headers_text.lines().filter(|line| !line.trim().is_empty()) {
@@ -3069,12 +3231,7 @@ fn parse_provider_draft_policy(
         name: name.into(),
         base_url: base_url.into(),
         api_format: Default::default(),
-        api_key_env: api_key_env.map(str::to_owned),
         headers,
-        models,
-        default_model: default_model.into(),
-        context_window,
-        max_output_tokens,
     };
     provider.validate().map_err(|error| error.to_owned())?;
     Ok(provider)
@@ -3100,11 +3257,98 @@ fn accepts_generation(current: u64, response: u64) -> bool {
 #[cfg(test)]
 mod auth_behavior_tests {
     use super::{
-        ProviderRowActions, accepts_generation, auth_phase_summary, auth_phase_url,
-        auth_status_label, auth_status_should_poll, preset_login_methods, provider_row_actions,
+        AUTHENTICATED_PROVIDER_PRESETS, ProviderRowActions, accepts_generation, auth_phase_summary,
+        auth_phase_url, auth_status_label, auth_status_should_poll, preset_login_methods,
+        provider_id_conflicts, provider_row_actions,
     };
     use uuid::Uuid;
-    use wakuwaku_client::{AuthMethod, LoginMethod, ProviderAuthStatus, ProviderId};
+    use wakuwaku_client::ExternalProvider;
+    use wakuwaku_client::{
+        ApiFormat, AuthMethod, LoginMethod, ProviderAuthStatus, ProviderId, ProviderPreset,
+    };
+
+    #[test]
+    fn provider_identity_guard_allows_create_and_same_id_edit() {
+        let providers = vec![ExternalProvider::new(
+            "corp",
+            "Corp",
+            "http://127.0.0.1:9/v1",
+            ApiFormat::OpenAiResponses,
+        )];
+        assert!(!provider_id_conflicts(
+            &providers,
+            &ProviderId::new("new-corp"),
+            &ProviderId::new(""),
+        ));
+        assert!(!provider_id_conflicts(
+            &providers,
+            &ProviderId::new("corp"),
+            &ProviderId::new("corp"),
+        ));
+    }
+
+    #[test]
+    fn provider_identity_guard_rejects_duplicate_and_reserved_ids() {
+        let providers = vec![ExternalProvider::new(
+            "corp",
+            "Corp",
+            "http://127.0.0.1:9/v1",
+            ApiFormat::OpenAiResponses,
+        )];
+        assert!(provider_id_conflicts(
+            &providers,
+            &ProviderId::new("corp"),
+            &ProviderId::new("other"),
+        ));
+        for preset in ProviderPreset::ALL {
+            assert!(provider_id_conflicts(
+                &providers,
+                &preset.provider_id(),
+                &ProviderId::new("other"),
+            ));
+        }
+    }
+
+    #[test]
+    fn native_auth_cards_are_the_five_authenticated_products() {
+        assert_eq!(
+            AUTHENTICATED_PROVIDER_PRESETS.map(ProviderPreset::id),
+            [
+                ProviderId::OPENAI_CODEX,
+                ProviderId::OPENCODE_GO,
+                ProviderId::OPENCODE_ZEN,
+                ProviderId::XAI,
+                ProviderId::XAI_OAUTH,
+            ]
+        );
+    }
+
+    #[test]
+    fn format_only_presets_stay_off_native_auth_cards() {
+        for preset in [
+            ProviderPreset::OpenAiResponses,
+            ProviderPreset::OpenAiChat,
+            ProviderPreset::Anthropic,
+        ] {
+            assert!(!AUTHENTICATED_PROVIDER_PRESETS.contains(&preset));
+        }
+        assert_eq!(
+            ProviderPreset::ALL.len() - AUTHENTICATED_PROVIDER_PRESETS.len(),
+            3
+        );
+    }
+
+    #[test]
+    fn custom_provider_form_keeps_every_api_format() {
+        assert_eq!(
+            ApiFormat::ALL,
+            [
+                ApiFormat::OpenAiResponses,
+                ApiFormat::OpenAiChat,
+                ApiFormat::Anthropic
+            ]
+        );
+    }
 
     #[test]
     fn browser_and_device_phases_provide_system_urls() {

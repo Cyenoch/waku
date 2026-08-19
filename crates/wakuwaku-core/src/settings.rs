@@ -111,7 +111,6 @@ mod tests {
                 "Nope",
                 "http://127.0.0.1:9/v1",
                 wakuwaku_protocol::ApiFormat::OpenAiChat,
-                "gpt-5",
             )],
             extra: Default::default(),
         };
@@ -124,7 +123,6 @@ mod tests {
                 "Corp",
                 "not-a-url",
                 wakuwaku_protocol::ApiFormat::OpenAiChat,
-                "gpt-5",
             )],
             extra: Default::default(),
         };

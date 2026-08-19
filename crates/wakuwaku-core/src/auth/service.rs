@@ -15,12 +15,14 @@ use wakuwaku_harness::Auth;
 use wakuwaku_protocol::xai_oauth_seed;
 use wakuwaku_protocol::{
     AuthEndpoints, AuthMethod, AuthPhase, CatalogSource, ExternalProvider, LoginMethod,
-    ModelCapabilities, ModelCatalog, ModelCatalogEntry, ProviderAuthStatus, ProviderId,
-    ProviderPreset, SecretString, TransportProfile,
+    MODELS_DEV_API_URL, ModelCapabilities, ModelCatalog, ModelCatalogEntry, ProviderAuthStatus,
+    ProviderId, ProviderLimits, ProviderPreset, SecretString, TransportProfile,
 };
 
 use super::error::AuthError;
-use super::flows::{self, DevicePoll, http_client, now_ms, stored_to_auth, validate_api_key};
+use super::flows::{
+    self, DevicePoll, http_client, models_dev_http_client, now_ms, stored_to_auth, validate_api_key,
+};
 use super::persist::{AuthPersist, PublicAuthRecord};
 use super::pkce;
 use super::store::{CredentialStore, StoredCredential, production_store};
@@ -31,6 +33,7 @@ pub struct AuthRuntime {
     pub persist: AuthPersist,
     pub callback_bind: SocketAddr,
     pub model_base_overrides: HashMap<String, String>,
+    pub models_dev_url: Option<String>,
 }
 
 impl AuthRuntime {
@@ -41,6 +44,7 @@ impl AuthRuntime {
             persist: AuthPersist::new(directory),
             callback_bind: SocketAddr::from(([127, 0, 0, 1], AuthEndpoints::CODEX_CALLBACK_PORT)),
             model_base_overrides: HashMap::new(),
+            models_dev_url: Some(MODELS_DEV_API_URL.to_owned()),
         })
     }
 
@@ -55,6 +59,7 @@ impl AuthRuntime {
             persist: AuthPersist::new(directory),
             callback_bind: SocketAddr::from(([127, 0, 0, 1], 0)),
             model_base_overrides: HashMap::new(),
+            models_dev_url: None,
         }
     }
 }
@@ -65,6 +70,7 @@ type ResolvedProviderOverlay = (
     Auth,
     Vec<(String, String)>,
     ModelCapabilities,
+    ProviderLimits,
 );
 
 struct BrowserCallback {
@@ -111,6 +117,7 @@ impl LoginSession {
 pub struct AuthService {
     runtime: AuthRuntime,
     http: reqwest::blocking::Client,
+    models_dev_http: reqwest::blocking::Client,
     logins: Mutex<HashMap<Uuid, LoginSession>>,
     refresh_lock: Mutex<()>,
     customs: Mutex<Vec<ExternalProvider>>,
@@ -122,6 +129,7 @@ impl AuthService {
     pub fn new(runtime: AuthRuntime) -> Result<Self, AuthError> {
         Ok(Self {
             http: http_client()?,
+            models_dev_http: models_dev_http_client()?,
             runtime,
             logins: Mutex::new(HashMap::new()),
             refresh_lock: Mutex::new(()),
@@ -674,7 +682,7 @@ impl AuthService {
             .put_catalog_at(
                 &cache_key,
                 &provider,
-                models,
+                self.enrich_catalog(&provider, models),
                 CatalogSource::Live,
                 self.now(),
             )
@@ -777,14 +785,11 @@ impl AuthService {
             };
             return Ok((auth, Vec::new()));
         }
-        if let Some(name) = endpoint.api_key_env.as_deref()
-            && let Ok(value) = std::env::var(name)
-            && !value.trim().is_empty()
-        {
-            return Ok((
-                endpoint.resolve_auth().map_err(AuthError::failed)?,
-                Vec::new(),
-            ));
+        // Custom endpoints without a stored credential run unauthenticated —
+        // local gateways (LM Studio, Ollama, llama.cpp) accept that. Presets
+        // still require a credential or their documented environment key.
+        if ProviderPreset::parse_id(provider.as_str()).is_none() {
+            return Ok((Auth::None, Vec::new()));
         }
         Err(AuthError::failed(format!(
             "provider {} is not configured",
@@ -881,7 +886,7 @@ impl AuthService {
                 .put_catalog_at(
                     &cache_key,
                     provider,
-                    models,
+                    self.enrich_catalog(provider, models),
                     CatalogSource::Live,
                     self.now(),
                 )
@@ -922,6 +927,20 @@ impl AuthService {
                 self.now(),
             )
             .map_err(|_| AuthError::Store)
+    }
+
+    fn enrich_catalog(
+        &self,
+        provider: &ProviderId,
+        models: Vec<ModelCatalogEntry>,
+    ) -> Vec<ModelCatalogEntry> {
+        let Some(url) = self.runtime.models_dev_url.as_deref() else {
+            return models;
+        };
+        let Some(preset) = ProviderPreset::parse_id(provider.as_str()) else {
+            return models;
+        };
+        flows::enrich_models(&self.models_dev_http, url, preset, models)
     }
 
     fn cached_catalog(&self, provider: &ProviderId) -> Option<ModelCatalog> {
@@ -976,8 +995,7 @@ impl AuthService {
         let endpoint = self.endpoint_for(provider)?;
         let preset = ProviderPreset::parse_id(provider.as_str());
         let selected = model.map(str::trim).filter(|value| !value.is_empty());
-        let default_id = endpoint.default_model.trim();
-        let using_default = selected.is_none() || selected == Some(default_id);
+        let using_default = selected.is_none();
         let catalog = if preset.is_some() {
             Some(self.list_models(provider))
         } else {
@@ -989,7 +1007,14 @@ impl AuthService {
                 Err(_) if using_default => {
                     let capabilities = capabilities_for_preset(preset, endpoint.api_format);
                     let (auth, extra) = self.resolve(provider, &endpoint)?;
-                    return Ok((endpoint, preset.transport(), auth, extra, capabilities));
+                    return Ok((
+                        endpoint,
+                        preset.transport(),
+                        auth,
+                        extra,
+                        capabilities,
+                        ProviderLimits::default(),
+                    ));
                 }
                 Err(error) => return Err(error),
             };
@@ -999,11 +1024,18 @@ impl AuthService {
             if using_default {
                 let capabilities = capabilities_for_preset(preset, endpoint.api_format);
                 let (auth, extra) = self.resolve(provider, &endpoint)?;
-                return Ok((endpoint, preset.transport(), auth, extra, capabilities));
+                return Ok((
+                    endpoint,
+                    preset.transport(),
+                    auth,
+                    extra,
+                    capabilities,
+                    ProviderLimits::default(),
+                ));
             }
             return Err(AuthError::failed(format!(
                 "model {} is not in the catalog",
-                selected.unwrap_or(default_id)
+                selected.unwrap_or_default()
             )));
         }
         if let Some(catalog) = self.cached_catalog(provider)
@@ -1018,6 +1050,7 @@ impl AuthService {
             auth,
             extra,
             ModelCapabilities::custom(endpoint.api_format),
+            ProviderLimits::default(),
         ))
     }
 
@@ -1102,11 +1135,15 @@ fn apply_catalog_entry(
     }
     endpoint.base_url = entry.base_url.clone();
     endpoint.api_format = entry.api_format;
-    endpoint.default_model = entry.id.clone();
-    endpoint.context_window = entry.context_window;
-    endpoint.max_output_tokens = entry.max_output_tokens;
     let (auth, extra) = service.resolve(provider, &endpoint)?;
-    Ok((endpoint, entry.transport, auth, extra, entry.capabilities))
+    Ok((
+        endpoint,
+        entry.transport,
+        auth,
+        extra,
+        entry.capabilities,
+        entry.limits(),
+    ))
 }
 
 fn capabilities_for_preset(
@@ -1355,6 +1392,100 @@ mod tests {
         let catalog = service.refresh_models(&provider).unwrap();
         assert_eq!(catalog.source, CatalogSource::Live);
         assert!(catalog.models.is_empty());
+    }
+
+    #[test]
+    fn openai_default_overlay_without_catalog_has_no_priority() {
+        let directory =
+            std::env::temp_dir().join(format!("wakuwaku-auth-no-catalog-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = Arc::new(MemoryCredentialStore::default());
+        let provider = ProviderId::new(ProviderId::OPENAI_RESPONSES);
+        store
+            .set(
+                &provider,
+                StoredCredential::api_key(SecretString::new("sk")),
+            )
+            .unwrap();
+        let mut runtime = AuthRuntime::testing(&directory, store, AuthEndpoints::production());
+        runtime
+            .model_base_overrides
+            .insert(provider.as_str().into(), "http://127.0.0.1:1/v1".into());
+        let service = AuthService::new(runtime).unwrap();
+        let overlay = service.overlay_for_model(&provider, None).unwrap();
+        assert!(!overlay.4.service_tier);
+        assert!(
+            !capabilities_for_preset(
+                ProviderPreset::OpenAiResponses,
+                wakuwaku_protocol::ApiFormat::OpenAiResponses
+            )
+            .service_tier
+        );
+        assert!(
+            !capabilities_for_preset(
+                ProviderPreset::OpenAiChat,
+                wakuwaku_protocol::ApiFormat::OpenAiChat
+            )
+            .service_tier
+        );
+    }
+
+    #[test]
+    fn injected_models_dev_fixture_enriches_live_openai_catalog() {
+        let models_port = bind_json(200, serde_json::json!({ "data": [{ "id": "gpt-5.5" }] }));
+        let meta_port = bind_json(
+            200,
+            serde_json::json!({
+                "openai": {
+                    "models": {
+                        "gpt-5.5": {
+                            "reasoning_options": [{
+                                "type": "effort",
+                                "values": ["low", "high"]
+                            }],
+                            "experimental": {
+                                "modes": {
+                                    "fast": {
+                                        "provider": { "body": { "service_tier": "priority" } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+        let directory =
+            std::env::temp_dir().join(format!("wakuwaku-auth-models-dev-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let store = Arc::new(MemoryCredentialStore::default());
+        let provider = ProviderId::new(ProviderId::OPENAI_RESPONSES);
+        store
+            .set(
+                &provider,
+                StoredCredential::api_key(SecretString::new("sk")),
+            )
+            .unwrap();
+        let mut runtime = AuthRuntime::testing(&directory, store, AuthEndpoints::production());
+        runtime.model_base_overrides.insert(
+            provider.as_str().into(),
+            format!("http://127.0.0.1:{models_port}/v1"),
+        );
+        runtime.models_dev_url = Some(format!("http://127.0.0.1:{meta_port}/api.json"));
+        let service = AuthService::new(runtime).unwrap();
+        let catalog = service.refresh_models(&provider).unwrap();
+        assert_eq!(catalog.source, CatalogSource::Live);
+        assert_eq!(catalog.models[0].id, "gpt-5.5");
+        assert!(catalog.models[0].capabilities.service_tier);
+        assert_eq!(
+            catalog.models[0]
+                .reasoning_efforts
+                .iter()
+                .map(|effort| effort.provider_value.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "high"]
+        );
+        assert!(catalog.models[0].default_reasoning_effort.is_none());
     }
 
     #[test]

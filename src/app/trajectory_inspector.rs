@@ -13,7 +13,8 @@ use wakuwaku_protocol::{
 use super::*;
 use crate::app::Waku;
 use crate::app::trajectory::{
-    JsonValueType, flatten_json_tree, format_exact_duration, kind_display_name, status_display_name,
+    JsonValueType, flatten_json_tree, format_exact_duration, localized_kind_name,
+    localized_status_name, step_detail_section, step_json_tree_selection,
 };
 use crate::query::Query;
 use crate::theme::Theme;
@@ -52,13 +53,20 @@ impl Waku {
             .flex_1()
             .min_w_0();
 
-        for section in allowed_sections {
+        for (tab_index, section) in allowed_sections.iter().copied().enumerate() {
             let is_selected = section == selected_section;
             let label = localized_section_name(section);
-            let section_to_select = section;
+            let allowed = allowed_sections.clone();
+            let focus = self.transcript_control_focus(
+                format!("trajectory-inspector-tab-{session_id}-{section:?}"),
+                cx,
+            );
             header_tabs = header_tabs.child(
                 div()
                     .id(SharedString::from(format!("inspector-tab-{section:?}")))
+                    .track_focus(&focus)
+                    .tab_index(tab_index as isize)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .px(px(8.0))
                     .py(px(4.0))
                     .rounded(px(4.0))
@@ -79,20 +87,36 @@ impl Waku {
                         gpui::hsla(0.0, 0.0, 0.0, 0.0)
                     })
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.accent.opacity(0.08)))
+                    .hover(|style| style.bg(theme.accent.opacity(0.08)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        let mut sessions = this.trajectory_sessions.borrow_mut();
-                        if let Some(state) = sessions.get_mut(&session_id) {
-                            state.selected_section = section_to_select;
-                            cx.notify();
+                        this.select_trajectory_inspector_section(session_id, section, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        match event.keystroke.key.as_str() {
+                            "enter" | "space" => {
+                                this.select_trajectory_inspector_section(session_id, section, cx);
+                                cx.stop_propagation();
+                            }
+                            key @ ("left" | "right" | "home" | "end") => {
+                                if let Some(next) = step_detail_section(section, &allowed, key) {
+                                    this.select_trajectory_inspector_section(session_id, next, cx);
+                                }
+                                cx.stop_propagation();
+                            }
+                            _ => {}
                         }
                     }))
                     .child(label),
             );
         }
 
+        let back_focus = self.transcript_control_focus("trajectory-inspector-back", cx);
+        let close_focus = self.transcript_control_focus("trajectory-inspector-close", cx);
         let back_button = div()
             .id("inspector-back-btn")
+            .track_focus(&back_focus)
+            .tab_index(0)
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
             .px(px(6.0))
             .py(px(4.0))
             .rounded(px(4.0))
@@ -101,13 +125,15 @@ impl Waku {
             .gap(px(4.0))
             .text_size(px(12.0))
             .text_color(theme.text_secondary)
-            .hover(|s| s.bg(theme.raised).text_color(theme.text))
+            .hover(|style| style.bg(theme.raised).text_color(theme.text))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                let mut sessions = this.trajectory_sessions.borrow_mut();
-                if let Some(state) = sessions.get_mut(&session_id) {
-                    state.close_inspector();
-                    cx.notify();
+                this.close_trajectory_inspector(session_id, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.close_trajectory_inspector(session_id, cx);
+                    cx.stop_propagation();
                 }
             }))
             .child(icon("icons/arrow-left.svg", 13.0, theme.text_secondary))
@@ -115,16 +141,21 @@ impl Waku {
 
         let close_button = div()
             .id("inspector-close-btn")
+            .track_focus(&close_focus)
+            .tab_index(0)
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
             .p(px(4.0))
             .rounded(px(4.0))
             .text_color(theme.text_tertiary)
-            .hover(|s| s.bg(theme.raised).text_color(theme.text))
+            .hover(|style| style.bg(theme.raised).text_color(theme.text))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                let mut sessions = this.trajectory_sessions.borrow_mut();
-                if let Some(state) = sessions.get_mut(&session_id) {
-                    state.close_inspector();
-                    cx.notify();
+                this.close_trajectory_inspector(session_id, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.close_trajectory_inspector(session_id, cx);
+                    cx.stop_propagation();
                 }
             }))
             .child(icon("icons/x.svg", 13.0, theme.text_tertiary));
@@ -281,23 +312,29 @@ impl Waku {
                     .text_size(px(11.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_secondary)
-                    .child(format!("Kind: {}", kind_display_name(record.kind))),
+                    .child(tr!(
+                        "trajectory.meta_kind",
+                        kind = localized_kind_name(record.kind)
+                    )),
             )
             .child(
                 div()
                     .text_size(px(11.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_secondary)
-                    .child(format!("Status: {}", status_display_name(record.status))),
+                    .child(tr!(
+                        "trajectory.meta_status",
+                        status = localized_status_name(record.status)
+                    )),
             )
             .child(
                 div()
                     .text_size(px(11.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_secondary)
-                    .child(format!(
-                        "Duration: {}",
-                        format_exact_duration(record.duration_ms)
+                    .child(tr!(
+                        "trajectory.meta_duration",
+                        duration = format_exact_duration(record.duration_ms)
                     )),
             );
         root = root.child(meta_bar);
@@ -314,7 +351,7 @@ impl Waku {
                 div()
                     .text_size(px(12.5))
                     .text_color(theme.text_tertiary)
-                    .child("No content"),
+                    .child(tr!("trajectory.no_content")),
             );
         }
 
@@ -346,29 +383,46 @@ impl Waku {
                                 total = total
                             )),
                     )
-                    .child(
+                    .child({
+                        let load_more_focus =
+                            self.transcript_control_focus("trajectory-inspector-load-more", cx);
                         div()
                             .id("inspector-load-more-btn")
+                            .track_focus(&load_more_focus)
+                            .tab_index(0)
+                            .focus_visible(|style| style.border_1().border_color(theme.text))
                             .px(px(10.0))
                             .py(px(4.0))
                             .rounded(px(4.0))
                             .bg(theme.accent)
-                            .text_color(theme.text)
+                            .text_color(theme.on_inverse)
                             .text_size(px(12.0))
                             .font_weight(FontWeight::MEDIUM)
                             .cursor_pointer()
-                            .hover(|s| s.opacity(0.9))
+                            .hover(|style| style.opacity(0.9))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                let mut sessions = this.trajectory_sessions.borrow_mut();
-                                if let Some(state) = sessions.get_mut(&session_id) {
-                                    state
-                                        .detail_cursors
-                                        .insert((record_id, section), next_offset);
-                                    cx.notify();
+                                this.advance_trajectory_detail(
+                                    session_id,
+                                    record_id,
+                                    section,
+                                    next_offset,
+                                    cx,
+                                );
+                            }))
+                            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    this.advance_trajectory_detail(
+                                        session_id,
+                                        record_id,
+                                        section,
+                                        next_offset,
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
                                 }
                             }))
-                            .child(tr!("trajectory.load_more")),
-                    ),
+                            .child(tr!("trajectory.load_more"))
+                    }),
             );
         }
 
@@ -406,16 +460,28 @@ impl Waku {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut sessions = self.trajectory_sessions.borrow_mut();
-        let Some(state) = sessions.get_mut(&session_id) else {
-            return div().into_any_element();
+        let nodes = {
+            let mut sessions = self.trajectory_sessions.borrow_mut();
+            let Some(state) = sessions.get_mut(&session_id) else {
+                return div().into_any_element();
+            };
+            let nodes = flatten_json_tree(value, &state.json_tree_state.expanded_paths);
+            state.json_tree_state.flattened_nodes = nodes.clone();
+            nodes
         };
+        let selected_idx = self
+            .trajectory_sessions
+            .borrow()
+            .get(&session_id)
+            .map(|state| state.json_tree_state.selected_index)
+            .unwrap_or(0);
 
-        let nodes = flatten_json_tree(value, &state.json_tree_state.expanded_paths);
-        state.json_tree_state.flattened_nodes = nodes.clone();
-
+        let tree_focus = self.transcript_control_focus("trajectory-json-tree", cx);
         let mut list = div()
             .id("trajectory-json-tree")
+            .track_focus(&tree_focus)
+            .tab_index(0)
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
             .flex()
             .flex_col()
             .gap(px(2.0))
@@ -425,18 +491,26 @@ impl Waku {
             .border_1()
             .border_color(theme.border)
             .font_family(crate::md::render::MONO_FAMILY)
-            .text_size(px(12.0));
-
-        let selected_idx = state.json_tree_state.selected_index;
+            .text_size(px(12.0))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if this.handle_json_tree_key(session_id, event, cx) {
+                    cx.stop_propagation();
+                }
+            }));
 
         for (idx, node) in nodes.iter().enumerate() {
             let is_selected = idx == selected_idx;
             let path_clone = node.path.clone();
             let is_expandable = node.expandable;
             let is_expanded = node.expanded;
+            let row_focus =
+                self.transcript_control_focus(format!("trajectory-json-node-{}", node.id), cx);
 
             let row = div()
                 .id(SharedString::from(format!("json-node-{}", node.id)))
+                .track_focus(&row_focus)
+                .tab_index(0)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
                 .flex()
                 .items_center()
                 .gap(px(4.0))
@@ -449,23 +523,18 @@ impl Waku {
                 } else {
                     gpui::hsla(0.0, 0.0, 0.0, 0.0)
                 })
-                .hover(|s| s.bg(theme.accent.opacity(0.06)))
+                .hover(|style| style.bg(theme.accent.opacity(0.06)))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    let mut sessions = this.trajectory_sessions.borrow_mut();
-                    if let Some(state) = sessions.get_mut(&session_id) {
+                    this.activate_json_tree_node(session_id, idx, &path_clone, is_expandable, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if let Some(state) = this.trajectory_sessions.borrow_mut().get_mut(&session_id)
+                    {
                         state.json_tree_state.selected_index = idx;
-                        if is_expandable {
-                            if is_expanded {
-                                state.json_tree_state.expanded_paths.remove(&path_clone);
-                            } else {
-                                state
-                                    .json_tree_state
-                                    .expanded_paths
-                                    .insert(path_clone.clone());
-                            }
-                        }
-                        cx.notify();
+                    }
+                    if this.handle_json_tree_key(session_id, event, cx) {
+                        cx.stop_propagation();
                     }
                 }))
                 .when(is_expandable, |element| {
@@ -490,76 +559,118 @@ impl Waku {
                             JsonValueType::Null => theme.text_tertiary,
                         })
                         .child(node.value_preview.clone()),
-                );
+                )
+                .when(is_selected, |element| {
+                    element.child(
+                        div()
+                            .ml(px(6.0))
+                            .text_size(px(10.0))
+                            .text_color(theme.text)
+                            .child(tr!("trajectory.selected")),
+                    )
+                });
 
             list = list.child(row);
         }
 
-        // Keyboard handler for JSON tree
-        let nodes_len = nodes.len();
-        list = list.on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-            let mut sessions = this.trajectory_sessions.borrow_mut();
-            let Some(state) = sessions.get_mut(&session_id) else {
-                return;
-            };
-
-            match event.keystroke.key.as_str() {
-                "up" => {
-                    if state.json_tree_state.selected_index > 0 {
-                        state.json_tree_state.selected_index -= 1;
-                        cx.notify();
-                    }
-                }
-                "down" => {
-                    if state.json_tree_state.selected_index + 1 < nodes_len {
-                        state.json_tree_state.selected_index += 1;
-                        cx.notify();
-                    }
-                }
-                "left" => {
-                    let idx = state.json_tree_state.selected_index;
-                    if let Some(node) = state.json_tree_state.flattened_nodes.get(idx)
-                        && node.expandable
-                        && node.expanded
-                    {
-                        state.json_tree_state.expanded_paths.remove(&node.path);
-                        cx.notify();
-                    }
-                }
-                "right" => {
-                    let idx = state.json_tree_state.selected_index;
-                    if let Some(node) = state.json_tree_state.flattened_nodes.get(idx)
-                        && node.expandable
-                        && !node.expanded
-                    {
-                        state
-                            .json_tree_state
-                            .expanded_paths
-                            .insert(node.path.clone());
-                        cx.notify();
-                    }
-                }
-                "enter" | "space" => {
-                    let idx = state.json_tree_state.selected_index;
-                    if let Some(node) = state.json_tree_state.flattened_nodes.get(idx)
-                        && node.expandable
-                    {
-                        if node.expanded {
-                            state.json_tree_state.expanded_paths.remove(&node.path);
-                        } else {
-                            state
-                                .json_tree_state
-                                .expanded_paths
-                                .insert(node.path.clone());
-                        }
-                        cx.notify();
-                    }
-                }
-                _ => {}
-            }
-        }));
-
         list.into_any_element()
+    }
+
+    fn select_trajectory_inspector_section(
+        &mut self,
+        session_id: Uuid,
+        section: TrajectoryDetailSection,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.trajectory_sessions.borrow_mut().get_mut(&session_id) {
+            state.selected_section = section;
+        }
+        cx.notify();
+    }
+
+    fn close_trajectory_inspector(&mut self, session_id: Uuid, cx: &mut Context<Self>) {
+        if let Some(state) = self.trajectory_sessions.borrow_mut().get_mut(&session_id) {
+            state.close_inspector();
+        }
+        cx.notify();
+    }
+
+    fn advance_trajectory_detail(
+        &mut self,
+        session_id: Uuid,
+        record_id: Uuid,
+        section: TrajectoryDetailSection,
+        next_offset: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.trajectory_sessions.borrow_mut().get_mut(&session_id) {
+            state
+                .detail_cursors
+                .insert((record_id, section), next_offset);
+        }
+        cx.notify();
+    }
+
+    fn activate_json_tree_node(
+        &mut self,
+        session_id: Uuid,
+        idx: usize,
+        path: &str,
+        expandable: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(state) = self.trajectory_sessions.borrow_mut().get_mut(&session_id) {
+            state.json_tree_state.selected_index = idx;
+            if expandable && !state.json_tree_state.expanded_paths.remove(path) {
+                state.json_tree_state.expanded_paths.insert(path.to_owned());
+            }
+        }
+        cx.notify();
+    }
+
+    fn handle_json_tree_key(
+        &mut self,
+        session_id: Uuid,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut sessions = self.trajectory_sessions.borrow_mut();
+        let Some(state) = sessions.get_mut(&session_id) else {
+            return false;
+        };
+        let key = event.keystroke.key.as_str();
+        let len = state.json_tree_state.flattened_nodes.len();
+        match key {
+            "up" | "down" | "home" | "end" => {
+                if let Some(next) =
+                    step_json_tree_selection(state.json_tree_state.selected_index, len, key)
+                {
+                    state.json_tree_state.selected_index = next;
+                    cx.notify();
+                    return true;
+                }
+                false
+            }
+            "left" | "right" | "enter" | "space" => {
+                let idx = state.json_tree_state.selected_index;
+                let Some(node) = state.json_tree_state.flattened_nodes.get(idx).cloned() else {
+                    return false;
+                };
+                if !node.expandable {
+                    return false;
+                }
+                let collapse =
+                    key == "left" || ((key == "enter" || key == "space") && node.expanded);
+                if collapse {
+                    state.json_tree_state.expanded_paths.remove(&node.path);
+                } else {
+                    state.json_tree_state.expanded_paths.insert(node.path);
+                }
+                cx.notify();
+                true
+            }
+            _ => false,
+        }
     }
 }
 

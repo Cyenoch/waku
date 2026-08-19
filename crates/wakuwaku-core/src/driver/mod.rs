@@ -125,6 +125,7 @@ pub struct DriverStartOptions {
     pub transport: wakuwaku_protocol::TransportProfile,
     pub extra_auth_headers: Vec<(String, String)>,
     pub capabilities: wakuwaku_protocol::ModelCapabilities,
+    pub limits: wakuwaku_protocol::ProviderLimits,
     pub(crate) snapshot: wakuwaku_harness::SessionSnapshot,
 }
 
@@ -135,6 +136,7 @@ pub struct SessionReconfigure {
     pub transport: wakuwaku_protocol::TransportProfile,
     pub extra_auth_headers: Vec<(String, String)>,
     pub capabilities: wakuwaku_protocol::ModelCapabilities,
+    pub limits: wakuwaku_protocol::ProviderLimits,
 }
 
 #[derive(Clone, Debug)]
@@ -180,6 +182,7 @@ mod tests {
             reasoning_effort: None,
             service_tier: None,
             context_window: None,
+            limits: Default::default(),
             auth: wakuwaku_harness::Auth::Bearer("test".into()),
             transport: preset.transport(),
             extra_auth_headers: Vec::new(),

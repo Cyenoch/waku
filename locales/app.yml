@@ -90,6 +90,8 @@ command_palette.show_right_panel:
   en: Show right panel
 command_palette.hide_right_panel:
   en: Hide right panel
+command_palette.open_trajectory:
+  en: Open trajectory
 command_palette.current:
   en: Current
 command_palette.you:
@@ -327,6 +329,12 @@ providers.connected:
   en: Connected
 providers.api_format:
   en: API format
+providers.api_format_openai_responses:
+  en: OpenAI Responses API
+providers.api_format_openai_chat:
+  en: OpenAI Chat Completions API
+providers.api_format_anthropic:
+  en: Anthropic Messages API
 providers.edit_title:
   en: Edit provider
 providers.id:
@@ -335,18 +343,28 @@ providers.name:
   en: Name
 providers.base_url:
   en: Base URL
-providers.api_key_env:
-  en: API key environment variable
-providers.models:
-  en: Models
-providers.context_window:
-  en: Context window
-providers.max_output_tokens:
-  en: Maximum output tokens
+providers.api_key:
+  en: API key
+providers.api_key_saved_placeholder:
+  en: "A key is saved — enter a new one to replace it"
 providers.headers:
   en: Additional headers
+providers.id_placeholder:
+  en: openai
+providers.name_placeholder:
+  en: OpenAI
+providers.base_url_placeholder:
+  en: https://api.openai.com/v1
+providers.headers_placeholder:
+  en: "X-Custom-Header: value"
+providers.models_auto_fetch:
+  en: The model list is fetched from the provider's API after saving.
+providers.headers_hint:
+  en: "One header per line, as Name: value."
 providers.invalid_configuration:
   en: Provider configuration is invalid or incomplete
+providers.required_fields:
+  en: Provider ID, name, and base URL are required
 providers.device_code:
   en: "Enter %{code} at %{url}"
 
@@ -369,8 +387,6 @@ providers.description:
   en: Configure model endpoints directly. API key values are never displayed or stored by WakuWaku.
 providers.web_description:
   en: Configure model endpoints directly on the daemon host. API key values are never displayed or stored by WakuWaku.
-providers.catalog_models:
-  en: Models from live catalog
 providers.not_authenticated:
   en: Not connected
 providers.api_key_placeholder:
@@ -835,8 +851,6 @@ models.catalog_cache:
   en: cached
 models.catalog_seed:
   en: built-in
-models.unsupported:
-  en: unsupported
 models.context_window:
   en: Context Window
 
@@ -1864,30 +1878,16 @@ usage.resets_date:
   en: Resets %{date}
 
 
-providers.default_model:
-  en: Default model
-
 providers.duplicate_id:
   en: Provider ID is already in use
 providers.in_use:
   en: Provider is referenced by a session or favorite
 
-providers.duplicate_models:
-  en: Duplicate model IDs are not allowed
-
-providers.invalid_context_window:
-  en: Context window must be a positive integer
-providers.invalid_max_output_tokens:
-  en: Maximum output tokens must be a positive integer
 providers.invalid_header_format:
   en: "Each header must use Name: value"
 providers.invalid_headers:
   en: "Headers must be non-empty, unique, and cannot use reserved names: Authorization, x-api-key, Host, Content-Length, Content-Type, Anthropic-Version"
 
-trajectory.tab_chat:
-  en: Chat
-trajectory.tab_trajectory:
-  en: Trajectory
 trajectory.search_placeholder:
   en: Filter trajectory (AND tokens)...
 trajectory.duration_projection:
@@ -1910,6 +1910,8 @@ trajectory.error_banner:
   en: Failed to load trajectory
 trajectory.retry:
   en: Retry
+trajectory.unexpected_response:
+  en: Unexpected trajectory response
 trajectory.empty:
   en: No trajectory events
 trajectory.empty_description:
@@ -1956,5 +1958,68 @@ trajectory.tab_result:
   en: Result
 trajectory.tab_schema:
   en: Schema
+trajectory.lane_input:
+  en: Input
+trajectory.lane_model:
+  en: Model
+trajectory.lane_tools:
+  en: Tools
+trajectory.assistant_label:
+  en: Assistant
+trajectory.tool_label:
+  en: Tool
+trajectory.record_count:
+  en: "%{count} records"
+trajectory.item_count:
+  en: "%{count} items"
+trajectory.status_pending:
+  en: Pending
+trajectory.status_running:
+  en: Running
+trajectory.status_completed:
+  en: Completed
+trajectory.status_failed:
+  en: Failed
+trajectory.status_cancelled:
+  en: Cancelled
+trajectory.status_unavailable:
+  en: Unavailable
+trajectory.selected:
+  en: Selected
+trajectory.collapsed:
+  en: Collapsed
+trajectory.json_object:
+  en: "Object (%{count} entries)"
+trajectory.json_array:
+  en: "Array (%{count} items)"
+trajectory.json_true:
+  en: "true"
+trajectory.json_false:
+  en: "false"
+trajectory.json_null:
+  en: "null"
+trajectory.meta_kind:
+  en: "Kind: %{kind}"
+trajectory.meta_status:
+  en: "Status: %{status}"
+trajectory.meta_duration:
+  en: "Duration: %{duration}"
+trajectory.no_content:
+  en: No content
+trajectory.kind_system:
+  en: System
+trajectory.kind_user:
+  en: User
+trajectory.kind_context:
+  en: Context
+trajectory.kind_request:
+  en: Request
+trajectory.kind_assistant:
+  en: Assistant
+trajectory.kind_tool:
+  en: Tool
+trajectory.expanded:
+  en: Expanded
+
 trajectory.bytes_loaded:
   en: "Loaded %{loaded} / %{total} bytes"

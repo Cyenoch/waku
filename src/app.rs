@@ -971,19 +971,20 @@ pub struct Waku {
     updater_button_animation_from_width: f32,
     updater_button_animation_from_reveal: f32,
     updater_button_animation_generation: u64,
-    /// The provider row expanded on the Providers page, if any. The endpoint
-    /// fields below edit this provider's entry.
-    expanded_provider_settings: Option<ProviderId>,
+    /// Custom-provider Add/Edit overlay. Draft fields below are only
+    /// meaningful while this is Some; opening a draft always rewrites them.
+    provider_dialog: Option<settings::ProviderDialogState>,
     provider_id_input: Entity<ComposerInput>,
     provider_name_input: Entity<ComposerInput>,
     provider_base_url_input: Entity<ComposerInput>,
-    provider_api_key_env_input: Entity<ComposerInput>,
     provider_headers_input: Entity<ComposerInput>,
-    provider_model_input: Entity<ComposerInput>,
-    provider_context_window_input: Entity<ComposerInput>,
-    provider_max_output_tokens_input: Entity<ComposerInput>,
-    provider_default_model_input: Entity<ComposerInput>,
+    provider_api_key_input: Entity<ComposerInput>,
+    provider_pending_api_key: Option<(ProviderId, String)>,
     provider_api_format: wakuwaku_client::ApiFormat,
+    provider_dialog_scroll: ScrollHandle,
+    provider_dialog_scrollbar: Rc<ScrollbarState>,
+    provider_settings_apply_pending: Option<u64>,
+    provider_settings_generation: u64,
     auth_api_key_input: Entity<ComposerInput>,
     auth_statuses: HashMap<ProviderId, wakuwaku_client::ProviderAuthStatus>,
     auth_phases: Vec<wakuwaku_client::AuthPhase>,
@@ -1377,6 +1378,8 @@ pub struct Waku {
     transcript_pane: Entity<WakuPane>,
     right_panel_pane: Entity<WakuPane>,
     trajectory_sessions: RefCell<HashMap<Uuid, trajectory::TrajectorySessionState>>,
+    trajectory_search: Entity<ComposerInput>,
+    trajectory_search_session: Cell<Option<Uuid>>,
     /// The unix second the pending time-label wake-up targets, or `None` when
     /// none is armed. See `schedule_time_label_wake`.
     time_label_wake: Cell<Option<u64>>,
@@ -1750,18 +1753,33 @@ impl Waku {
                 .placeholder(tr!("skills.search"))
         });
         let session_rename_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
-        let provider_id_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
-        let provider_name_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
-        let provider_base_url_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
-        let provider_api_key_env_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
-        let provider_headers_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
-        let provider_model_input = cx.new(|cx| ComposerInput::new(window, cx).search_field());
-        let provider_context_window_input =
-            cx.new(|cx| ComposerInput::new(window, cx).search_field());
-        let provider_max_output_tokens_input =
-            cx.new(|cx| ComposerInput::new(window, cx).search_field());
-        let provider_default_model_input =
-            cx.new(|cx| ComposerInput::new(window, cx).search_field());
+        let provider_id_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder(tr!("providers.id_placeholder"))
+        });
+        let provider_name_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder(tr!("providers.name_placeholder"))
+        });
+        let provider_base_url_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder(tr!("providers.base_url_placeholder"))
+        });
+        // Multi-line so one `Name: value` header goes on each line; Enter
+        // inserts a newline instead of propagating.
+        let provider_headers_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .code_editor(None)
+                .placeholder(tr!("providers.headers_placeholder"))
+        });
+        let provider_api_key_input = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .secret_field()
+                .placeholder(tr!("providers.api_key_placeholder"))
+        });
         let auth_api_key_input = cx.new(|cx| ComposerInput::new(window, cx).secret_field());
         let usage_project_filter = cx.new(|cx| {
             ComposerInput::new(window, cx)
@@ -1772,6 +1790,11 @@ impl Waku {
             ComposerInput::new(window, cx)
                 .search_field()
                 .placeholder(tr!("diff.filter_files"))
+        });
+        let trajectory_search = cx.new(|cx| {
+            ComposerInput::new(window, cx)
+                .search_field()
+                .placeholder(tr!("trajectory.search_placeholder"))
         });
         let navigation_rail = cx.new(|_| ConversationNavigationRail::new());
         let sidebar_pane = WakuPane::new(Waku::sidebar_pane_content, cx);
@@ -2256,6 +2279,22 @@ impl Waku {
                 },
             )
             .detach();
+            cx.subscribe(
+                &trajectory_search,
+                |this: &mut Self, search, event: &ComposerEvent, cx| {
+                    if matches!(event, ComposerEvent::Edited) {
+                        let query = search.read(cx).content().to_owned();
+                        if let Some(session_id) = this.state.selected_session
+                            && let Some(state) =
+                                this.trajectory_sessions.borrow_mut().get_mut(&session_id)
+                        {
+                            state.set_search_query(query);
+                        }
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
             // Like T3 Code's adapter subscriptions feeding its ingestion
             // worker, provider threads push an edge into this bounded wake
             // channel. The UI does no standing scan: the short follow-up tick
@@ -2383,17 +2422,18 @@ impl Waku {
                 updater_button_animation_from_width: UPDATER_BUTTON_COLLAPSED_WIDTH,
                 updater_button_animation_from_reveal: 0.0,
                 updater_button_animation_generation: 0,
-                expanded_provider_settings: None,
+                provider_dialog: None,
                 provider_id_input,
                 provider_name_input,
                 provider_base_url_input,
-                provider_api_key_env_input,
                 provider_headers_input,
-                provider_model_input,
-                provider_context_window_input,
-                provider_max_output_tokens_input,
-                provider_default_model_input,
+                provider_api_key_input,
+                provider_pending_api_key: None,
                 provider_api_format: wakuwaku_client::ApiFormat::OpenAiResponses,
+                provider_dialog_scroll: ScrollHandle::new(),
+                provider_dialog_scrollbar: ScrollbarState::new(),
+                provider_settings_apply_pending: None,
+                provider_settings_generation: 0,
                 auth_api_key_input,
                 auth_statuses: HashMap::new(),
                 auth_phases: Vec::new(),
@@ -2591,6 +2631,8 @@ impl Waku {
                 transcript_pane: transcript_pane.clone(),
                 right_panel_pane: right_panel_pane.clone(),
                 trajectory_sessions: RefCell::new(HashMap::new()),
+                trajectory_search,
+                trajectory_search_session: Cell::new(None),
                 time_label_wake: Cell::new(None),
                 time_label_wake_generation: Cell::new(0),
                 fps_last_frame: Instant::now(),

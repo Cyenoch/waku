@@ -601,8 +601,11 @@ impl AgentSession {
         true
     }
 
-    pub fn can_choose_model(&self, provider: ProviderId) -> bool {
-        !self.status.is_busy() && (self.messages.is_empty() || self.provider == provider)
+    /// Whether the model picker may act on this session. A running turn is
+    /// the only blocker; a started transcript can still switch providers,
+    /// which restarts the runtime and replays the session on next start.
+    pub fn can_choose_model(&self) -> bool {
+        !self.status.is_busy()
     }
 
     /// Stable Start sync token for daemon-owned provider history.
@@ -2714,15 +2717,14 @@ mod tests {
     }
 
     #[test]
-    fn model_selection_keeps_started_sessions_on_their_provider() {
+    fn model_selection_can_switch_providers_on_started_sessions() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
         let mut session = AgentSession::new(project.id, ProviderId::new(ProviderId::OPENAI_CODEX));
 
-        assert!(session.can_choose_model(ProviderId::new(ProviderId::ANTHROPIC)));
+        assert!(session.can_choose_model());
 
         session.push_message(MessageRole::User, "first turn");
-        assert!(session.can_choose_model(ProviderId::new(ProviderId::OPENAI_CODEX)));
-        assert!(!session.can_choose_model(ProviderId::new(ProviderId::ANTHROPIC)));
+        assert!(session.can_choose_model());
     }
 
     #[test]
@@ -2737,11 +2739,11 @@ mod tests {
             SessionStatus::Waiting,
         ] {
             session.status = status;
-            assert!(!session.can_choose_model(ProviderId::new(ProviderId::OPENAI_CODEX)));
+            assert!(!session.can_choose_model());
         }
 
         session.status = SessionStatus::Idle;
-        assert!(session.can_choose_model(ProviderId::new(ProviderId::OPENAI_CODEX)));
+        assert!(session.can_choose_model());
     }
 
     #[test]

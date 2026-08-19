@@ -13,8 +13,11 @@
   "devDependencies": {
     "@libsql/client": "^0.17.4",
     "@types/bun": "latest",
+    "@types/react": "^19.2.18",
     "drizzle-kit": "^0.31.10",
     "drizzle-orm": "^0.45.2",
+    "ink": "^7.1.1",
+    "react": "^19.2.8",
     "typescript": "^7.0.2"
   },
   "workspaces": ["website", "apps/*", "packages/*"]

@@ -17,10 +17,13 @@ use wakuwaku_core::daemon::WakuBackend;
 use wakuwaku_core::driver::WAKU_SYSTEM_PROMPT;
 use wakuwaku_core::model::{DriverEvent, InteractionMode, ProviderId, RuntimeMode};
 use wakuwaku_core::persistence::{PersistedState, StateStore};
+use wakuwaku_core::auth::{
+    AuthRuntime, AuthService, CredentialStore, MemoryCredentialStore, StoredCredential,
+};
 use wakuwaku_core::protocol::{Command, ResponsePayload};
 use wakuwaku_core::{DaemonSettings, DaemonSettingsStore, ServerOptions, serve};
-use wakuwaku_protocol::{ApiFormat, ExternalProvider, PromptAttachmentSource, PromptImageRef};
-
+use wakuwaku_protocol::AuthEndpoints;
+use wakuwaku_protocol::{ApiFormat, ExternalProvider, PromptAttachmentSource, PromptImageRef, SecretString};
 const TOKEN: &str = "smoke-token";
 const PROVIDER: &str = "smoke-openai";
 
@@ -196,18 +199,13 @@ fn daemon_client_mock_http_smoke() {
     let mock = MockHttp::new(vec![first_model_sse(), second_model_sse()]);
     mock.push_delayed(second_model_sse(), Duration::from_secs(20));
     let (port, _http) = mock.bind();
-    unsafe {
-        std::env::set_var("WAKUWAKU_SMOKE_KEY", "sk-smoke");
-    }
 
-    let mut provider = ExternalProvider::new(
+    let provider = ExternalProvider::new(
         PROVIDER,
         "Smoke OpenAI",
         format!("http://127.0.0.1:{port}/v1"),
         ApiFormat::OpenAiResponses,
-        "smoke-model",
     );
-    provider.api_key_env = Some("WAKUWAKU_SMOKE_KEY".into());
 
     let settings = DaemonSettingsStore::open(directory.join("settings.json")).unwrap();
     settings
@@ -217,6 +215,20 @@ fn daemon_client_mock_http_smoke() {
         })
         .unwrap();
 
+    let creds = Arc::new(MemoryCredentialStore::default());
+    creds
+        .set(
+            &ProviderId::new(PROVIDER),
+            StoredCredential::api_key(SecretString::new("sk-smoke")),
+        )
+        .unwrap();
+    let auth = AuthService::new(AuthRuntime::testing(
+        &directory,
+        creds,
+        AuthEndpoints::production(),
+    ))
+    .unwrap();
+
     let store = StateStore::daemon(directory.join("app.db"));
     let mut state = PersistedState::fresh(workspace.clone());
     state.sessions[0].provider = ProviderId::new(PROVIDER);
@@ -225,7 +237,7 @@ fn daemon_client_mock_http_smoke() {
     state.mark_session_dirty(session_id);
     store.save(&mut state).unwrap();
 
-    let backend = WakuBackend::new(settings, store).unwrap();
+    let backend = WakuBackend::new_with_auth(settings, store, auth).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let shutdown = Arc::new(AtomicBool::new(false));

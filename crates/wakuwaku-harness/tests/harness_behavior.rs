@@ -197,10 +197,9 @@ fn provider_config(base_url: &str, format: ApiFormat, auth: Auth) -> ProviderCon
             name: "Test Provider".into(),
             base_url: format!("{}/v1", base_url.trim_end_matches('/')),
             api_format: format,
-            api_key_env: None,
             headers: Vec::new(),
-            models: Vec::new(),
-            default_model: "test-model".into(),
+        },
+        limits: wakuwaku_provider::ProviderLimits {
             context_window: 100_000,
             max_output_tokens: 16_384,
         },
@@ -248,7 +247,7 @@ async fn openai_requests_include_service_tier() {
                     service_tier: Some(wakuwaku_provider::ServiceTier::Flex),
                     ..Default::default()
                 },
-                None,
+                Some("test-model"),
                 CancelToken::new(),
                 &mut sink,
             )
@@ -279,7 +278,7 @@ async fn anthropic_rejects_service_tier() {
                 service_tier: Some(wakuwaku_provider::ServiceTier::Auto),
                 ..Default::default()
             },
-            None,
+            Some("test-model"),
             CancelToken::new(),
             &mut |_| {},
         )
@@ -324,7 +323,7 @@ async fn openai_responses_round_trip_builds_request_and_parses_sse() {
     let mut events = Vec::new();
     let mut sink = |event| events.push(event);
     let message = provider
-        .complete(&context, &options, None, CancelToken::new(), &mut sink)
+        .complete(&context, &options, Some("test-model"), CancelToken::new(), &mut sink)
         .await
         .unwrap();
 
@@ -423,7 +422,7 @@ async fn all_adapters_encode_user_images_in_the_request_body() {
             .complete(
                 &context,
                 &RequestOptions::default(),
-                None,
+                Some("test-model"),
                 CancelToken::new(),
                 &mut sink,
             )
@@ -477,7 +476,7 @@ async fn openai_chat_round_trip_preserves_interleaved_tools_reasoning_and_usage(
     let mut events = Vec::new();
     let mut sink = |event| events.push(event);
     let message = provider
-        .complete(&context, &options, None, CancelToken::new(), &mut sink)
+        .complete(&context, &options, Some("test-model"), CancelToken::new(), &mut sink)
         .await
         .unwrap();
 
@@ -559,7 +558,7 @@ async fn anthropic_messages_round_trip_preserves_signature_usage_and_tool() {
     let mut events = Vec::new();
     let mut sink = |event| events.push(event);
     let message = provider
-        .complete(&context, &options, None, CancelToken::new(), &mut sink)
+        .complete(&context, &options, Some("test-model"), CancelToken::new(), &mut sink)
         .await
         .unwrap();
 
@@ -626,7 +625,7 @@ async fn retry_after_retries_429_and_caps_server_delay_without_leaking_key() {
     let options = RequestOptions::default();
     let mut sink = |_| {};
     let message = provider
-        .complete(&context, &options, None, CancelToken::new(), &mut sink)
+        .complete(&context, &options, Some("test-model"), CancelToken::new(), &mut sink)
         .await
         .unwrap();
     assert_eq!(message.stop_reason, StopReason::Stop);
@@ -652,7 +651,7 @@ async fn retry_after_retries_429_and_caps_server_delay_without_leaking_key() {
     .with_retry(retry);
     let mut sink = |_| {};
     let error = provider
-        .complete(&context, &options, None, CancelToken::new(), &mut sink)
+        .complete(&context, &options, Some("test-model"), CancelToken::new(), &mut sink)
         .await
         .expect_err("expected an error");
     assert!(matches!(error, HarnessError::Http { status: 429, .. }));
@@ -686,7 +685,7 @@ async fn http_errors_redact_configured_extra_header_values() {
         .complete(
             &context,
             &RequestOptions::default(),
-            None,
+            Some("test-model"),
             CancelToken::new(),
             &mut |_| {},
         )
@@ -728,7 +727,7 @@ async fn cancellation_interrupts_retry_delay_and_missing_terminal_is_error_state
     let task = tokio::spawn(async move {
         let mut sink = |_| {};
         provider
-            .complete(&context, &options, None, task_token, &mut sink)
+            .complete(&context, &options, Some("test-model"), task_token, &mut sink)
             .await
     });
     sleep(Duration::from_millis(20)).await;
@@ -748,7 +747,7 @@ async fn cancellation_interrupts_retry_delay_and_missing_terminal_is_error_state
         .complete(
             &context_with_user("missing"),
             &RequestOptions::default(),
-            None,
+            Some("test-model"),
             CancelToken::new(),
             &mut sink,
         )

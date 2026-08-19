@@ -102,6 +102,7 @@ enum PaletteAction {
     ToggleUsage,
     ToggleSidebar,
     ToggleRightPanel,
+    OpenTrajectory,
     OpenSettings(SettingsPage),
     SelectTask(Uuid),
 }
@@ -544,9 +545,7 @@ impl Waku {
             ),
         ];
 
-        let can_choose_model = self
-            .selected_session()
-            .is_some_and(|session| session.can_choose_model(session.provider.clone()));
+        let can_choose_model = self.selected_session().is_some_and(|session| session.can_choose_model());
         if can_choose_model {
             commands.push(CommandPaletteItem::command(
                 display_section(PaletteSection::Suggested),
@@ -604,7 +603,16 @@ impl Waku {
                     "icons/panel-right.svg",
                     Some(crate::platform::primary_shortcut("⇧⌘B", "Ctrl+Shift+B")),
                     PaletteAction::ToggleRightPanel,
-                    "toggle show hide right panel files diff terminal browser",
+                    "toggle show hide right panel files diff terminal browser trajectory",
+                    next(),
+                ),
+                CommandPaletteItem::command(
+                    PaletteSection::Commands,
+                    tr!("command_palette.open_trajectory"),
+                    "icons/git-commit-horizontal.svg",
+                    None,
+                    PaletteAction::OpenTrajectory,
+                    "open trajectory trace ledger request steps tools",
                     next(),
                 ),
             ]);
@@ -905,11 +913,15 @@ impl Waku {
             PaletteAction::ToggleRightPanel => {
                 self.toggle_right_panel_action(&ToggleRightPanel, window, cx)
             }
+            PaletteAction::OpenTrajectory => {
+                self.open_right_panel_surface(RightPanelSurface::Trajectory, cx)
+            }
             PaletteAction::OpenSettings(page) => {
                 self.open_settings_action(&OpenSettings, window, cx);
                 self.open_settings_page(page, cx);
             }
             PaletteAction::SelectTask(session_id) => {
+                self.discard_provider_dialog(cx);
                 self.settings_page = None;
                 self.select_session(session_id, cx);
                 let focus = self.composer_focus(cx);
@@ -919,6 +931,7 @@ impl Waku {
                 // These popovers are rendered by the composer. If the command
                 // came from Settings, reveal one normal app frame first so its
                 // persistent menu handle and anchor bounds are current.
+                self.discard_provider_dialog(cx);
                 self.settings_page = None;
                 let focus = self.composer_focus(cx);
                 window.focus(&focus, cx);
