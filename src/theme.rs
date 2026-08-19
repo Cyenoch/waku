@@ -1,6 +1,8 @@
-use gpui::{App, Global, Hsla, Window, WindowAppearance, hsla, rgb, transparent_black};
+#[cfg(not(target_family = "wasm"))]
+use gpui::Window;
+use gpui::{App, Global, Hsla, WindowAppearance, hsla, rgb, transparent_black};
 
-pub use wakuwaku_client::theme::ThemePreference;
+pub use wakuwaku_protocol::theme::ThemePreference;
 
 fn resolves_to_dark(preference: ThemePreference, system_appearance: WindowAppearance) -> bool {
     match preference {
@@ -13,6 +15,7 @@ fn resolves_to_dark(preference: ThemePreference, system_appearance: WindowAppear
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn native_override(preference: ThemePreference) -> Option<bool> {
     match preference {
         ThemePreference::System => None,
@@ -200,6 +203,10 @@ pub fn init(cx: &mut App) {
     set_active_theme(theme, cx);
 }
 
+/// Native-only: routes the preference into NSAppearance and the sidebar's
+/// vibrancy material. The web platform has no window chrome to configure, so
+/// there the preference just resolves the palette.
+#[cfg(not(target_family = "wasm"))]
 pub fn apply_theme_preference(preference: ThemePreference, window: &mut Window, cx: &mut App) {
     crate::platform::set_window_appearance(window, native_override(preference));
     let is_dark = resolves_to_dark(preference, cx.window_appearance());

@@ -8006,6 +8006,9 @@ dependencies = [
  "uuid",
  "wakuwaku-client",
  "wakuwaku-protocol",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wry",
 ]
 

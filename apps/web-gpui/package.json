@@ -1,0 +1,14 @@
+{
+  "name": "@wakuwaku/web-gpui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "RUSTC_BOOTSTRAP=1 cargo build -p wakuwaku --example wakuwaku_web --target wasm32-unknown-unknown && wasm-bindgen --target web --no-typescript --out-dir src/wasm --out-name wakuwaku_web ../../target/wasm32-unknown-unknown/debug/examples/wakuwaku_web.wasm",
+    "dev": "bun run build:wasm && vite dev",
+    "build": "bun run build:wasm && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^8.0.14"
+  }
+}

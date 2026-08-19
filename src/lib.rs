@@ -13,49 +13,70 @@ const _LOCALE_SOURCES: [&str; 3] = [
 
 macro_rules! tr {
     ($key:expr) => {
-        crate::i18n::translate($key)
+        ::wakuwaku_protocol::i18n::translate($key)
     };
     ($key:expr, $($args:tt)*) => {
         rust_i18n::t!($key, $($args)*).into_owned()
     };
 }
-
 /// Borrow static translations on hot render paths; interpolation uses `tr!`
 /// because formatted messages necessarily allocate.
+#[cfg(not(target_family = "wasm"))]
 macro_rules! tr_cow {
     ($key:literal) => {
         rust_i18n::t!($key)
     };
 }
 
+#[cfg(not(target_family = "wasm"))]
 mod analytics;
+#[cfg(not(target_family = "wasm"))]
 mod app;
-mod assets;
+pub mod assets;
+#[cfg(not(target_family = "wasm"))]
 mod browser;
+#[cfg(not(target_family = "wasm"))]
 pub mod daemon;
+#[cfg(not(target_family = "wasm"))]
 mod driver;
-mod input;
-mod md;
+pub mod input;
+pub mod md;
+#[cfg(not(target_family = "wasm"))]
 mod platform;
+#[cfg(not(target_family = "wasm"))]
 mod query;
+#[cfg(not(target_family = "wasm"))]
 mod review_diff;
+#[cfg(not(target_family = "wasm"))]
 mod terminal;
-mod theme;
-mod ui;
+pub mod theme;
+pub mod ui;
+#[cfg(not(target_family = "wasm"))]
 mod updater;
 
+#[cfg(target_family = "wasm")]
+pub mod web;
+
+#[cfg(not(target_family = "wasm"))]
 pub use wakuwaku_client::{
     checkpoint, command_env, composer_complete, git_branch, git_commit, i18n, identity, model,
     persistence, projectless, skills, usage, usage_history, worktree,
 };
 
+#[cfg(target_family = "wasm")]
+pub use wakuwaku_protocol::model;
+
+#[cfg(not(target_family = "wasm"))]
 use gpui::{
     App, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, point, px, size,
 };
 
+#[cfg(not(target_family = "wasm"))]
 use crate::app::Waku;
+#[cfg(not(target_family = "wasm"))]
 use crate::identity::{APP_ID, APP_NAME};
+#[cfg(not(target_family = "wasm"))]
 actions!(
     waku,
     [
@@ -102,13 +123,19 @@ actions!(
     ]
 );
 
+#[cfg(not(target_family = "wasm"))]
 const DEFAULT_WINDOW_WIDTH: f32 = 1380.0;
+#[cfg(not(target_family = "wasm"))]
 const DEFAULT_WINDOW_HEIGHT: f32 = 880.0;
+#[cfg(not(target_family = "wasm"))]
 const MIN_WINDOW_WIDTH: f32 = 980.0;
+#[cfg(not(target_family = "wasm"))]
 const MIN_WINDOW_HEIGHT: f32 = 680.0;
 /// How much titlebar must stay on the display for the window to be dragged
 /// back by hand.
+#[cfg(not(target_family = "wasm"))]
 const TITLEBAR_GRAB_WIDTH: f32 = 160.0;
+#[cfg(not(target_family = "wasm"))]
 const TITLEBAR_GRAB_HEIGHT: f32 = 22.0;
 
 /// Reopen the main window where the user last left it, on the display it was
@@ -118,6 +145,7 @@ const TITLEBAR_GRAB_HEIGHT: f32 = 22.0;
 /// When that display is gone the same offsets re-anchor on the primary
 /// display, and the origin is clamped so the titlebar stays grabbable after
 /// any display change.
+#[cfg(not(target_family = "wasm"))]
 fn restored_window_placement(cx: &App) -> (WindowBounds, Option<gpui::DisplayId>) {
     let centered = |cx: &App| {
         (
@@ -165,10 +193,11 @@ fn restored_window_placement(cx: &App) -> (WindowBounds, Option<gpui::DisplayId>
     (window_bounds, display_id)
 }
 
+#[cfg(not(target_family = "wasm"))]
 trait WakuApplicationExt {
     fn with_main_window_reopen(self) -> Self;
 }
-
+#[cfg(not(target_family = "wasm"))]
 impl WakuApplicationExt for Application {
     fn with_main_window_reopen(self) -> Self {
         self.on_reopen(|cx| {
@@ -183,6 +212,7 @@ impl WakuApplicationExt for Application {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn run() {
     let daemon = crate::daemon::start_process()
         .unwrap_or_else(|error| panic!("failed to start WakuWaku daemon: {error:#}"));
@@ -370,6 +400,7 @@ pub fn run() {
 /// Rebuild the native menu bar in the active locale. GPUI menus own their
 /// labels, so changing language must replace the model as well as redraw the
 /// window.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn set_app_menus(cx: &mut App, updater_available: bool) {
     cx.set_menus(vec![
         Menu {

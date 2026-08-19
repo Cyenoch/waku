@@ -211,13 +211,21 @@ const SYMBOLS_FONT: &[u8] = include_bytes!("../assets/fonts/SymbolsNerdFontMono-
 pub const SYMBOLS_FONT_FAMILY: &str = "Symbols Nerd Font Mono";
 
 pub fn register_fonts(cx: &App) -> Result<()> {
-    cx.text_system().add_fonts(
-        TEXT_FONTS
-            .iter()
-            .map(|font| Cow::Borrowed(*font))
-            .collect::<Vec<_>>(),
-    )?;
-    crate::platform::register_fonts_with_coretext(&[SYMBOLS_FONT])
+    #[allow(unused_mut)]
+    let mut fonts: Vec<Cow<'static, [u8]>> = TEXT_FONTS
+        .iter()
+        .map(|font| Cow::Borrowed(*font))
+        .collect();
+    // The symbols face is macOS-only state there (a CoreText cascade), while
+    // the web text system resolves it as an ordinary family.
+    #[cfg(target_family = "wasm")]
+    fonts.push(Cow::Borrowed(SYMBOLS_FONT));
+    cx.text_system().add_fonts(fonts)?;
+    #[cfg(not(target_family = "wasm"))]
+    {
+        crate::platform::register_fonts_with_coretext(&[SYMBOLS_FONT])?;
+    }
+    Ok(())
 }
 
 impl AssetSource for Assets {

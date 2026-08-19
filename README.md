@@ -60,13 +60,18 @@ presentation state and a disposable preview cache. The harness keeps the
 generic `Tool` seam for local tools; the removed legacy Computer Use integration
 is not part of the runtime.
 
-The browser client lives at [`apps/web`](apps/web) and uses the generated
-browser transport in [`packages/wakuwaku-client`](packages/wakuwaku-client). Its
-checked-in types are generated directly from the Rust protocol, while its
-WebSocket client implements the same handshake, request IDs, subscriptions,
-sequence deduplication, and replay cursors as the Rust client. Run
-`bun run protocol:generate` after changing a wire type and
-`bun run protocol:check` to verify that generated files are current.
+The generated browser transport lives in
+[`packages/wakuwaku-client`](packages/wakuwaku-client). Its checked-in types are
+generated directly from the Rust protocol, while its WebSocket client implements
+the same handshake, request IDs, subscriptions, sequence deduplication, and
+replay cursors as the Rust client. Run `bun run protocol:generate` after
+changing a wire type and `bun run protocol:check` to verify that generated
+files are current.
+
+A browser client is also being built at [`apps/web-gpui`](apps/web-gpui): the
+same Rust UI (GPUI) compiled to WebAssembly, talking to the daemon through the
+same versioned WebSocket contract. It is work in progress and currently only
+covers the minimal connect–browse–prompt loop.
 
 Projectless task workspaces live on the daemon host under
 `~/.wakuwaku/projects/<date>/<slug>`.
