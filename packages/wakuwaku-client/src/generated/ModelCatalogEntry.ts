@@ -2,10 +2,15 @@
 import type { ApiFormat } from "./ApiFormat";
 import type { ModelCapabilities } from "./ModelCapabilities";
 import type { ProviderId } from "./ProviderId";
+import type { ReasoningEffortOption } from "./ReasoningEffortOption";
 import type { TransportProfile } from "./TransportProfile";
 import type { UnsupportedReason } from "./UnsupportedReason";
 
 /**
  * One discovered or seeded model that a session can select.
  */
-export type ModelCatalogEntry = { id: string, name: string, provider: ProviderId, apiFormat: ApiFormat, transport: TransportProfile, baseUrl: string, contextWindow: number, maxOutputTokens: number, reasoning: boolean, capabilities: ModelCapabilities, supported: boolean, unsupportedReason?: UnsupportedReason | null, };
+export type ModelCatalogEntry = { id: string, name: string, provider: ProviderId, apiFormat: ApiFormat, transport: TransportProfile, baseUrl: string, contextWindow: number, maxOutputTokens: number, reasoning: boolean,
+/**
+ * Model-specific reasoning choices, in provider preference order.
+ */
+reasoningEfforts?: Array<ReasoningEffortOption>, defaultReasoningEffort?: string | null, capabilities: ModelCapabilities, supported: boolean, unsupportedReason?: UnsupportedReason | null, };

@@ -8,7 +8,7 @@ import { nextModelPickerHighlight, selectedModelPickerIndex } from '@/lib/model-
 import { cn } from '@/lib/utils'
 
 type PickerTab = 'favorites' | ProviderId
-type PickerModel = Pick<ModelCatalogEntry, 'id' | 'name' | 'supported' | 'unsupportedReason' | 'capabilities' | 'apiFormat'> & { source: 'live' | 'cache' | 'seed' | 'manual' }
+type PickerModel = Pick<ModelCatalogEntry, 'id' | 'name' | 'supported' | 'unsupportedReason' | 'capabilities' | 'apiFormat' | 'reasoningEfforts' | 'defaultReasoningEffort'> & { source: 'live' | 'cache' | 'seed' | 'manual' }
 type PickerRow = { provider: ProviderId; model: PickerModel }
 
 const BUILTIN_PROVIDERS: Array<{ id: ProviderId; name: string }> = [
@@ -33,6 +33,8 @@ function endpointModels(provider: ExternalProvider): PickerModel[] {
     unsupportedReason: null,
     capabilities: { serviceTier: false, reasoningEffort: false, reasoningSummary: false, sampling: false },
     apiFormat: provider.apiFormat,
+    reasoningEfforts: [],
+    defaultReasoningEffort: null,
     source: 'manual',
   }))
 }

@@ -191,7 +191,7 @@ pub enum TrajectoryLiveUpdate {
     Upsert {
         generation: u64,
         revision: u64,
-        row: TrajectoryRowSummary,
+        row: Box<TrajectoryRowSummary>,
     },
     Remove {
         generation: u64,
@@ -376,7 +376,7 @@ mod tests {
         let upsert = TrajectoryLiveUpdate::Upsert {
             generation: 1,
             revision: 8,
-            row: sample_row(),
+            row: Box::new(sample_row()),
         };
         let json = serde_json::to_value(&upsert).unwrap();
         assert_eq!(json["type"], "upsert");

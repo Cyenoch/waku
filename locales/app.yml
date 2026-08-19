@@ -823,6 +823,8 @@ models.reasoning:
   en: Reasoning
 models.service_tier:
   en: Service Tier
+models.fast_mode:
+  en: Fast Mode
 models.catalog_loading:
   en: Loading model catalog…
 models.catalog_error:

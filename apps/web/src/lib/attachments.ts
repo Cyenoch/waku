@@ -82,18 +82,16 @@ export function promptInputFromAttachments(
       mime: attachment.is_image ? sourceImageMime(attachment.name) : null,
     }
   })
-  const imageAttachments: PromptImageRef[] = attachments.flatMap((attachment) => {
-    if (!attachment.is_image) return []
+  const imageAttachments: PromptImageRef[] = []
+  for (const attachment of attachments) {
+    if (!attachment.is_image) continue
     const reference = attachment.blob_reference
-    if (!reference) return []
-    if (reference.startsWith('wakuwaku-blob:')) {
-      return [{ kind: 'blob' as const, reference }]
+    if (reference?.startsWith('wakuwaku-blob:')) {
+      imageAttachments.push({ kind: 'blob', reference })
+    } else if (reference?.startsWith('wakuwaku-attachment:')) {
+      imageAttachments.push({ kind: 'attachment', reference })
     }
-    if (reference.startsWith('wakuwaku-attachment:')) {
-      return [{ kind: 'attachment' as const, reference }]
-    }
-    return []
-  })
+  }
   return {
     text,
     ...(displayText !== undefined && displayText !== text ? { displayText } : {}),

@@ -59,8 +59,8 @@ pub use protocol::{
 pub use provider::{
     ApiFormat, AuthEndpoints, AuthMethod, AuthPhase, CatalogSource, ExternalProvider, LoginMethod,
     ModelCapabilities, ModelCatalog, ModelCatalogEntry, ProviderAuthStatus, ProviderId,
-    ProviderLimits, ProviderPreset, SecretString, ServiceTier, TransportProfile, UnsupportedReason,
-    is_pinned_xai_token_endpoint, xai_oauth_seed,
+    ProviderLimits, ProviderPreset, ReasoningEffortOption, SecretString, ServiceTier,
+    TransportProfile, UnsupportedReason, is_pinned_xai_token_endpoint, xai_oauth_seed,
 };
 pub use settings::DaemonSettings;
 pub use trajectory::{

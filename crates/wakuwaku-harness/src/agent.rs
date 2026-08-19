@@ -765,10 +765,7 @@ fn emit_finished_entry(
     trace: &mut impl TraceSink,
     entry: &BatchEntry,
 ) {
-    let BatchEntry::Finished {
-        result, timing, ..
-    } = entry
-    else {
+    let BatchEntry::Finished { result, timing, .. } = entry else {
         unreachable!("only a completed tool entry has a result");
     };
     sink(AgentEvent::ToolFinished {
@@ -968,7 +965,6 @@ fn result_preview(result: &ToolResult) -> Arc<str> {
     }
     Arc::from(text)
 }
-
 
 pub fn estimate_tokens(messages: &[Message]) -> u64 {
     let mut total = 0u64;

@@ -68,10 +68,7 @@ fn emit_scripted(
 ) {
     if events.is_empty() {
         sink(StreamEvent::Start);
-        sink(StreamEvent::Done {
-            usage,
-            stop_reason,
-        });
+        sink(StreamEvent::Done { usage, stop_reason });
         return;
     }
     for event in events {
@@ -558,7 +555,16 @@ async fn steering_id_is_traced_before_the_next_request() {
         .expect("steering id");
     let started = events
         .iter()
-        .position(|event| matches!(event, TraceEvent::RequestStart { visible_turn: 1, step: 1, .. }))
+        .position(|event| {
+            matches!(
+                event,
+                TraceEvent::RequestStart {
+                    visible_turn: 1,
+                    step: 1,
+                    ..
+                }
+            )
+        })
         .expect("request");
     assert!(injected < started);
 }

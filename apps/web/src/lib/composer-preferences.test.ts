@@ -3,6 +3,7 @@ import {
   readComposerPreferences,
   rememberedModelTraits,
   rememberComposerSession,
+  selectedModelTraits,
   writeComposerPreferences,
 } from './composer-preferences'
 
@@ -59,6 +60,24 @@ describe('composer preferences', () => {
     const preferences = readComposerPreferences(storage, 'ws://first')
     expect(preferences.lastServiceTier).toBeNull()
     expect(rememberedModelTraits(preferences, 'custom-endpoint', 'model-a')?.serviceTier).toBeNull()
+  })
+
+  test('gates remembered traits with target model metadata', () => {
+    const model = {
+      supported: true,
+      capabilities: { serviceTier: true, reasoningEffort: true, reasoningSummary: false, sampling: false },
+      apiFormat: 'openAiResponses' as const,
+      reasoningEfforts: [
+        { id: 'low', providerValue: 'quick-pass', label: 'Quick Pass' },
+        { id: 'high', providerValue: 'deep-thought', label: 'Deep Thought' },
+      ],
+      defaultReasoningEffort: 'high',
+    }
+    expect(selectedModelTraits(model, {
+      reasoningEffort: 'medium',
+      serviceTier: 'priority',
+      contextWindow: '1m',
+    })).toEqual({ reasoningEffort: 'high', serviceTier: 'priority', contextWindow: '1m' })
   })
 })
 

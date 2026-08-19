@@ -626,12 +626,7 @@ mod tests {
     #[test]
     fn strip_injects_orphan_results_and_drops_empty_error_shells() {
         let mut messages = vec![
-            assistant(
-                "anthropic",
-                "claude-opus",
-                Vec::new(),
-                Some("429"),
-            ),
+            assistant("anthropic", "claude-opus", Vec::new(), Some("429")),
             assistant_with_calls(&["orphan_1"]),
         ];
         let count = strip_foreign_dialects(

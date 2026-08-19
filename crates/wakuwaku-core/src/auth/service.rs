@@ -933,6 +933,27 @@ impl AuthService {
             .or_else(|| self.runtime.persist.get_catalog(provider.as_str()))
     }
 
+    pub fn resolve_reasoning_effort(
+        &self,
+        provider: &ProviderId,
+        model: Option<&str>,
+        provider_value: Option<&str>,
+    ) -> Option<(String, String)> {
+        let selected = provider_value?.trim();
+        if selected.is_empty() {
+            return None;
+        }
+        let catalog = self.cached_catalog(provider)?;
+        let entry = select_entry(&catalog, model)?;
+        if !entry.supported || !entry.capabilities.reasoning_effort {
+            return None;
+        }
+        entry.reasoning_efforts.iter().find_map(|effort| {
+            (effort.id == selected || effort.provider_value == selected)
+                .then(|| (effort.id.clone(), effort.provider_value.clone()))
+        })
+    }
+
     pub fn list_models(&self, provider: &ProviderId) -> Result<ModelCatalog, AuthError> {
         let endpoint = self.endpoint_for(provider)?;
         let cache_key = AuthPersist::catalog_cache_key(provider, &endpoint);
@@ -1236,6 +1257,24 @@ mod tests {
                     context_window: 128_000,
                     max_output_tokens: 8_192,
                     reasoning: true,
+                    reasoning_efforts: vec![
+                        wakuwaku_protocol::ReasoningEffortOption {
+                            id: "low".into(),
+                            provider_value: "low".into(),
+                            label: "Low".into(),
+                        },
+                        wakuwaku_protocol::ReasoningEffortOption {
+                            id: "medium".into(),
+                            provider_value: "balanced".into(),
+                            label: "Balanced".into(),
+                        },
+                        wakuwaku_protocol::ReasoningEffortOption {
+                            id: "high".into(),
+                            provider_value: "high".into(),
+                            label: "High".into(),
+                        },
+                    ],
+                    default_reasoning_effort: Some("high".into()),
                     capabilities: ModelCapabilities::xai(true),
                     supported: true,
                     unsupported_reason: None,
@@ -1244,11 +1283,20 @@ mod tests {
                 1,
             )
             .unwrap();
+
         let mut runtime = AuthRuntime::testing(&directory, store, AuthEndpoints::production());
         runtime
             .model_base_overrides
             .insert("xai".into(), "http://127.0.0.1:1/v1".into());
         let service = AuthService::new(runtime).unwrap();
+        assert_eq!(
+            service.resolve_reasoning_effort(&provider, Some("grok-4.5"), Some("medium")),
+            Some(("medium".into(), "balanced".into()))
+        );
+        assert_eq!(
+            service.resolve_reasoning_effort(&provider, Some("grok-4.5"), Some("stale")),
+            None
+        );
         let catalog = service.refresh_models(&provider).unwrap();
         assert_eq!(catalog.source, CatalogSource::Cache);
         assert_eq!(catalog.models[0].id, "grok-4.5");
@@ -1442,6 +1490,8 @@ mod tests {
                     context_window: 128_000,
                     max_output_tokens: 8_192,
                     reasoning: false,
+                    reasoning_efforts: Vec::new(),
+                    default_reasoning_effort: None,
                     capabilities: ModelCapabilities::openai_compatible(
                         wakuwaku_protocol::ApiFormat::OpenAiResponses,
                     ),
@@ -1485,6 +1535,8 @@ mod tests {
                     context_window: 128_000,
                     max_output_tokens: 8_192,
                     reasoning: false,
+                    reasoning_efforts: Vec::new(),
+                    default_reasoning_effort: None,
                     capabilities: ModelCapabilities::openai_compatible(
                         wakuwaku_protocol::ApiFormat::OpenAiChat,
                     ),

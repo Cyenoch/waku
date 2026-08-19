@@ -22,10 +22,25 @@ pub struct ModelCatalogEntry {
     pub context_window: u64,
     pub max_output_tokens: u64,
     pub reasoning: bool,
+    /// Model-specific reasoning choices, in provider preference order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<ReasoningEffortOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_effort: Option<String>,
     pub capabilities: ModelCapabilities,
     pub supported: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsupported_reason: Option<UnsupportedReason>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningEffortOption {
+    /// Stable WakuWaku selection persisted in a session.
+    pub id: String,
+    /// Exact provider value emitted at the request boundary.
+    pub provider_value: String,
+    pub label: String,
 }
 
 impl ModelCatalogEntry {
@@ -34,6 +49,13 @@ impl ModelCatalogEntry {
             context_window: self.context_window,
             max_output_tokens: self.max_output_tokens,
         }
+    }
+
+    pub fn provider_reasoning_effort(&self, id: &str) -> Option<&str> {
+        self.reasoning_efforts
+            .iter()
+            .find(|effort| effort.id == id)
+            .map(|effort| effort.provider_value.as_str())
     }
 }
 
@@ -68,6 +90,7 @@ pub fn parse_openai_models_envelope(
             default_format,
             transport,
         );
+        apply_reasoning_metadata(&mut entry, row);
         if is_openai_non_chat_model(id) {
             entry.supported = false;
             entry.unsupported_reason = Some(UnsupportedReason::NonChat);
@@ -164,12 +187,7 @@ pub fn parse_codex_models_envelope(
         let context_window =
             positive_u64(row, "context_window").unwrap_or_else(|| default_codex_context(id));
         let max_output_tokens = context_window.min(128_000);
-        let reasoning = row.get("default_reasoning_level").is_some()
-            || row
-                .get("supported_reasoning_levels")
-                .and_then(Value::as_array)
-                .is_some_and(|levels| !levels.is_empty());
-        models.push(ModelCatalogEntry {
+        let mut entry = ModelCatalogEntry {
             id: id.to_owned(),
             name: name.to_owned(),
             provider: provider.clone(),
@@ -178,11 +196,15 @@ pub fn parse_codex_models_envelope(
             base_url: base_url.to_owned(),
             context_window,
             max_output_tokens,
-            reasoning,
+            reasoning: false,
+            reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
             capabilities: ModelCapabilities::codex(),
             supported: true,
             unsupported_reason: None,
-        });
+        };
+        apply_reasoning_metadata(&mut entry, row);
+        models.push(entry);
     }
     Ok(models)
 }
@@ -228,6 +250,8 @@ fn standard_entry(
         context_window: limits.context_window,
         max_output_tokens: limits.max_output_tokens,
         reasoning: false,
+        reasoning_efforts: Vec::new(),
+        default_reasoning_effort: None,
         capabilities,
         supported: true,
         unsupported_reason: None,
@@ -247,6 +271,94 @@ fn string_field<'a>(row: &'a Value, field: &str) -> Option<&'a str> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn reasoning_efforts(row: &Value, entry: &ModelCatalogEntry) -> Vec<ReasoningEffortOption> {
+    let Some(levels) = row
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut efforts = Vec::with_capacity(levels.len());
+    for level in levels {
+        let provider_value = level
+            .as_str()
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+            .or_else(|| string_field(level, "effort"));
+        if let Some(provider_value) = provider_value {
+            let id = normalize_reasoning_effort(provider_value, entry);
+            if efforts
+                .iter()
+                .any(|candidate: &ReasoningEffortOption| candidate.id == id)
+            {
+                continue;
+            }
+            efforts.push(ReasoningEffortOption {
+                id,
+                provider_value: provider_value.to_owned(),
+                label: string_field(level, "description")
+                    .unwrap_or(provider_value)
+                    .to_owned(),
+            });
+        }
+    }
+    efforts
+}
+
+fn default_reasoning_effort(
+    row: &Value,
+    entry: &ModelCatalogEntry,
+    efforts: &[ReasoningEffortOption],
+) -> Option<String> {
+    let provider_value = string_field(row, "default_reasoning_level")?;
+    let id = normalize_reasoning_effort(provider_value, entry);
+    efforts.iter().any(|effort| effort.id == id).then_some(id)
+}
+
+fn normalize_reasoning_effort(value: &str, entry: &ModelCatalogEntry) -> String {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', '_', ' '], "");
+    match normalized.as_str() {
+        "none" | "off" | "disabled" => "none".to_owned(),
+        "minimal" | "min" => "minimal".to_owned(),
+        "low" | "quick" | "quickpass" | "fast" => "low".to_owned(),
+        "medium" | "med" | "balanced" => "medium".to_owned(),
+        "high" | "deep" | "deepthought" => "high".to_owned(),
+        "xhigh" | "extrahigh" | "veryhigh" | "ultra" => "extraHigh".to_owned(),
+        "max" | "maximum" => "max".to_owned(),
+        _ => format!(
+            "custom:{}:{}:{}",
+            entry.provider.as_str(),
+            entry.id,
+            provider_value_component(value)
+        ),
+    }
+}
+
+fn provider_value_component(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn apply_reasoning_metadata(entry: &mut ModelCatalogEntry, row: &Value) {
+    let efforts = reasoning_efforts(row, entry);
+    entry.default_reasoning_effort = default_reasoning_effort(row, entry, &efforts);
+    entry.reasoning_efforts = efforts;
+    entry.reasoning |= !entry.reasoning_efforts.is_empty();
 }
 
 fn positive_u64(row: &Value, field: &str) -> Option<u64> {
@@ -362,7 +474,7 @@ pub fn apply_xai_policy(mut entry: ModelCatalogEntry, oauth: bool) -> ModelCatal
     entry.api_format = ApiFormat::OpenAiResponses;
     entry.transport = TransportProfile::Standard;
     entry.capabilities = ModelCapabilities::xai(effort);
-    entry.reasoning = effort || entry.reasoning;
+    entry.reasoning |= effort;
     if oauth {
         entry.max_output_tokens = entry.context_window.clamp(1, 64_000);
     }
@@ -416,6 +528,8 @@ pub fn xai_oauth_seed(base_url: &str) -> Vec<ModelCatalogEntry> {
             context_window: *context,
             max_output_tokens: (*context).min(64_000),
             reasoning: *reasoning,
+            reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
             capabilities: ModelCapabilities::xai(*effort),
             supported: true,
             unsupported_reason: None,
@@ -465,12 +579,22 @@ mod tests {
     }
 
     #[test]
-    fn codex_parser_drops_hidden_and_falls_back_context() {
+    fn codex_parser_preserves_reasoning_choices_and_default() {
         let models = parse_codex_models_envelope(
             &json!({
                 "models": [
                     { "slug": "gpt-5.4", "display_name": "GPT-5.4", "visibility": "hide" },
-                    { "id": "gpt-5.6-luna", "display_name": "Luna" }
+                    {
+                        "id": "gpt-5.6-luna",
+                        "display_name": "Luna",
+                        "default_reasoning_level": "medium",
+                        "supported_reasoning_levels": [
+                            { "effort": "low", "description": "Fast" },
+                            { "effort": "medium", "description": "Balanced" },
+                            "high",
+                            { "effort": "medium" }
+                        ]
+                    }
                 ]
             }),
             ProviderId::new(ProviderId::OPENAI_CODEX),
@@ -482,8 +606,103 @@ mod tests {
         assert_eq!(models[0].context_window, 372_000);
         assert_eq!(models[0].transport, TransportProfile::Codex);
         assert_eq!(models[0].api_format, ApiFormat::OpenAiResponses);
+        assert_eq!(
+            models[0].reasoning_efforts,
+            [
+                ReasoningEffortOption {
+                    id: "low".into(),
+                    provider_value: "low".into(),
+                    label: "Fast".into(),
+                },
+                ReasoningEffortOption {
+                    id: "medium".into(),
+                    provider_value: "medium".into(),
+                    label: "Balanced".into(),
+                },
+                ReasoningEffortOption {
+                    id: "high".into(),
+                    provider_value: "high".into(),
+                    label: "high".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            models[0].default_reasoning_effort.as_deref(),
+            Some("medium")
+        );
         assert!(!models[0].capabilities.sampling);
         assert!(!models[0].capabilities.service_tier);
+    }
+
+    #[test]
+    fn openai_parser_normalizes_provider_specific_effort_names() {
+        let models = parse_openai_models_envelope(
+            &json!({
+                "data": [{
+                    "id": "provider-model",
+                    "default_reasoning_level": "deep-thought",
+                    "supported_reasoning_levels": [
+                        { "effort": "quick-pass", "description": "Quick Pass" },
+                        { "effort": "deep-thought", "description": "Deep Thought" }
+                    ]
+                }]
+            }),
+            ProviderId::new("custom-provider"),
+            "https://example.test/v1",
+            ApiFormat::OpenAiResponses,
+            TransportProfile::Standard,
+        )
+        .unwrap();
+        assert_eq!(
+            models[0].reasoning_efforts,
+            [
+                ReasoningEffortOption {
+                    id: "low".into(),
+                    provider_value: "quick-pass".into(),
+                    label: "Quick Pass".into(),
+                },
+                ReasoningEffortOption {
+                    id: "high".into(),
+                    provider_value: "deep-thought".into(),
+                    label: "Deep Thought".into(),
+                },
+            ]
+        );
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            models[0].provider_reasoning_effort("low"),
+            Some("quick-pass")
+        );
+        assert_eq!(
+            models[0].provider_reasoning_effort("high"),
+            Some("deep-thought")
+        );
+    }
+
+    #[test]
+    fn unknown_provider_effort_gets_model_scoped_canonical_id() {
+        let models = parse_openai_models_envelope(
+            &json!({"data": [{
+                "id": "provider-model",
+                "default_reasoning_level": "cerebral",
+                "supported_reasoning_levels": [{"effort": "cerebral", "description": "Cerebral"}]
+            }]}),
+            ProviderId::new("custom-provider"),
+            "https://example.test/v1",
+            ApiFormat::OpenAiResponses,
+            TransportProfile::Standard,
+        )
+        .unwrap();
+        let canonical = "custom:custom-provider:provider-model:cerebral";
+        assert_eq!(models[0].reasoning_efforts[0].id, canonical);
+        assert_eq!(
+            models[0].default_reasoning_effort.as_deref(),
+            Some(canonical)
+        );
+        assert_eq!(
+            models[0].provider_reasoning_effort(canonical),
+            Some("cerebral")
+        );
     }
 
     #[test]
@@ -534,6 +753,8 @@ mod tests {
         entry = apply_xai_policy(entry, false);
         assert!(!entry.supported);
         assert_eq!(entry.unsupported_reason, Some(UnsupportedReason::NonChat));
+        assert!(entry.reasoning_efforts.is_empty());
+        assert!(entry.default_reasoning_effort.is_none());
     }
 
     #[test]
@@ -596,6 +817,7 @@ mod tests {
     #[test]
     fn xai_oauth_seed_lists_curated_ids_first() {
         let seed = xai_oauth_seed("https://api.x.ai/v1");
+        assert!(seed.iter().all(|model| model.reasoning_efforts.is_empty()));
         assert_eq!(seed[0].id, "grok-build");
         assert!(seed.iter().any(|model| model.id == "grok-4.5"));
         assert!(

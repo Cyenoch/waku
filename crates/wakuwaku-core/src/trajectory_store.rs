@@ -53,7 +53,7 @@ type Ack = Sender<Result<i64, TrajectoryError>>;
 enum WriterCommand {
     Ensure {
         session_id: Uuid,
-        source: TrajectoryInitSource,
+        source: Box<TrajectoryInitSource>,
         ack: Ack,
     },
     Submit {
@@ -219,7 +219,7 @@ impl TrajectoryWriter {
     ) -> Result<i64, TrajectoryError> {
         self.call(|ack| WriterCommand::Ensure {
             session_id,
-            source,
+            source: Box::new(source),
             ack,
         })
     }
@@ -335,8 +335,8 @@ impl TrajectoryWriter {
 }
 
 impl crate::trajectory::TrajectorySubmit for TrajectoryWriter {
-    fn submit_batch(&self, batch: crate::trajectory::TrajectoryBatch) {
-        let _ = self.submit(batch);
+    fn submit_batch(&self, batch: crate::trajectory::TrajectoryBatch) -> Result<(), String> {
+        self.submit(batch).map_err(|error| error.to_string())
     }
 
     fn flush_session(&self, session_id: Uuid) -> Result<i64, String> {
@@ -375,7 +375,8 @@ fn writer_loop(
                 source,
                 ack,
             } => {
-                let result = ensure_initialized(&connection, session_id, source, &revisions, &live);
+                let result =
+                    ensure_initialized(&connection, session_id, *source, &revisions, &live);
                 let _ = ack.send(result);
             }
             WriterCommand::Submit {
@@ -473,11 +474,11 @@ fn apply_batch(
     live: &LiveSink,
 ) -> Result<i64, TrajectoryError> {
     let session_id = batch.session_id;
-    if load_meta(connection, session_id)?.is_none() {
-        if let Err(error) = insert_skeleton(connection, session_id, TrajectoryAvailability::Exact) {
-            revisions.fail(session_id, error.to_string());
-            return Err(error);
-        }
+    if load_meta(connection, session_id)?.is_none()
+        && let Err(error) = insert_skeleton(connection, session_id, TrajectoryAvailability::Exact)
+    {
+        revisions.fail(session_id, error.to_string());
+        return Err(error);
     }
     match persist_ops(connection, &batch, promote_exact) {
         Ok(meta) => {
@@ -1383,7 +1384,10 @@ mod tests {
         state.sessions[0].push_message(MessageRole::Assistant, "legacy assistant");
         let session = state.sessions[0].clone();
         writer
-            .ensure_initialized(session_id, TrajectoryInitSource::LegacyPartial(session))
+            .ensure_initialized(
+                session_id,
+                TrajectoryInitSource::LegacyPartial(Box::new(session)),
+            )
             .unwrap();
         let page = writer.page(session_id, None, Some(50), None).unwrap();
         assert_eq!(
@@ -1489,6 +1493,7 @@ mod tests {
             session_id,
             TrajectoryUserInput {
                 text: "hello".into(),
+                display_text: Some("hello".into()),
                 ..TrajectoryUserInput::default()
             },
         );
@@ -1500,6 +1505,12 @@ mod tests {
             let gate = Arc::clone(&gate);
             std::thread::spawn(move || {
                 let mut sink = handoff_sink;
+                sink.emit(TraceEvent::PromptPrepared {
+                    system_prompt: Some("system".into()),
+                    tools_json: Arc::from("[]"),
+                    options_json: Arc::from("{}"),
+                    model_hint: "grok-4.5".into(),
+                });
                 sink.emit(TraceEvent::RequestStart {
                     visible_turn: 1,
                     step: 1,
@@ -1520,10 +1531,17 @@ mod tests {
                         text: "done".into(),
                         signature: None,
                     })],
-                    model: "m".into(),
-                    provider: "p".into(),
-                    response_id: None,
-                    usage: Usage::default(),
+                    model: "grok-4.5".into(),
+                    provider: "opencode-go".into(),
+                    response_id: Some("response-native".into()),
+                    usage: Usage {
+                        input: 741,
+                        output: 23,
+                        cache_read: 128,
+                        cache_write: 0,
+                        reasoning: Some(16),
+                        total_tokens: 908,
+                    },
                     stop_reason: StopReason::Stop,
                     error_message: None,
                 })));
@@ -1583,6 +1601,22 @@ mod tests {
             }),
             "TurnFinished flush waits for the completion commit"
         );
+        let request = page
+            .records
+            .iter()
+            .find(|record| record.kind == TrajectoryKind::Request)
+            .expect("request row");
+        assert!(request.ttft_ms.is_some());
+        assert!(request.duration_ms.is_some());
+        let assistant = page
+            .records
+            .iter()
+            .find(|record| record.kind == TrajectoryKind::Assistant)
+            .expect("assistant row");
+        assert_eq!(assistant.preview, "done");
+        assert!(assistant.detail_json.contains("\"input\":741"));
+        assert!(assistant.detail_json.contains("\"reasoning\":16"));
+        assert_eq!(page.availability, TrajectoryAvailability::Exact);
         cleanup(directory);
     }
 

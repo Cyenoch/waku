@@ -23,6 +23,9 @@ const READ_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_BUFFERED_EVENTS_PER_RUNTIME: usize = 4096;
 
+type RuntimeKey = (Uuid, Uuid);
+type SessionSubscribers = HashMap<RuntimeKey, Vec<Sender<SequencedEvent>>>;
+
 enum Outgoing {
     Message(Box<ClientMessage>),
     Shutdown,
@@ -31,8 +34,8 @@ enum Outgoing {
 struct ClientInner {
     outgoing: Sender<Outgoing>,
     pending: Mutex<HashMap<Uuid, Sender<Result<ResponsePayload, RpcError>>>>,
-    sessions: Mutex<HashMap<(Uuid, Uuid), Vec<Sender<SequencedEvent>>>>,
-    pending_events: Mutex<HashMap<(Uuid, Uuid), VecDeque<SequencedEvent>>>,
+    sessions: Mutex<SessionSubscribers>,
+    pending_events: Mutex<HashMap<RuntimeKey, VecDeque<SequencedEvent>>>,
     task_state_subscribers: Mutex<Vec<Sender<u64>>>,
     last_sequences: Mutex<HashMap<(Uuid, Uuid), LastSequence>>,
     disconnected: AtomicBool,
@@ -127,11 +130,9 @@ impl DaemonClient {
         let mut sessions = self.inner.sessions.lock();
         let first = !sessions.contains_key(&key);
         sessions.entry(key).or_default().push(events.clone());
-        if first {
-            if let Some(buffered) = self.inner.pending_events.lock().remove(&key) {
-                for event in buffered {
-                    let _ = events.send(event);
-                }
+        if first && let Some(buffered) = self.inner.pending_events.lock().remove(&key) {
+            for event in buffered {
+                let _ = events.send(event);
             }
         }
         receiver
@@ -338,6 +339,7 @@ fn run_client(
                         }
                     }
                     ServerMessage::Event(event) => {
+                        let event = *event;
                         let should_deliver = {
                             let mut sequences = inner.last_sequences.lock();
                             let previous = sequences

@@ -53,12 +53,14 @@ export function reduceRuntimeEvent(
   processExitError: string | null = null,
 ): RuntimeEventResult {
   const session = clone(current)
-  const { kind, payload } = wire.event
   const result: RuntimeEventResult = {
     session,
     settled: false,
     removeRuntime: false,
   }
+  if (wire.payload.type !== 'driver') return result
+  const { kind, payload } = wire.payload.event
+
 
   session.runtime_event_cursor = {
     runtime_id: wire.runtimeId,

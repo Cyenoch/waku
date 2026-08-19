@@ -233,4 +233,3 @@ mod tests {
         assert_eq!(assistant.provider, "p");
     }
 }
-

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { nextModelPickerHighlight, selectedModelPickerIndex } from './model-picker-presentation'
-import { serviceTierForModel } from './service-tier'
+import { fastModeEnabled, serviceTierForModel, toggleFastMode } from './service-tier'
 
 describe('model picker presentation', () => {
   test('selects a configured endpoint model', () => {
@@ -22,5 +22,10 @@ describe('catalog service tier gating', () => {
     expect(serviceTierForModel(supported, 'priority')).toBe('priority')
     expect(serviceTierForModel(unsupported, 'priority')).toBeNull()
     expect(serviceTierForModel(undefined, 'priority')).toBeNull()
+    expect(fastModeEnabled(supported, 'priority')).toBe(true)
+    expect(fastModeEnabled(supported, 'default')).toBe(false)
+    expect(toggleFastMode(supported, null)).toBe('priority')
+    expect(toggleFastMode(supported, 'priority')).toBeNull()
+    expect(toggleFastMode(unsupported, 'priority')).toBeNull()
   })
 })

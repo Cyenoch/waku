@@ -2951,16 +2951,16 @@ mod tests {
 
         assert_eq!(
             usage_project_path(Path::new("/Users/developer/dev/wakuwaku"), Some(home)),
-            "~/dev/waku"
+            "~/dev/wakuwaku"
         );
         assert_eq!(usage_project_path(home, Some(home)), "~");
         assert_eq!(
             usage_project_path(Path::new("/Users/developer-2/wakuwaku"), Some(home)),
-            "/Users/developer-2/waku"
+            "/Users/developer-2/wakuwaku"
         );
         assert_eq!(
             usage_project_path(Path::new("/Volumes/work/wakuwaku"), Some(home)),
-            "/Volumes/work/waku"
+            "/Volumes/work/wakuwaku"
         );
     }
 

@@ -94,63 +94,57 @@ impl Waku {
                         }
                     }
                     "enter" | "space" => {
-                        if let Some(idx) = state.selected_row_index {
-                            if let Some(row) = state.ledger_rows.get(idx) {
-                                match &row.kind {
-                                    TrajectoryLedgerRowKind::TurnDivider { turn_count, .. } => {
-                                        let turn = *turn_count;
-                                        state.toggle_turn_fold(turn);
+                        if let Some(idx) = state.selected_row_index
+                            && let Some(row) = state.ledger_rows.get(idx)
+                        {
+                            match &row.kind {
+                                TrajectoryLedgerRowKind::TurnDivider { turn_count, .. } => {
+                                    let turn = *turn_count;
+                                    state.toggle_turn_fold(turn);
+                                    cx.notify();
+                                }
+                                _ => {
+                                    if let Some(record_id) = row.record_id {
+                                        state.select_record(record_id);
                                         cx.notify();
-                                    }
-                                    _ => {
-                                        if let Some(record_id) = row.record_id {
-                                            state.select_record(record_id);
-                                            cx.notify();
-                                        }
                                     }
                                 }
                             }
                         }
                     }
                     "left" => {
-                        if let Some(idx) = state.selected_row_index {
-                            if let Some(row) = state.ledger_rows.get(idx) {
-                                if let TrajectoryLedgerRowKind::TurnDivider {
-                                    turn_count,
-                                    collapsed: false,
-                                    ..
-                                } = row.kind
-                                {
-                                    state.toggle_turn_fold(turn_count);
-                                    cx.notify();
-                                }
-                            }
+                        if let Some(idx) = state.selected_row_index
+                            && let Some(row) = state.ledger_rows.get(idx)
+                            && let TrajectoryLedgerRowKind::TurnDivider {
+                                turn_count,
+                                collapsed: false,
+                                ..
+                            } = row.kind
+                        {
+                            state.toggle_turn_fold(turn_count);
+                            cx.notify();
                         }
                     }
                     "right" => {
-                        if let Some(idx) = state.selected_row_index {
-                            if let Some(row) = state.ledger_rows.get(idx) {
-                                if let TrajectoryLedgerRowKind::TurnDivider {
-                                    turn_count,
-                                    collapsed: true,
-                                    ..
-                                } = row.kind
-                                {
-                                    state.toggle_turn_fold(turn_count);
-                                    cx.notify();
-                                }
-                            }
+                        if let Some(idx) = state.selected_row_index
+                            && let Some(row) = state.ledger_rows.get(idx)
+                            && let TrajectoryLedgerRowKind::TurnDivider {
+                                turn_count,
+                                collapsed: true,
+                                ..
+                            } = row.kind
+                        {
+                            state.toggle_turn_fold(turn_count);
+                            cx.notify();
                         }
                     }
                     _ => {}
                 }
             }));
 
-        if inspector_open {
-            if let Some(rec_id) = selected_record_id {
-                let inspector = self.render_trajectory_inspector(session_id, rec_id, true, cx);
-                return container.child(inspector).into_any_element();
-            }
+        if inspector_open && let Some(rec_id) = selected_record_id {
+            let inspector = self.render_trajectory_inspector(session_id, rec_id, true, cx);
+            return container.child(inspector).into_any_element();
         }
 
         let toolbar = self.render_trajectory_toolbar(session_id, cx);
@@ -656,7 +650,7 @@ impl Waku {
             && !state.loading_older
             && state.list_state.logical_scroll_top().item_ix <= 1
         {
-            let older_cursor = state.older_cursor.clone();
+            let older_cursor = state.older_cursor;
             drop(sessions);
             self.load_older_trajectory_records(session_id, older_cursor, cx);
         }
@@ -744,14 +738,13 @@ impl Waku {
                     }) = result
                     {
                         let anchor_id = state.prepend_older_page(rows, older, has_older);
-                        if let Some(anchor) = anchor_id {
-                            if let Some(new_idx) = state
+                        if let Some(anchor) = anchor_id
+                            && let Some(new_idx) = state
                                 .ledger_rows
                                 .iter()
                                 .position(|r| r.record_id == Some(anchor))
-                            {
-                                state.list_state.scroll_to_reveal_item(new_idx);
-                            }
+                        {
+                            state.list_state.scroll_to_reveal_item(new_idx);
                         }
                     } else {
                         state.loading_older = false;

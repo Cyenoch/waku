@@ -915,7 +915,7 @@ mod tests {
 
     #[test]
     fn transcript_file_links_route_by_the_active_workspace() {
-        let workspace = Path::new("/Users/egoist/dev/waku");
+        let workspace = Path::new("/Users/egoist/dev/wakuwaku");
 
         assert_eq!(
             transcript_link_route(
@@ -1775,10 +1775,10 @@ impl Waku {
         if matches!(&surface, RightPanelSurface::File(_)) {
             self.ensure_initial_right_panel_file_editor_width();
         }
-        if surface == RightPanelSurface::Trajectory {
-            if let Some(session) = self.selected_session() {
-                self.ensure_trajectory_session_state(session.id, cx);
-            }
+        if surface == RightPanelSurface::Trajectory
+            && let Some(session) = self.selected_session()
+        {
+            self.ensure_trajectory_session_state(session.id, cx);
         }
         if surface == RightPanelSurface::Diff {
             if reusable_index.is_none() {

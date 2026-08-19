@@ -629,14 +629,14 @@ pub(crate) fn to_io_error(error: impl std::fmt::Display) -> io::Error {
 pub fn configure_sqlite(connection: &Connection) -> io::Result<()> {
     connection
         .execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
         )
         .map_err(to_io_error)
 }
 
 pub fn configure_sqlite_read_only(connection: &Connection) -> io::Result<()> {
     connection
-        .execute_batch("PRAGMA foreign_keys = ON;")
+        .execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
         .map_err(to_io_error)
 }
 

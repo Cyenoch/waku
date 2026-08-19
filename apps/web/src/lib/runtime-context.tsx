@@ -32,6 +32,7 @@ import {
   type TaskState,
 } from './daemon-api'
 import { serviceTierForModel } from './service-tier'
+import { reasoningEffortForModel } from './reasoning-effort'
 import { promptInputFromAttachments } from './attachments'
 import {
   reduceRuntimeEvent,
@@ -294,7 +295,16 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
                 mode: session.runtime_mode,
                 interactionMode: session.interaction_mode,
                 model: session.model ?? null,
-                reasoningEffort: session.reasoning_effort ?? null,
+                reasoningEffort: reasoningEffortForModel(
+                  config
+                    ? queryClient
+                      .getQueryData<ModelCatalog>(
+                        daemonKeys.models(config.address, session.provider),
+                      )
+                      ?.models.find((model) => model.id === session.model)
+                    : undefined,
+                  session.reasoning_effort,
+                ),
                 serviceTier: serviceTierForModel(
                   config
                     ? queryClient
@@ -448,16 +458,18 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       entries.current.set(session.id, entry)
       setRuntimes((current) => ({ ...current, [session.id]: publicRuntime(entry) }))
       const unsubscribe = client.subscribe(session.id, runtimeId, (event) => {
+        if (event.payload.type !== 'driver') return
+        const driverEvent = event.payload.event
         const key = daemonKeys.session(config.address, session.id)
         let current = queryClient.getQueryData<AgentSession>(key)
         if (!current || runtimeEventAlreadyApplied(current, event)) return
-        if (event.event.kind === 'connected' || event.event.kind === 'turnStarted' || event.event.kind === 'turnFinished') {
+        if (driverEvent.kind === 'connected' || driverEvent.kind === 'turnStarted' || driverEvent.kind === 'turnFinished') {
           entry.lastDriverError = null
-        } else if (event.event.kind === 'error' && typeof event.event.payload === 'string') {
-          entry.lastDriverError = event.event.payload
+        } else if (driverEvent.kind === 'error' && typeof driverEvent.payload === 'string') {
+          entry.lastDriverError = driverEvent.payload
         }
-        if (event.event.kind === 'backgroundWork') {
-          const backgroundEvent = decodeBackgroundWorkEvent(event.event.payload)
+        if (driverEvent.kind === 'backgroundWork') {
+          const backgroundEvent = decodeBackgroundWorkEvent(driverEvent.payload)
           if (backgroundEvent) {
             setBackgroundWork((current) => ({
               ...current,
@@ -465,8 +477,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             }))
           }
         }
-        if (event.event.kind === 'steerAccepted') {
-          const payload = event.event.payload as { message?: string }
+        if (driverEvent.kind === 'steerAccepted') {
+          const payload = driverEvent.payload as { message?: string }
           const pending = pendingSteers.current.get(session.id)?.shift()
           if (pending) {
             const turnId = current.turns.at(-1)?.id ?? null
@@ -490,7 +502,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
               ],
             }
           }
-        } else if (event.event.kind === 'steerRejected') {
+        } else if (driverEvent.kind === 'steerRejected') {
           const pending = pendingSteers.current.get(session.id)?.shift()
           if (pending) {
             current = queueSubmission(
@@ -672,7 +684,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
               mode: session.runtime_mode,
               interactionMode: session.interaction_mode,
               model: session.model ?? null,
-              reasoningEffort: session.reasoning_effort ?? null,
+              reasoningEffort: reasoningEffortForModel(
+                catalog?.models.find((model) => model.id === session.model),
+                session.reasoning_effort,
+              ),
               serviceTier: serviceTierForModel(
                 catalog?.models.find((model) => model.id === session.model),
                 session.service_tier,
@@ -1128,7 +1143,7 @@ function syntheticEvent(
     runtimeId,
     epoch: 'local',
     sequence: 0,
-    event: { kind, payload: payload as never },
+    payload: { type: 'driver', event: { kind, payload: payload as never } },
   }
 }
 

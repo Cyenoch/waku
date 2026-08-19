@@ -702,6 +702,22 @@ mod tests {
     }
 
     #[test]
+    fn request_options_forward_provider_reasoning_and_fast_tier_verbatim() {
+        let body = build_body(
+            &crate::model::PromptContext::default(),
+            "provider-model",
+            &crate::model::RequestOptions {
+                reasoning: Some("provider-deep-thought".into()),
+                service_tier: Some(wakuwaku_provider::ServiceTier::Priority),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(body["reasoning"]["effort"], "provider-deep-thought");
+        assert_eq!(body["service_tier"], "priority");
+    }
+
+    #[test]
     fn omit_sampling_drops_temperature_from_codex_body() {
         let body = build_body(
             &crate::model::PromptContext::default(),

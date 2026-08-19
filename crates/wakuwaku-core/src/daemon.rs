@@ -563,6 +563,14 @@ impl Backend for WakuBackend {
                 let (provider, transport, auth, extra_auth_headers, capabilities) = self
                     .auth
                     .overlay_for_model(&provider_id, options.model.as_deref())?;
+                let reasoning_effort = self
+                    .auth
+                    .resolve_reasoning_effort(
+                        &provider_id,
+                        options.model.as_deref(),
+                        options.reasoning_effort.as_deref(),
+                    )
+                    .map(|(_, provider_value)| provider_value);
                 let service_tier = options.service_tier.filter(|_| capabilities.service_tier);
                 let options = DriverStartOptions {
                     provider,
@@ -570,7 +578,7 @@ impl Backend for WakuBackend {
                     mode: decode_enum(&options.mode)?,
                     interaction_mode: decode_enum(&options.interaction_mode)?,
                     model: options.model,
-                    reasoning_effort: options.reasoning_effort,
+                    reasoning_effort,
                     service_tier,
                     context_window: options.context_window,
                     snapshot,
@@ -592,7 +600,6 @@ impl Backend for WakuBackend {
                 let persist_driver = handle.clone();
                 let persist_store = Arc::clone(&self.task_store);
                 let persist_state = Arc::clone(&self.task_state);
-                let persist_writer = Arc::clone(&self.trajectory);
                 let persist_handoff = Arc::clone(&self.trace_handoff);
                 std::thread::Builder::new()
                     .name(format!("wakuwaku-daemon-events-{session_id}"))
@@ -602,7 +609,6 @@ impl Backend for WakuBackend {
                             persist_and_forward_driver_event(
                                 &persist_store,
                                 &persist_state,
-                                &persist_writer,
                                 &persist_handoff,
                                 session_id,
                                 event,
@@ -1151,10 +1157,10 @@ fn report_usage_persist_error(error: &anyhow::Error) {
     eprintln!("wakuwaku-daemon: {error}");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_and_forward_driver_event(
     store: &StateStore,
     task_state: &Mutex<PersistedState>,
-    _writer: &TrajectoryWriter,
     handoff: &TraceHandoff,
     session_id: Uuid,
     event: DriverEvent,
@@ -1200,7 +1206,7 @@ fn ensure_trajectory_initialized(
                 .find(|session| session.id == session_id)
             {
                 Some(session) => match store.hydrate(session) {
-                    Ok(()) => TrajectoryInitSource::LegacyPartial(session.clone()),
+                    Ok(()) => TrajectoryInitSource::LegacyPartial(Box::new(session.clone())),
                     Err(_) => TrajectoryInitSource::Empty,
                 },
                 None => TrajectoryInitSource::Empty,
@@ -1567,17 +1573,22 @@ fn handle_driver_command(
             let (provider, transport, auth, extra_auth_headers, capabilities) = backend
                 .auth
                 .overlay_for_model(&provider_id, options.model.as_deref())?;
+            let reasoning_effort = backend.auth.resolve_reasoning_effort(
+                &provider_id,
+                options.model.as_deref(),
+                options.reasoning_effort.as_deref(),
+            );
             let service_tier = options.service_tier.filter(|_| capabilities.service_tier);
             let applied_model = options.model.clone();
             let applied_mode = decode_enum(&options.mode)?;
             let applied_interaction = decode_enum(&options.interaction_mode)?;
-            let applied_reasoning = options.reasoning_effort.clone();
+            let applied_reasoning = reasoning_effort.as_ref().map(|(id, _)| id.clone());
             let applied_context = options.context_window.clone();
             let applied = driver.apply_options(SessionOptions {
                 mode: applied_mode,
                 interaction_mode: applied_interaction,
                 model: options.model,
-                reasoning_effort: options.reasoning_effort,
+                reasoning_effort: reasoning_effort.map(|(_, provider_value)| provider_value),
                 service_tier,
                 context_window: options.context_window,
                 reconfigure: Some(crate::driver::SessionReconfigure {
@@ -2687,7 +2698,6 @@ mod tests {
         state.sessions.clear();
         state.push_session(session);
         store.save(&mut state).unwrap();
-        let writer = TrajectoryWriter::open(store.path()).unwrap();
         let handoff = TraceHandoff::new();
         let task_state = Mutex::new(state);
         let event_id = Uuid::from_u128(77);
@@ -2697,7 +2707,6 @@ mod tests {
         persist_and_forward_driver_event(
             &store,
             &task_state,
-            &writer,
             &handoff,
             session_id,
             billed_usage(event_id),
@@ -2711,7 +2720,6 @@ mod tests {
         persist_and_forward_driver_event(
             &store,
             &task_state,
-            &writer,
             &handoff,
             session_id,
             DriverEvent::TurnFinished {
@@ -2783,7 +2791,6 @@ mod tests {
         persist_and_forward_driver_event(
             &store,
             &Mutex::new(state),
-            &writer,
             &handoff,
             session_id,
             DriverEvent::TurnFinished {

@@ -324,7 +324,10 @@ fn task_notification_tags_route_to_the_corresponding_task() {
     let tag = task_notification_tag(session_id);
 
     assert_eq!(task_id_from_notification_tag(&tag), Some(session_id));
-    assert_eq!(task_id_from_notification_tag("wakuwaku-task:not-a-uuid"), None);
+    assert_eq!(
+        task_id_from_notification_tag("wakuwaku-task:not-a-uuid"),
+        None
+    );
     assert_eq!(task_id_from_notification_tag(&session_id.to_string()), None);
 }
 

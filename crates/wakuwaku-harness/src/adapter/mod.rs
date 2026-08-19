@@ -348,11 +348,7 @@ mod tests {
         }
     }
 
-    fn assistant(
-        provider: &str,
-        model: &str,
-        content: Vec<ContentBlock>,
-    ) -> Message {
+    fn assistant(provider: &str, model: &str, content: Vec<ContentBlock>) -> Message {
         Message::Assistant(Arc::new(AssistantMessage {
             content,
             model: model.into(),
@@ -498,11 +494,53 @@ mod tests {
                 .iter()
                 .all(|item| item["type"] != "reasoning" && item.get("signature").is_none())
         );
-        let message = input
-            .iter()
-            .find(|item| item["type"] == "message")
-            .unwrap();
+        let message = input.iter().find(|item| item["type"] == "message").unwrap();
         assert_ne!(message["id"], "msg_foreign");
+    }
+
+    #[test]
+    fn responses_build_body_strips_real_xai_snapshot_metadata_cross_provider() {
+        let stored = ctx(vec![assistant(
+            "xai-oauth",
+            "grok-4.5",
+            vec![
+                ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "provider reasoning".into(),
+                    signature: Some(
+                        r#"{"id":"rs_50ac","status":"completed","type":"reasoning"}"#.into(),
+                    ),
+                    redacted: false,
+                }),
+                ContentBlock::Text(TextBlock {
+                    text: "prior answer".into(),
+                    signature: Some(r#"{"id":"msg_50ac","v":1}"#.into()),
+                }),
+            ],
+        )]);
+
+        let body = build_body(
+            ApiFormat::OpenAiResponses,
+            &stored,
+            &target("opencode-go", "grok-4.5"),
+            &RequestOptions::default(),
+        )
+        .unwrap();
+
+        let input = body["input"].as_array().unwrap();
+        assert!(input.iter().all(|item| item["type"] != "reasoning"));
+        let message = input.iter().find(|item| item["type"] == "message").unwrap();
+        assert_ne!(message["id"], "msg_50ac");
+        let Message::Assistant(original) = &stored.messages[0] else {
+            panic!("stored assistant");
+        };
+        assert!(matches!(
+            &original.content[0],
+            ContentBlock::Thinking(thinking) if thinking.signature.as_deref().is_some()
+        ));
+        assert!(matches!(
+            &original.content[1],
+            ContentBlock::Text(text) if text.signature.as_deref().is_some()
+        ));
     }
 
     #[test]

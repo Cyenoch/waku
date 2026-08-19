@@ -1,4 +1,6 @@
-import type { AgentSession, ProviderId, ServiceTier } from '@wakuwaku/client'
+import type { AgentSession, ModelCatalogEntry, ProviderId, ServiceTier } from '@wakuwaku/client'
+import { canonicalReasoningEffortForModel } from './reasoning-effort'
+import { serviceTierForModel } from './service-tier'
 
 const STORAGE_KEY = 'wakuwaku.composer-preferences.v2'
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>
@@ -79,6 +81,19 @@ export function rememberComposerSession(
 
 export function rememberedModelTraits(preferences: ComposerPreferences, provider: ProviderId, model: string): RememberedModelTraits | undefined {
   return preferences.modelTraits[modelKey(provider, model)]
+}
+
+export function selectedModelTraits(
+  model: Pick<ModelCatalogEntry, 'supported' | 'capabilities' | 'apiFormat' | 'reasoningEfforts' | 'defaultReasoningEffort'>,
+  remembered: RememberedModelTraits | undefined,
+): RememberedModelTraits {
+  const defaultEffort = canonicalReasoningEffortForModel(model, model.defaultReasoningEffort)
+  return {
+    reasoningEffort: canonicalReasoningEffortForModel(model, remembered?.reasoningEffort)
+      ?? defaultEffort,
+    serviceTier: serviceTierForModel(model, remembered?.serviceTier),
+    contextWindow: remembered?.contextWindow ?? null,
+  }
 }
 
 function parsePreferences(value: unknown): ComposerPreferences {

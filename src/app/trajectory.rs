@@ -205,6 +205,7 @@ impl TrajectorySessionState {
         self.rebuild_all();
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn set_page_response(
         &mut self,
         availability: TrajectoryAvailability,
@@ -279,6 +280,7 @@ impl TrajectorySessionState {
                     self.reset_generation(generation, revision);
                 }
                 self.revision = self.revision.max(revision);
+                let row = *row;
                 let record_id = row.record_id;
                 if let Some(pos) = self.records.iter().position(|r| r.record_id == record_id) {
                     self.records[pos] = row;
@@ -441,10 +443,10 @@ impl TrajectorySessionState {
                 .ledger_rows
                 .iter()
                 .position(|r| r.record_id == Some(record_id));
-        } else if let Some(idx) = self.selected_row_index {
-            if idx >= count {
-                self.selected_row_index = count.checked_sub(1);
-            }
+        } else if let Some(idx) = self.selected_row_index
+            && idx >= count
+        {
+            self.selected_row_index = count.checked_sub(1);
         }
     }
 }
@@ -655,14 +657,14 @@ pub fn compute_timeline_layout(records: &[TrajectoryRowSummary]) -> TimelineLayo
     // Build map from request_id -> (start_ms, end_ms) for Assistant reusing parent Request timing
     let mut request_timings: HashMap<Uuid, (i64, i64)> = HashMap::new();
     for r in records {
-        if r.kind == TrajectoryKind::Request {
-            if let Some(start) = r.started_at_ms {
-                let end = r
-                    .completed_at_ms
-                    .or_else(|| r.duration_ms.map(|d| start.saturating_add(d)))
-                    .unwrap_or(start);
-                request_timings.insert(r.record_id, (start, end));
-            }
+        if r.kind == TrajectoryKind::Request
+            && let Some(start) = r.started_at_ms
+        {
+            let end = r
+                .completed_at_ms
+                .or_else(|| r.duration_ms.map(|d| start.saturating_add(d)))
+                .unwrap_or(start);
+            request_timings.insert(r.record_id, (start, end));
         }
     }
 
@@ -890,17 +892,18 @@ pub fn build_ledger_rows(
                                     depth: 2,
                                 });
                             }
-                        } else if child.kind == TrajectoryKind::Tool {
-                            if show_tool_calls && child_matches {
-                                rows.push(TrajectoryLedgerRow {
-                                    key: format!("tool-{}", child.record_id),
-                                    record_id: Some(child.record_id),
-                                    kind: TrajectoryLedgerRowKind::Tool {
-                                        record: (*child).clone(),
-                                    },
-                                    depth: 2,
-                                });
-                            }
+                        } else if child.kind == TrajectoryKind::Tool
+                            && show_tool_calls
+                            && child_matches
+                        {
+                            rows.push(TrajectoryLedgerRow {
+                                key: format!("tool-{}", child.record_id),
+                                record_id: Some(child.record_id),
+                                kind: TrajectoryLedgerRowKind::Tool {
+                                    record: (*child).clone(),
+                                },
+                                depth: 2,
+                            });
                         }
                     }
 
@@ -1069,6 +1072,7 @@ mod tests {
         TrajectoryLiveUpdate, TrajectoryRowSummary, TrajectoryStatus,
     };
 
+    #[allow(clippy::too_many_arguments)]
     fn make_test_record(
         id: Uuid,
         turn_count: u32,
@@ -1425,7 +1429,7 @@ mod tests {
         state.apply_live_update(TrajectoryLiveUpdate::Upsert {
             generation: 1,
             revision: 2,
-            row: rec2,
+            row: Box::new(rec2),
         });
 
         assert_eq!(state.revision, 2);
@@ -1482,7 +1486,7 @@ mod tests {
         state.apply_live_update(TrajectoryLiveUpdate::Upsert {
             generation: 0, // Stale generation
             revision: 4,
-            row: rec2,
+            row: Box::new(rec2),
         });
         let ids: Vec<Uuid> = state.records.iter().map(|r| r.record_id).collect();
         assert_eq!(ids, vec![id1]);

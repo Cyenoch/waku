@@ -258,7 +258,7 @@ pub struct TrajectorySessionMeta {
 #[derive(Clone, Debug)]
 pub enum TrajectoryInitSource {
     Snapshot(SessionSnapshot),
-    LegacyPartial(AgentSession),
+    LegacyPartial(Box<AgentSession>),
     Empty,
 }
 
@@ -308,7 +308,7 @@ impl TrajectoryPage {
 /// Writer-facing submit/flush used by the recorder. Implemented by
 /// `TrajectoryWriter` so this module does not depend on the store.
 pub trait TrajectorySubmit: Send + Sync {
-    fn submit_batch(&self, batch: TrajectoryBatch);
+    fn submit_batch(&self, batch: TrajectoryBatch) -> Result<(), String>;
     fn flush_session(&self, session_id: Uuid) -> Result<i64, String>;
     fn mark_session_error(&self, session_id: Uuid, message: &str);
 }
@@ -486,11 +486,15 @@ fn recorder_loop(
                     .entry(session_id)
                     .or_insert_with(|| DriveRecorder::empty(session_id));
                 recorder.push(event);
-                submit_taken(&*submit, session_id, recorder.take_ops());
+                if submit_taken(&*submit, session_id, recorder.take_ops()).is_err() {
+                    failed.lock().insert(session_id);
+                }
             }
             RecorderCommand::Finish { session_id, ack } => {
-                if let Some(recorder) = sessions.get_mut(&session_id) {
-                    submit_taken(&*submit, session_id, recorder.finish_remaining());
+                if let Some(recorder) = sessions.get_mut(&session_id)
+                    && submit_taken(&*submit, session_id, recorder.finish_remaining()).is_err()
+                {
+                    failed.lock().insert(session_id);
                 }
                 if failed.lock().contains(&session_id) {
                     submit.mark_session_error(session_id, "trace recorder overflow or disconnect");
@@ -509,11 +513,15 @@ fn recorder_loop(
     }
 }
 
-fn submit_taken(submit: &dyn TrajectorySubmit, session_id: Uuid, ops: Vec<TrajectoryOp>) {
+fn submit_taken(
+    submit: &dyn TrajectorySubmit,
+    session_id: Uuid,
+    ops: Vec<TrajectoryOp>,
+) -> Result<(), String> {
     if ops.is_empty() {
-        return;
+        return Ok(());
     }
-    submit.submit_batch(TrajectoryBatch { session_id, ops });
+    submit.submit_batch(TrajectoryBatch { session_id, ops })
 }
 
 pub fn record_drive(
@@ -534,7 +542,6 @@ pub fn record_drive(
     }
     recorder.finish()
 }
-
 pub fn project_snapshot(session_id: Uuid, snapshot: &SessionSnapshot) -> TrajectoryBatch {
     let mut builder = LegacyBuilder::new(session_id);
     if let Some(system) = snapshot.system_prompt.as_deref() {
@@ -1045,8 +1052,9 @@ impl DriveRecorder {
             .with_status(status),
         );
         if let Some(cursor) = self.current_request.filter(|cursor| !cursor.completed) {
-            let completed_at_ms = self.now_unix;
-            let duration_ms = millis_between(cursor.started_at, self.now_instant);
+            let finished_at = Instant::now();
+            let completed_at_ms = self.unix_of(finished_at);
+            let duration_ms = millis_between(cursor.started_at, finished_at);
             if let Some(current) = self.current_request.as_mut() {
                 current.completed = true;
             }
@@ -1470,22 +1478,22 @@ fn assistant_detail(message: &AssistantMessage) -> Value {
     let blocks = message
         .content
         .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text(block) => Some(json!({
+        .map(|block| match block {
+            ContentBlock::Text(block) => json!({
                 "type": "text",
                 "text": block.text,
-            })),
-            ContentBlock::Thinking(block) => Some(json!({
+            }),
+            ContentBlock::Thinking(block) => json!({
                 "type": "thinking",
                 "text": block.thinking,
                 "redacted": block.redacted,
-            })),
-            ContentBlock::ToolCall(call) => Some(json!({
+            }),
+            ContentBlock::ToolCall(call) => json!({
                 "type": "tool_call",
                 "id": call.id,
                 "name": call.name,
                 "arguments": call.arguments,
-            })),
+            }),
         })
         .collect::<Vec<_>>();
     json!({
@@ -1639,7 +1647,7 @@ pub fn to_wire_live_updates(
             .map(|record| wakuwaku_protocol::TrajectoryLiveUpdate::Upsert {
                 generation,
                 revision,
-                row: to_row_summary(record),
+                row: Box::new(to_row_summary(record)),
             })
             .collect(),
         TrajectoryLiveOp::Remove { record_ids } => record_ids

@@ -12,10 +12,10 @@ mod transport;
 
 pub use auth_wire::{AuthMethod, AuthPhase, LoginMethod, ModelCatalog, ProviderAuthStatus};
 pub use catalog::{
-    CatalogError, ModelCatalogEntry, OpenCodeRoute, apply_opencode_route, apply_xai_policy,
-    is_grok_reasoning_effort_capable, is_openai_non_chat_model, is_xai_non_chat_model,
-    parse_anthropic_models_envelope, parse_codex_models_envelope, parse_openai_models_envelope,
-    route_opencode_model, xai_oauth_seed,
+    CatalogError, ModelCatalogEntry, OpenCodeRoute, ReasoningEffortOption, apply_opencode_route,
+    apply_xai_policy, is_grok_reasoning_effort_capable, is_openai_non_chat_model,
+    is_xai_non_chat_model, parse_anthropic_models_envelope, parse_codex_models_envelope,
+    parse_openai_models_envelope, route_opencode_model, xai_oauth_seed,
 };
 pub use endpoints::{AuthEndpoints, is_pinned_xai_token_endpoint};
 pub use preset::{PresetAuthKind, ProviderPreset};

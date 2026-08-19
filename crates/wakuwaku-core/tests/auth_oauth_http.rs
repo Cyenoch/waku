@@ -271,6 +271,8 @@ fn catalog_stub(provider: &str, id: &str, name: &str, base_url: &str) -> ModelCa
         context_window: 128_000,
         max_output_tokens: 8_192,
         reasoning: false,
+        reasoning_efforts: Vec::new(),
+        default_reasoning_effort: None,
         capabilities: ModelCapabilities::openai_compatible(
             wakuwaku_protocol::ApiFormat::OpenAiResponses,
         ),
@@ -1192,6 +1194,24 @@ fn expired_oauth_refreshes_before_second_prompt() {
             context_window: 128_000,
             max_output_tokens: 8_192,
             reasoning: true,
+            reasoning_efforts: vec![
+                wakuwaku_protocol::ReasoningEffortOption {
+                    id: "low".into(),
+                    provider_value: "low".into(),
+                    label: "Low".into(),
+                },
+                wakuwaku_protocol::ReasoningEffortOption {
+                    id: "medium".into(),
+                    provider_value: "medium".into(),
+                    label: "Medium".into(),
+                },
+                wakuwaku_protocol::ReasoningEffortOption {
+                    id: "high".into(),
+                    provider_value: "high".into(),
+                    label: "High".into(),
+                },
+            ],
+            default_reasoning_effort: Some("medium".into()),
             capabilities: ModelCapabilities::codex(),
             supported: true,
             unsupported_reason: None,

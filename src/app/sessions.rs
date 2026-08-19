@@ -847,14 +847,47 @@ impl Waku {
         );
     }
 
+    pub(super) fn set_reasoning_effort(&mut self, effort: String, cx: &mut Context<Self>) {
+        let Some(session) = self.selected_session() else {
+            return;
+        };
+        let session_id = session.id;
+        let provider = session.provider.clone();
+        let Some(model) = self.model_for_session(session).map(str::to_owned) else {
+            return;
+        };
+        let allowed = super::runtime::gated_reasoning_effort(
+            Some(&effort),
+            super::runtime::catalog_entry_for(&self.model_catalogs, &provider, &model),
+        )
+        .is_some();
+        if !allowed {
+            return;
+        }
+        let context_window = self
+            .selected_session()
+            .and_then(|session| session.context_window.clone());
+        let Some(session) = self.selected_session_mut() else {
+            return;
+        };
+        session.reasoning_effort = Some(effort.clone());
+        self.state.last_reasoning_effort = Some(effort.clone());
+        self.state
+            .remember_model_traits(provider, &model, Some(effort), context_window);
+        self.apply_session_options(session_id, cx);
+        self.save();
+        cx.notify();
+    }
+
     pub(super) fn set_service_tier(
         &mut self,
-        tier: wakuwaku_client::ServiceTier,
+        tier: Option<wakuwaku_client::ServiceTier>,
         cx: &mut Context<Self>,
     ) {
         let Some(session) = self.selected_session() else {
             return;
         };
+        let session_id = session.id;
         let provider = session.provider.clone();
         let Some(model) = self.model_for_session(session).map(str::to_owned) else {
             return;
@@ -865,12 +898,13 @@ impl Waku {
         let Some(session) = self.selected_session_mut() else {
             return;
         };
-        if !allowed {
-            session.service_tier = None;
+        let tier = tier.filter(|_| allowed);
+        if session.service_tier == tier {
             return;
         }
-        session.service_tier = Some(tier);
-        self.state.last_service_tier = Some(tier);
+        session.service_tier = tier;
+        self.state.last_service_tier = tier;
+        self.apply_session_options(session_id, cx);
         self.save();
         cx.notify();
     }
@@ -897,15 +931,22 @@ impl Waku {
         };
 
         self.remember_selected_model_traits();
-        let (reasoning_effort, context_window) =
+        let entry = super::runtime::catalog_entry_for(&self.model_catalogs, &provider, &model);
+        let (remembered_reasoning_effort, context_window) =
             self.state.model_traits_for(provider.clone(), &model);
+        let reasoning_effort =
+            super::runtime::gated_reasoning_effort(remembered_reasoning_effort.as_deref(), entry)
+                .or_else(|| {
+                    entry
+                        .filter(|entry| {
+                            super::runtime::catalog_allows_reasoning_effort(Some(entry))
+                        })
+                        .and_then(|entry| entry.default_reasoning_effort.as_deref())
+                })
+                .map(str::to_owned);
         let service_tier = super::runtime::gated_service_tier(
             self.state.last_service_tier,
-            super::runtime::catalog_allows_service_tier(super::runtime::catalog_entry_for(
-                &self.model_catalogs,
-                &provider,
-                &model,
-            )),
+            super::runtime::catalog_allows_service_tier(entry),
         );
         if let Some(session) = self.selected_session_mut() {
             session.provider = provider.clone();

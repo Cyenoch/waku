@@ -149,7 +149,6 @@ impl<T: TraceSink + ?Sized> TraceSink for &mut T {
     }
 }
 
-
 /// Growable in-process buffer used by the embedded driver and tests.
 #[derive(Debug, Default)]
 pub struct TraceBuffer {

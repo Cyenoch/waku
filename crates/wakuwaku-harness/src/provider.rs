@@ -233,11 +233,17 @@ fn route_and_auth_headers(
         );
         headers.insert(
             "originator",
-            header_value(wakuwaku_provider::AuthEndpoints::CODEX_ORIGINATOR, "originator")?,
+            header_value(
+                wakuwaku_provider::AuthEndpoints::CODEX_ORIGINATOR,
+                "originator",
+            )?,
         );
         headers.insert(
             "version",
-            header_value(wakuwaku_provider::AuthEndpoints::client_version(), "version")?,
+            header_value(
+                wakuwaku_provider::AuthEndpoints::client_version(),
+                "version",
+            )?,
         );
     }
     for (name, value) in &provider.extra_auth_headers {

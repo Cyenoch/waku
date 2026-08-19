@@ -5,6 +5,7 @@ import type {
   BranchSnapshot,
   ComposerDraft,
   MessageAttachment,
+  ModelCatalogEntry,
   Project,
 } from '@wakuwaku/client'
 import {
@@ -40,6 +41,7 @@ import {
 } from '@/lib/daemon-api'
 import { useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
+import { canonicalReasoningEffortForModel } from '@/lib/reasoning-effort'
 import {
   composerAutocompleteRows,
   detectComposerTrigger,
@@ -51,6 +53,8 @@ import {
 import {
   browserComposerPreferenceStorage,
   readComposerPreferences,
+  rememberedModelTraits,
+  selectedModelTraits,
   rememberComposerSession,
   writeComposerPreferences,
 } from '@/lib/composer-preferences'
@@ -65,7 +69,7 @@ import { usePrimaryShortcut } from '@/lib/platform'
 import { isProjectlessProject, projectDisplayName } from '@/lib/project-presentation'
 import { useRuntime } from '@/lib/runtime-context'
 import { sessionHasStarted } from '@/lib/sidebar-presentation'
-import { SERVICE_TIER_OPTIONS, serviceTierForModel } from '@/lib/service-tier'
+import { fastModeEnabled, serviceTierForModel, toggleFastMode } from '@/lib/service-tier'
 import { cn } from '@/lib/utils'
 
 type Translator = (key: string, params?: Record<string, string | number>) => string
@@ -76,29 +80,6 @@ function preserveComposerFocusOnMouseDown(event: ReactMouseEvent<HTMLElement>) {
   if (event.button === 0 && event.currentTarget.contains(event.target as Node)) {
     event.preventDefault()
   }
-}
-
-const MODEL_OPTION_KEYS: Record<string, string> = {
-  none: 'model_option.none',
-  minimal: 'model_option.minimal',
-  low: 'model_option.low',
-  medium: 'model_option.medium',
-  high: 'model_option.high',
-  xhigh: 'model_option.extra_high',
-  extraHigh: 'model_option.extra_high',
-  extra_high: 'model_option.extra_high',
-  max: 'model_option.max',
-  '200k': 'model_option.context_200k',
-  '1m': 'model_option.context_1m',
-  ultra: 'model_option.ultra',
-  ultracode: 'model_option.ultracode',
-  auto: 'model_option.auto',
-  fast: 'model_option.fast',
-}
-
-function modelOptionLabel(id: string, fallback: string, t: Translator) {
-  const key = MODEL_OPTION_KEYS[id]
-  return key ? t(key) : fallback
 }
 
 export function Composer({
@@ -441,14 +422,17 @@ export function Composer({
       setUploading(false)
     }
   }
-  function savePatch(patch: Partial<AgentSession>) {
+  function savePatch(
+    patch: Partial<AgentSession>,
+    selectedModel?: Pick<ModelCatalogEntry, 'supported' | 'capabilities' | 'apiFormat' | 'reasoningEfforts' | 'defaultReasoningEffort'>,
+  ) {
     const candidate = { ...session, ...patch }
+    const model = selectedModel
+      ?? modelCatalog.data?.models.find((entry) => entry.id === candidate.model)
     const next = {
       ...candidate,
-      service_tier: serviceTierForModel(
-        modelCatalog.data?.models.find((model) => model.id === candidate.model),
-        candidate.service_tier,
-      ),
+      service_tier: serviceTierForModel(model, candidate.service_tier),
+      reasoning_effort: canonicalReasoningEffortForModel(model, candidate.reasoning_effort),
       updated_at: Math.floor(Date.now() / 1_000),
     }
     if (config && next.model) {
@@ -669,10 +653,27 @@ export function Composer({
               returnFocus={composerInput}
               session={session}
               onChange={(provider, model) => {
-                savePatch({ provider, model: model.id })
+                const preferences = readComposerPreferences(
+                  browserComposerPreferenceStorage(),
+                  config?.address ?? 'disconnected',
+                )
+                const remembered = rememberedModelTraits(preferences, provider, model.id)
+                const traits = selectedModelTraits(model, remembered)
+                savePatch({
+                  provider,
+                  model: model.id,
+                  reasoning_effort: traits.reasoningEffort,
+                  service_tier: traits.serviceTier,
+                  context_window: traits.contextWindow,
+                }, model)
               }}
             />
-            <ServiceTierControl
+            <ReasoningEffortControl
+              model={modelCatalog.data?.models.find((candidate) => candidate.id === session.model)}
+              session={session}
+              onPatch={savePatch}
+            />
+            <FastModeControl
               model={modelCatalog.data?.models.find((candidate) => candidate.id === session.model)}
               session={session}
               onPatch={savePatch}
@@ -1218,45 +1219,67 @@ function InteractionModeControl({
   )
 }
 
-function ServiceTierControl({
+function ReasoningEffortControl({
   model,
   session,
   onPatch,
 }: {
-  model: Parameters<typeof serviceTierForModel>[0]
+  model: ModelCatalogEntry | undefined
   session: AgentSession
   onPatch: (patch: Partial<AgentSession>) => void
 }) {
   const { t } = useI18n()
-  const selected = serviceTierForModel(model, session.service_tier)
-  const selectedOption = SERVICE_TIER_OPTIONS.find((option) => option.value === selected) ?? null
-  if (!model?.capabilities.serviceTier) return null
+  const efforts = model?.reasoningEfforts ?? []
+  if (!model?.supported || !model.capabilities.reasoningEffort || !efforts.length) return null
+  const selected = efforts.some((effort) => effort.id === session.reasoning_effort)
+    ? session.reasoning_effort!
+    : model.defaultReasoningEffort && efforts.some((effort) => effort.id === model.defaultReasoningEffort)
+      ? model.defaultReasoningEffort
+      : efforts[0]!.id
+  const selectedLabel = efforts.find((effort) => effort.id === selected)?.label ?? selected
   return (
     <ControlMenu
-      caret={false}
-      icon="gauge"
-      items={[
-        {
-          id: 'none',
-          label: t('model_option.none'),
-          description: t('model_option.none_description'),
-          selected: selected === null,
-          onSelect: () => onPatch({ service_tier: null }),
-        },
-        ...SERVICE_TIER_OPTIONS.map((option) => ({
-          id: option.value,
-          label: t(option.labelKey),
-          description: t(option.descriptionKey),
-          selected: option.value === selected,
-          onSelect: () => onPatch({ service_tier: option.value }),
-        })),
-      ]}
-      label={t('models.service_tier')}
-      menuClassName="w-[260px]"
+      icon="sparkle"
+      items={efforts.map((effort) => ({
+        id: effort.id,
+        label: effort.label,
+        selected: effort.id === selected,
+        onSelect: () => onPatch({ reasoning_effort: effort.id }),
+      }))}
+      label={t('models.reasoning')}
+      menuClassName="w-[220px]"
       selectionMode="choice"
     >
-      <span className="truncate">{t('models.service_tier')}: {selectedOption ? t(selectedOption.labelKey) : t('model_option.none')}</span>
+      <span className="truncate">{selectedLabel}</span>
     </ControlMenu>
+  )
+}
+
+function FastModeControl({
+  model,
+  session,
+  onPatch,
+}: {
+  model: ModelCatalogEntry | undefined
+  session: AgentSession
+  onPatch: (patch: Partial<AgentSession>) => void
+}) {
+  const { t } = useI18n()
+  if (!model?.supported || !model.capabilities.serviceTier) return null
+  const enabled = fastModeEnabled(model, session.service_tier)
+  return (
+    <button
+      aria-pressed={enabled}
+      className={cn(
+        'flex h-6 shrink-0 items-center gap-1.5 rounded-md px-[7px] text-[11.5px] text-[var(--text-secondary)] outline-none hover:bg-accent focus-visible:ring-1 focus-visible:ring-ring',
+        enabled && 'bg-accent text-ring',
+      )}
+      type="button"
+      onClick={() => onPatch({ service_tier: toggleFastMode(model, session.service_tier) })}
+    >
+      <WakuIcon className={cn('size-[10.5px] text-[var(--text-tertiary)]', enabled && 'text-ring')} name="zap" />
+      {t('models.fast_mode')}
+    </button>
   )
 }
 

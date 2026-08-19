@@ -58,6 +58,7 @@ export type { ProviderId } from "./ProviderId";
 export type { ProviderSlice } from "./ProviderSlice";
 export type { QueuedMessage } from "./QueuedMessage";
 export type { ReasoningBlock } from "./ReasoningBlock";
+export type { ReasoningEffortOption } from "./ReasoningEffortOption";
 export type { ReplayCursor } from "./ReplayCursor";
 export type { ReportedCommand } from "./ReportedCommand";
 export type { Request } from "./Request";

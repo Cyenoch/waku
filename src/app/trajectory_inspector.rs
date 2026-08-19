@@ -363,7 +363,7 @@ impl Waku {
                                 if let Some(state) = sessions.get_mut(&session_id) {
                                     state
                                         .detail_cursors
-                                        .insert((record_id, section), next_offset as u64);
+                                        .insert((record_id, section), next_offset);
                                     cx.notify();
                                 }
                             }))
@@ -518,39 +518,41 @@ impl Waku {
                 }
                 "left" => {
                     let idx = state.json_tree_state.selected_index;
-                    if let Some(node) = state.json_tree_state.flattened_nodes.get(idx) {
-                        if node.expandable && node.expanded {
-                            state.json_tree_state.expanded_paths.remove(&node.path);
-                            cx.notify();
-                        }
+                    if let Some(node) = state.json_tree_state.flattened_nodes.get(idx)
+                        && node.expandable
+                        && node.expanded
+                    {
+                        state.json_tree_state.expanded_paths.remove(&node.path);
+                        cx.notify();
                     }
                 }
                 "right" => {
                     let idx = state.json_tree_state.selected_index;
-                    if let Some(node) = state.json_tree_state.flattened_nodes.get(idx) {
-                        if node.expandable && !node.expanded {
-                            state
-                                .json_tree_state
-                                .expanded_paths
-                                .insert(node.path.clone());
-                            cx.notify();
-                        }
+                    if let Some(node) = state.json_tree_state.flattened_nodes.get(idx)
+                        && node.expandable
+                        && !node.expanded
+                    {
+                        state
+                            .json_tree_state
+                            .expanded_paths
+                            .insert(node.path.clone());
+                        cx.notify();
                     }
                 }
                 "enter" | "space" => {
                     let idx = state.json_tree_state.selected_index;
-                    if let Some(node) = state.json_tree_state.flattened_nodes.get(idx) {
-                        if node.expandable {
-                            if node.expanded {
-                                state.json_tree_state.expanded_paths.remove(&node.path);
-                            } else {
-                                state
-                                    .json_tree_state
-                                    .expanded_paths
-                                    .insert(node.path.clone());
-                            }
-                            cx.notify();
+                    if let Some(node) = state.json_tree_state.flattened_nodes.get(idx)
+                        && node.expandable
+                    {
+                        if node.expanded {
+                            state.json_tree_state.expanded_paths.remove(&node.path);
+                        } else {
+                            state
+                                .json_tree_state
+                                .expanded_paths
+                                .insert(node.path.clone());
                         }
+                        cx.notify();
                     }
                 }
                 _ => {}

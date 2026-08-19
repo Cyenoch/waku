@@ -691,7 +691,63 @@ impl Waku {
         .into_any_element()
     }
 
-    pub(super) fn render_service_tier_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_reasoning_effort_control(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let session = self.selected_session()?;
+        let model = self.model_for_session(session)?;
+        let entry =
+            super::runtime::catalog_entry_for(&self.model_catalogs, &session.provider, model)?;
+        if !super::runtime::catalog_allows_reasoning_effort(Some(entry)) {
+            return None;
+        }
+        let efforts = entry.reasoning_efforts.clone();
+        let selected = super::runtime::gated_reasoning_effort(
+            session.reasoning_effort.as_deref(),
+            Some(entry),
+        )
+        .or(entry.default_reasoning_effort.as_deref())
+        .filter(|effort| efforts.iter().any(|candidate| candidate.id == *effort))
+        .unwrap_or(efforts[0].id.as_str())
+        .to_owned();
+        let label = efforts
+            .iter()
+            .find(|effort| effort.id == selected)
+            .map(|effort| effort.label.as_str())
+            .unwrap_or(selected.as_str())
+            .to_owned();
+        let theme = Theme::current(cx);
+        let weak = cx.entity().downgrade();
+        let handle = self.menu_handle("reasoning-effort", cx);
+        Some(dropdown_menu(
+            MenuChip::new("reasoning-effort")
+                .icon("icons/sparkle.svg", theme.text_tertiary)
+                .label(label)
+                .caret(true)
+                .selected(handle.is_open()),
+            "reasoning-effort-menu",
+            &handle,
+            MenuAlign::AboveLeft,
+            move |_| {
+                efforts
+                    .iter()
+                    .map(|effort| {
+                        let weak = weak.clone();
+                        let next = effort.id.clone();
+                        MenuItem::new(effort.label.clone(), move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_reasoning_effort(next.clone(), cx);
+                            });
+                        })
+                        .selected(effort.id == selected)
+                    })
+                    .collect()
+            },
+        ))
+    }
+
+    pub(super) fn render_fast_mode_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let session = self.selected_session()?;
         let model = self.model_for_session(session)?;
         if !super::runtime::catalog_allows_service_tier(super::runtime::catalog_entry_for(
@@ -701,32 +757,16 @@ impl Waku {
         )) {
             return None;
         }
-        let tier = session
-            .service_tier
-            .unwrap_or(wakuwaku_client::ServiceTier::Default);
-        let next = wakuwaku_client::ServiceTier::ALL[(wakuwaku_client::ServiceTier::ALL
-            .iter()
-            .position(|candidate| *candidate == tier)
-            .unwrap_or(0)
-            + 1)
-            % wakuwaku_client::ServiceTier::ALL.len()];
+        let enabled = session.service_tier == Some(wakuwaku_client::ServiceTier::Priority);
         let weak = cx.entity().downgrade();
         let key_weak = weak.clone();
+        let next = (!enabled).then_some(wakuwaku_client::ServiceTier::Priority);
+        let theme = Theme::current(cx);
         Some(
             div()
-                .id("service-tier")
+                .id("fast-mode-toggle")
                 .tab_index(0)
-                .focus_visible(|style| style.border_1().border_color(Theme::current(cx).accent))
-                .px(px(7.0))
-                .h(px(24.0))
-                .rounded(px(6.0))
-                .text_size(px(11.5))
-                .text_color(Theme::current(cx).text_secondary)
-                .child(SharedString::from(format!(
-                    "{}: {}",
-                    tr!("models.service_tier"),
-                    tier
-                )))
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
                 .on_click(move |_, _, cx| {
                     let _ = weak.update(cx, |this, cx| this.set_service_tier(next, cx));
                 })
@@ -738,6 +778,20 @@ impl Waku {
                         cx.stop_propagation();
                     }
                 })
+                .child(
+                    MenuChip::new("fast-mode")
+                        .icon(
+                            "icons/zap.svg",
+                            if enabled {
+                                theme.accent
+                            } else {
+                                theme.text_tertiary
+                            },
+                        )
+                        .label(tr!("models.fast_mode"))
+                        .caret(false)
+                        .selected(enabled),
+                )
                 .into_any_element(),
         )
     }
@@ -1793,7 +1847,8 @@ impl Waku {
                         .text_size(px(11.5))
                         .line_height(px(14.0))
                         .child(self.render_provider_model_control(cx))
-                        .children(self.render_service_tier_control(cx))
+                        .children(self.render_reasoning_effort_control(cx))
+                        .children(self.render_fast_mode_control(cx))
                         .child(self.render_access_control(cx))
                         .child(self.render_interaction_mode_control(cx))
                         .child(div().flex_1())
@@ -3143,6 +3198,8 @@ mod catalog_picker_behavior_tests {
                     context_window: 128_000,
                     max_output_tokens: 16_384,
                     reasoning: false,
+                    reasoning_efforts: Vec::new(),
+                    default_reasoning_effort: None,
                     capabilities: ModelCapabilities::openai_api(ApiFormat::OpenAiResponses),
                     supported,
                     unsupported_reason: None,

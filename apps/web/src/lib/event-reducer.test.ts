@@ -191,7 +191,7 @@ function event(kind: string, payload: unknown): SequencedEvent {
     runtimeId: 'runtime',
     epoch: 'epoch',
     sequence: 1,
-    event: { kind, payload: payload as never },
+    payload: { type: 'driver', event: { kind, payload: payload as never } },
   }
 }
 

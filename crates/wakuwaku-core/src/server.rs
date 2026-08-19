@@ -286,7 +286,7 @@ impl Hub {
                 journal.pop_front();
             }
         }
-        let message = ServerMessage::Event(event);
+        let message = ServerMessage::Event(Box::new(event));
         state
             .subscribers
             .retain(|_, subscriber| subscriber.send(message.clone()).is_ok());
@@ -305,7 +305,7 @@ impl Hub {
                 .map(|cursor| cursor.sequence)
                 .unwrap_or_default();
             for event in events.iter().filter(|event| event.sequence > sequence) {
-                let _ = sender.send(ServerMessage::Event(event.clone()));
+                let _ = sender.send(ServerMessage::Event(Box::new(event.clone())));
             }
         }
         let id = state.next_subscriber_id;

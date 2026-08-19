@@ -344,7 +344,7 @@ pub enum ServerMessage {
         request_id: Uuid,
         outcome: ResponseOutcome,
     },
-    Event(SequencedEvent),
+    Event(Box<SequencedEvent>),
     /// The daemon-owned project/task catalog changed through another client.
     /// Clients should invalidate their lightweight task-state snapshot; live
     /// runtime events continue through [`Self::Event`].

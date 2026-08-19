@@ -1385,6 +1385,15 @@ impl Waku {
         )
     }
 
+    pub(super) fn reasoning_effort_for_session(&self, session: &AgentSession) -> Option<String> {
+        let model = self.model_for_session(session)?;
+        provider_reasoning_effort(
+            session.reasoning_effort.as_deref(),
+            catalog_entry_for(&self.model_catalogs, &session.provider, model),
+        )
+        .map(str::to_owned)
+    }
+
     pub(super) fn session_options(&self, session: &AgentSession) -> SessionOptions {
         SessionOptions {
             mode: session.runtime_mode,
@@ -1395,7 +1404,7 @@ impl Waku {
                 &self.model_catalogs,
             )
             .map(|(_, model)| model),
-            reasoning_effort: session.reasoning_effort.clone(),
+            reasoning_effort: self.reasoning_effort_for_session(session),
             service_tier: self.service_tier_for_session(session),
             context_window: session.context_window.clone(),
         }
@@ -2234,6 +2243,37 @@ pub(crate) fn catalog_allows_service_tier(
     entry.is_some_and(|entry| entry.supported && entry.capabilities.service_tier)
 }
 
+pub(crate) fn catalog_allows_reasoning_effort(
+    entry: Option<&wakuwaku_client::ModelCatalogEntry>,
+) -> bool {
+    entry.is_some_and(|entry| {
+        entry.supported
+            && entry.capabilities.reasoning_effort
+            && !entry.reasoning_efforts.is_empty()
+    })
+}
+
+pub(crate) fn gated_reasoning_effort<'a>(
+    effort: Option<&'a str>,
+    entry: Option<&wakuwaku_client::ModelCatalogEntry>,
+) -> Option<&'a str> {
+    let entry = entry.filter(|entry| catalog_allows_reasoning_effort(Some(entry)))?;
+    effort.filter(|effort| {
+        entry
+            .reasoning_efforts
+            .iter()
+            .any(|candidate| candidate.id == *effort)
+    })
+}
+
+pub(crate) fn provider_reasoning_effort<'a>(
+    effort: Option<&str>,
+    entry: Option<&'a wakuwaku_client::ModelCatalogEntry>,
+) -> Option<&'a str> {
+    let entry = entry.filter(|entry| catalog_allows_reasoning_effort(Some(entry)))?;
+    entry.provider_reasoning_effort(effort?)
+}
+
 pub(crate) fn gated_service_tier(
     tier: Option<wakuwaku_client::ServiceTier>,
     catalog_allows: bool,
@@ -2297,8 +2337,11 @@ pub(super) fn provider_endpoint_for_start(
 }
 
 #[cfg(test)]
-mod service_tier_tests {
-    use super::{catalog_allows_service_tier, gated_service_tier};
+mod model_options_tests {
+    use super::{
+        catalog_allows_reasoning_effort, catalog_allows_service_tier, gated_reasoning_effort,
+        gated_service_tier, provider_reasoning_effort,
+    };
     use wakuwaku_client::{
         ApiFormat, ModelCapabilities, ModelCatalogEntry, ProviderId, ServiceTier, TransportProfile,
         UnsupportedReason,
@@ -2315,6 +2358,8 @@ mod service_tier_tests {
             context_window: 128_000,
             max_output_tokens: 16_384,
             reasoning: false,
+            reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
             capabilities: if service_tier {
                 ModelCapabilities::openai_api(ApiFormat::OpenAiResponses)
             } else {
@@ -2345,6 +2390,39 @@ mod service_tier_tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn reasoning_effort_requires_a_supported_catalog_choice() {
+        let mut model = entry(false, true);
+        model.reasoning_efforts = vec![
+            wakuwaku_client::ReasoningEffortOption {
+                id: "low".into(),
+                provider_value: "provider-fast".into(),
+                label: "Quick".into(),
+            },
+            wakuwaku_client::ReasoningEffortOption {
+                id: "high".into(),
+                provider_value: "provider-deep".into(),
+                label: "Thorough".into(),
+            },
+        ];
+        assert!(catalog_allows_reasoning_effort(Some(&model)));
+        assert_eq!(
+            gated_reasoning_effort(Some("high"), Some(&model)),
+            Some("high")
+        );
+        assert_eq!(
+            provider_reasoning_effort(Some("high"), Some(&model)),
+            Some("provider-deep")
+        );
+        assert_eq!(gated_reasoning_effort(Some("medium"), Some(&model)), None);
+        assert_eq!(
+            provider_reasoning_effort(Some("medium"), Some(&model)),
+            None
+        );
+        model.supported = false;
+        assert!(!catalog_allows_reasoning_effort(Some(&model)));
     }
 
     #[test]

@@ -1458,18 +1458,20 @@ function TerminalPanel({
     let disposed = false
     titleScanner.current = new TerminalTitleScanner()
     const unsubscribe = client.subscribe(terminalId, terminalId, (event) => {
-      if (event.event.kind === 'terminalOutput') {
-        const payload = event.event.payload as { data?: string }
+      if (event.payload.type !== 'driver') return
+      const driverEvent = event.payload.event
+      if (driverEvent.kind === 'terminalOutput') {
+        const payload = driverEvent.payload as { data?: string }
         if (!payload.data) return
         const bytes = decodeBase64(payload.data)
         const title = titleScanner.current.feed(bytes)
         if (title) onTitle(title)
         if (ready.current) write(bytes)
         else queuedOutput.current.push(bytes)
-      } else if (event.event.kind === 'terminalExited') {
+      } else if (driverEvent.kind === 'terminalExited') {
         setExited(true)
-      } else if (event.event.kind === 'terminalError') {
-        setError(typeof event.event.payload === 'string' ? event.event.payload : t('terminal.transport_failed'))
+      } else if (driverEvent.kind === 'terminalError') {
+        setError(typeof driverEvent.payload === 'string' ? driverEvent.payload : t('terminal.transport_failed'))
       }
     })
 

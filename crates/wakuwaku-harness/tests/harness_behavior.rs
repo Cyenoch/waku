@@ -939,9 +939,13 @@ async fn agent_executes_tools_concurrently_but_records_results_in_source_order()
     let mut session = wakuwaku_harness::Session::new(None);
     let mut events = Vec::new();
     let outcome = harness
-        .run(&mut session, "go", CancelToken::new(), |event| {
-            events.push(event)
-        }, ())
+        .run(
+            &mut session,
+            "go",
+            CancelToken::new(),
+            |event| events.push(event),
+            (),
+        )
         .await
         .unwrap();
     assert!(matches!(outcome, RunOutcome::Completed));
@@ -982,11 +986,17 @@ async fn agent_emits_tool_finished_in_completion_order_before_slow_tools_end() {
     let (tx, rx) = std::sync::mpsc::channel();
     let started = std::time::Instant::now();
     harness
-        .run(&mut session, "go", CancelToken::new(), move |event| {
-            if let AgentEvent::ToolFinished { result } = &event {
-                let _ = tx.send((result.tool_call_id.clone(), started.elapsed()));
-            }
-        }, ())
+        .run(
+            &mut session,
+            "go",
+            CancelToken::new(),
+            move |event| {
+                if let AgentEvent::ToolFinished { result } = &event {
+                    let _ = tx.send((result.tool_call_id.clone(), started.elapsed()));
+                }
+            },
+            (),
+        )
         .await
         .unwrap();
     let first = rx.recv().unwrap();
@@ -1015,9 +1025,13 @@ async fn agent_tool_finished_carries_exact_success_and_failure_results() {
     let mut events = Vec::new();
 
     let outcome = harness
-        .run(&mut session, "go", CancelToken::new(), |event| {
-            events.push(event)
-        }, ())
+        .run(
+            &mut session,
+            "go",
+            CancelToken::new(),
+            |event| events.push(event),
+            (),
+        )
         .await
         .unwrap();
 
@@ -1145,7 +1159,8 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn temp_root() -> PathBuf {
     let number = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("wakuwaku-harness-{}-{number}", std::process::id()));
+    let root =
+        std::env::temp_dir().join(format!("wakuwaku-harness-{}-{number}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     root
 }
@@ -1344,7 +1359,12 @@ async fn session_steering_injects_each_message_before_its_llm_call() {
 
     let mut events = Vec::new();
     let outcome = harness
-        .continue_run(&mut session, CancelToken::new(), |event| events.push(event), ())
+        .continue_run(
+            &mut session,
+            CancelToken::new(),
+            |event| events.push(event),
+            (),
+        )
         .await
         .unwrap();
 
@@ -1396,12 +1416,18 @@ async fn steering_queued_at_run_end_is_preserved_for_the_next_run() {
     let queued_id_from_sink = Arc::clone(&queued_id);
 
     harness
-        .run_text(&mut session, "first", CancelToken::new(), move |event| {
-            if matches!(event, AgentEvent::RunEnded { .. }) {
-                let id = steering.steer_text("follow-up after run end");
-                *queued_id_from_sink.lock().unwrap() = Some(id);
-            }
-        }, ())
+        .run_text(
+            &mut session,
+            "first",
+            CancelToken::new(),
+            move |event| {
+                if matches!(event, AgentEvent::RunEnded { .. }) {
+                    let id = steering.steer_text("follow-up after run end");
+                    *queued_id_from_sink.lock().unwrap() = Some(id);
+                }
+            },
+            (),
+        )
         .await
         .unwrap();
 
@@ -1410,7 +1436,12 @@ async fn steering_queued_at_run_end_is_preserved_for_the_next_run() {
 
     let mut events = Vec::new();
     harness
-        .continue_run(&mut session, CancelToken::new(), |event| events.push(event), ())
+        .continue_run(
+            &mut session,
+            CancelToken::new(),
+            |event| events.push(event),
+            (),
+        )
         .await
         .unwrap();
     assert!(

@@ -1616,7 +1616,8 @@ mod tests {
     fn download_names_do_not_overwrite() {
         // Pure-logic check of the uniquing shape; the filesystem probe path is
         // exercised by using a directory that cannot collide.
-        let unique = std::env::temp_dir().join(format!("wakuwaku-download-{}", uuid::Uuid::new_v4()));
+        let unique =
+            std::env::temp_dir().join(format!("wakuwaku-download-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&unique).unwrap();
         std::fs::write(unique.join("file.txt"), "x").unwrap();
         let (stem, extension) = match "file.txt".rsplit_once('.') {
